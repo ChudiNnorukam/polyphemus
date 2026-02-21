@@ -1,0 +1,14 @@
+{
+  "_note": "Update this file when intentionally changing config. Mismatch = WARN at startup.",
+  "_updated": "2026-02-20",
+  "warn": {
+    "ACCUM_ASSETS": "BTC,ETH",
+    "ACCUM_MAX_SIDE_PRICE": "0.58",
+    "ACCUM_MAX_PAIR_COST": "0.995",
+    "ACCUM_MAX_CONCURRENT": "3",
+    "ACCUM_MAX_SHARES": "60",
+    "ACCUM_HEDGE_DEADLINE_SECS": "120",
+    "ACCUM_REPRICE_LIMIT": "15",
+    "ENABLE_ACCUMULATOR": "true"
+  }
+}

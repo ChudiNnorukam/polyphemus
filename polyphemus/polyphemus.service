@@ -1,0 +1,15 @@
+[Unit]
+Description=Polyphemus Polymarket Signal Bot
+After=network.target
+
+[Service]
+Type=notify
+WorkingDirectory=/opt/polyphemus
+ExecStart=/opt/polyphemus/venv/bin/python -m polyphemus.main
+Restart=always
+RestartSec=10
+WatchdogSec=120
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

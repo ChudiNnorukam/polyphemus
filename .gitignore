@@ -1,0 +1,43 @@
+# Secrets — NEVER commit these
+*.env
+.env.*
+*env_backup*
+*_backup*.txt
+chudi-bot.env
+
+# Databases (contain real trade data)
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# macOS
+.DS_Store
+.DS_Store?
+
+# IDE
+.vscode/
+.idea/
+
+# Claude / OMC internal
+.claude/
+.omc/
+
+# Research output (may contain wallet addresses)
+dario_output/
+
+# Data directories (live bot state)
+data/
+
+# Local paths / temp scripts
+lead-finder-output/
+linkedin-outreach-output/
+
+# Large analysis artifacts
+*.html
+polyphemus_charts.py
