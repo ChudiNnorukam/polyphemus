@@ -16,10 +16,10 @@ When the user requests any of these task types, automatically invoke the corresp
 ## Project Context
 
 - **Codebase**: `/Users/chudinnorukam/Projects/business/polyphemus/` (22 files, ~4,000 LOC)
-- **VPS**: `142.93.143.178`, systemd service `polyphemus`, package at `/opt/polyphemus/polyphemus/`
-- **Deploy script**: `deploy_polyphemus.sh` — copies to `/opt/polyphemus/` on VPS
-- **Deploy pattern**: Edit locally → `scp` to VPS → `py_compile` → `systemctl restart polyphemus`
-- **NEVER use inline `python3 -c` via SSH** — write to file, scp, execute remotely
-- **Performance DB**: `data/performance.db` on VPS
-- **All patches via SSH**: stop service → scp files → verify syntax → start service
-- **NOTE**: VPS still uses old `sigil` service name until next deploy. Local codebase is renamed to `polyphemus`.
+- **VPS**: `82.24.19.114` (QuantVPS), shared codebase at `/opt/lagbot/lagbot/`, instances at `/opt/lagbot/instances/`
+- **Active services**: `lagbot@emmanuel` (RUNNING, DRY_RUN=true), `lagbot@chudi` (STOPPED), `polyphemus` (STOPPED)
+- **Deploy pattern**: Edit locally → `scp` to VPS → `py_compile` → `systemctl restart lagbot@<instance>`
+- **NEVER use inline `python3 -c` via SSH** — scp the script, then run it
+- **Performance DB**: `data/performance.db` relative to `LAGBOT_DATA_DIR` (per-instance)
+- **All patches via SSH**: stop service → scp files → clear `__pycache__` → verify syntax → start service
+- **DO NOT use 142.93.143.178** — that is backup only. DO NOT use 159.223.236.50 — dead.
