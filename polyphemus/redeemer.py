@@ -168,7 +168,8 @@ class Redeemer:
 
     def __init__(self, private_key: str, wallet_address: str, rpc_url: str,
                  builder_api_key: str = "", builder_secret: str = "",
-                 builder_passphrase: str = "", signature_type: int = 1):
+                 builder_passphrase: str = "", signature_type: int = 1,
+                 data_dir: str = "data"):
         self._logger = setup_logger("polyphemus.redeemer")
         self._queue: asyncio.Queue[RedemptionEvent] = asyncio.Queue()
         self._private_key = private_key
@@ -178,7 +179,7 @@ class Redeemer:
         self._store = None  # set via set_position_store()
         self._swept_conditions: set = set()  # already-swept condition IDs
         # Persist swept conditions to disk so restarts don't re-redeem
-        self._swept_file = Path(__file__).parent.parent / "data" / "swept_conditions.json"
+        self._swept_file = Path(data_dir) / "swept_conditions.json"
         self._load_swept_conditions()
 
         # Derive EOA from private key (needed for PROXY relay where wallet != EOA)

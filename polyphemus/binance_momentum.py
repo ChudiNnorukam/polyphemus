@@ -42,7 +42,7 @@ class BinanceMomentumFeed:
         self._logger = setup_logger("polyphemus.momentum")
 
         # State persistence (prevents duplicate signals on restart)
-        self._state_store = StateStore(data_dir="data", default_ttl_secs=3600)
+        self._state_store = StateStore(data_dir=config.lagbot_data_dir, default_ttl_secs=3600)
         self._signaled_slugs: Set[str] = self._state_store.load("signaled_slugs", ttl_secs=3600)
 
         # Per-symbol rolling price buffer: symbol -> deque of (timestamp, price)
@@ -90,6 +90,9 @@ class BinanceMomentumFeed:
         self._liq_ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._liq_session: Optional[aiohttp.ClientSession] = None
         self.liquidation_events = 0
+
+        # Pair arb: active concurrent position counter (managed by signal_bot)
+        self._active_pair_arb_count: int = 0
 
     def set_market_ws(self, ws) -> None:
         """Inject MarketWS reference for real-time midpoints."""
@@ -837,6 +840,130 @@ class BinanceMomentumFeed:
             secs_to_boundary = next_boundary - now
             sleep_time = min(max(secs_to_boundary - 2, 1), 15)
             await asyncio.sleep(sleep_time)
+
+    # -----------------------------------------------------------------------
+    # Pair arb scan (Phase 2) — wired via signal_bot._safe_task(), not gather()
+    # -----------------------------------------------------------------------
+
+    def increment_pair_arb_count(self) -> None:
+        self._active_pair_arb_count += 1
+
+    def decrement_pair_arb_count(self) -> None:
+        self._active_pair_arb_count = max(0, self._active_pair_arb_count - 1)
+
+    async def pair_arb_scan_loop(self) -> None:
+        """Scan every 30s for 5m markets with pair_cost below threshold.
+        Wired via signal_bot._safe_task() — crash here never kills the price feed.
+        Maker-only: taker fees at ~3.12% destroy the margin at median pair_cost.
+        """
+        while True:
+            try:
+                await self._do_pair_arb_scan()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._logger.warning(f"pair_arb_scan error (non-fatal): {e}")
+            await asyncio.sleep(30)
+
+    async def _do_pair_arb_scan(self) -> None:
+        """Check current 5m epoch for each asset. Log or emit pair arb signals."""
+        allowed = self._config.get_asset_filter() or ["BTC"]
+        for asset in allowed:
+            epoch = int(time.time() // 300) * 300
+            slug = f"{asset.lower()}-updown-5m-{epoch}"
+
+            market_info = self._market_cache.get(slug)
+            if not market_info:
+                self._logger.debug(f"pair_arb: {slug} not in market_cache (prefetch pending)")
+                continue
+
+            up_token_id = market_info.get("up_token_id")
+            down_token_id = market_info.get("down_token_id")
+            if not up_token_id or not down_token_id:
+                continue
+
+            if not self._market_ws:
+                continue
+
+            # Ensure tokens are subscribed — idempotent, no-op if already tracked
+            await self._market_ws.subscribe([up_token_id, down_token_id])
+
+            ask_up = self._market_ws.get_best_ask(up_token_id)
+            ask_down = self._market_ws.get_best_ask(down_token_id)
+
+            # Zero-guard: skip if MarketWS has no data yet for either side
+            if ask_up <= 0.0 or ask_down <= 0.0:
+                self._logger.debug(
+                    f"pair_arb: {slug} skipped (no MarketWS data: up={ask_up}, down={ask_down})"
+                )
+                continue
+
+            pair_cost = ask_up + ask_down
+            threshold = self._config.pair_arb_max_pair_cost
+            triggered = pair_cost < threshold
+
+            self._logger.info(
+                f"pair_arb_scan: {asset} pair_cost={pair_cost:.4f} "
+                f"threshold={threshold:.4f} {'TRIGGER' if triggered else 'skip'}"
+            )
+
+            if not triggered:
+                continue
+
+            if self._active_pair_arb_count >= self._config.pair_arb_max_concurrent:
+                self._logger.debug(
+                    f"pair_arb: {slug} skipped (max concurrent={self._config.pair_arb_max_concurrent})"
+                )
+                continue
+
+            if self._config.pair_arb_dry_run:
+                self._logger.info(
+                    f"pair_arb DRY: would enter {asset} "
+                    f"pair_cost={pair_cost:.4f} (up={ask_up:.4f} down={ask_down:.4f})"
+                )
+                continue
+
+            # Emit both legs
+            up_signal = self._build_pair_arb_signal(
+                asset, "Up", up_token_id, slug, ask_up, pair_cost, market_info, epoch
+            )
+            down_signal = self._build_pair_arb_signal(
+                asset, "Down", down_token_id, slug, ask_down, pair_cost, market_info, epoch
+            )
+            await self._on_signal(up_signal)
+            await self._on_signal(down_signal)
+
+    def _build_pair_arb_signal(
+        self,
+        asset: str,
+        outcome: str,
+        token_id: str,
+        slug: str,
+        price: float,
+        pair_cost: float,
+        market_info: dict,
+        epoch: int,
+    ) -> dict:
+        """Build a pair arb signal dict. Slug uses ':up'/':down' suffix to bypass dedup."""
+        end_epoch = epoch + 300
+        time_remaining = max(0, int(end_epoch - time.time()))
+        return {
+            "token_id": token_id,
+            "price": price,
+            "slug": f"{slug}:{outcome.lower()}",  # ':up' / ':down' suffix bypasses dedup
+            "source": "pair_arb",
+            "outcome": outcome,
+            "direction": "BUY",
+            "asset": asset,
+            "pair_cost": pair_cost,
+            "strategy": "maker",
+            "market_title": market_info.get("market_title", slug),
+            "condition_id": market_info.get("condition_id", ""),
+            "timestamp": time.time(),
+            "usdc_size": 999.0,   # bypass scorer minimum conviction check
+            "time_remaining_secs": time_remaining,
+            "market_window_secs": 300,
+        }
 
     async def close(self) -> None:
         """Clean up persistent sessions."""

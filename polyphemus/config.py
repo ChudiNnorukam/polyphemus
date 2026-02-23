@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     base_bet_pct: float = 0.10
     high_confidence_threshold: float = 0.0   # price >= this uses high_confidence_bet_pct; 0=disabled
     high_confidence_bet_pct: float = 0.0     # 0=disabled (falls back to base_bet_pct)
+
+    # Kelly-adaptive sizing
+    enable_kelly_sizing: bool = False
+    kelly_fraction: float = 0.25        # quarter-Kelly (conservative)
+    kelly_min_trades: int = 20          # fallback to flat bet if fewer trades in bucket
+    kelly_max_fraction: float = 0.20    # hard cap: never bet >20% of capital
+
     min_bet: float = 5.0
     max_bet: float = 50.0
     risk_multiplier_min: float = 0.5
@@ -117,6 +124,28 @@ class Settings(BaseSettings):
     accum_max_concurrent: int = 1        # max simultaneous accumulator positions
     accum_daily_loss_limit: float = -50.0  # stop accumulator if session PnL drops below this
 
+    # Pair arb (Phase 2 — maker-only pair cost arbitrage on 5m markets)
+    enable_pair_arb: bool = False
+    pair_arb_dry_run: bool = True              # log only, no orders placed
+    pair_arb_max_pair_cost: float = 0.975     # 2.5% margin floor (maker, 0% fee)
+    pair_arb_max_concurrent: int = 2           # max simultaneous pair arb slugs
+    pair_arb_fill_deadline_secs: int = 120    # cancel unfilled leg after this
+
+    # NOAA Weather arb (buy underpriced temperature bucket markets using forecast edge)
+    weather_entry_max_price: float = 0.15     # only enter if market price <= this
+    weather_exit_min_price: float = 0.45      # sell when price corrects to >= this
+    weather_noaa_min_prob: float = 0.70       # min NOAA forecast probability to enter
+    weather_min_edge: float = 0.08            # min edge (noaa_prob - market_price) to enter
+    weather_cities: str = "NYC,Chicago,Seattle,Atlanta,Dallas,Miami"
+    weather_base_bet_pct: float = 0.015       # base position size (1.5% of balance)
+    weather_max_bet_pct: float = 0.02         # max position size (2% of balance)
+    weather_max_spend: float = 2.00           # hard cap: never spend more than $2 per weather position
+    weather_scan_interval: int = 120          # seconds between market scans
+    weather_dry_run: bool = True              # log only, no real orders
+    weather_hold_to_resolution: bool = False  # True = hold to $0/$1, False = take profit at exit_min_price
+    weather_max_hold_hours: float = 48.0      # force-exit after this many hours
+    weather_max_open_positions: int = 5       # max simultaneous weather positions
+
     # Binance Momentum mode (primary signal source)
     signal_mode: str = "copy_trade"  # "copy_trade" or "binance_momentum"
     market_window_secs: int = 900  # 900=15min, 300=5min — controls slug, timing, guards
@@ -152,9 +181,11 @@ class Settings(BaseSettings):
     max_consecutive_losses: int = 5      # Halt after N consecutive losing trades (0=disabled)
     loss_cooldown_mins: int = 60         # Pause duration after consecutive loss trigger (minutes)
     kill_switch_path: str = ""           # File path for kill switch (empty=disabled)
+    lagbot_data_dir: str = "data"        # Per-instance data directory (set via LAGBOT_DATA_DIR)
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_approval_timeout_secs: int = 300
 
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training

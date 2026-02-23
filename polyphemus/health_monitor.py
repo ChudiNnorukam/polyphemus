@@ -127,9 +127,9 @@ class HealthMonitor:
                 }
 
                 # Write to data/health_{timestamp}.json
-                os.makedirs("data", exist_ok=True)
+                os.makedirs(self.config.lagbot_data_dir, exist_ok=True)
                 timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                health_file = f"data/health_{timestamp_str}.json"
+                health_file = os.path.join(self.config.lagbot_data_dir, f"health_{timestamp_str}.json")
 
                 with open(health_file, "w") as f:
                     json.dump(health_record, f, indent=2)
@@ -222,7 +222,7 @@ class HealthMonitor:
     def _cleanup_old_health_files(self, keep=50):
         """Remove old health log files, keeping the most recent N."""
         try:
-            health_files = sorted(glob.glob("data/health_*.json"), reverse=True)
+            health_files = sorted(glob.glob(os.path.join(self.config.lagbot_data_dir, "health_*.json")), reverse=True)
             if len(health_files) > keep:
                 for old_file in health_files[keep:]:
                     os.remove(old_file)

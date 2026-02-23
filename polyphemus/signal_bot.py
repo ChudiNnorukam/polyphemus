@@ -40,6 +40,7 @@ from .accumulator_metrics import AccumulatorMetrics
 from .gabagool_tracker import GabagoolTracker
 from .adaptive_tuner import AdaptiveTuner
 from .market_ws import MarketWS
+from .telegram_approver import TelegramApprover
 
 
 class SignalBot:
@@ -62,8 +63,8 @@ class SignalBot:
         self._dry_run = dry_run or config.dry_run
         self._mock_file = mock_file
         self._logger = setup_logger("polyphemus.bot")
-        self._db_path = "data/performance.db"
-        self._tuning_state_path = "data/tuning_state.json"
+        self._db_path = os.path.join(config.lagbot_data_dir, "performance.db")
+        self._tuning_state_path = os.path.join(config.lagbot_data_dir, "tuning_state.json")
 
         # 1. Position store
         self._store = PositionStore()
@@ -128,7 +129,7 @@ class SignalBot:
             streak_tracker=StreakTracker(
                 max_consecutive=config.max_consecutive_losses,
                 cooldown_mins=config.loss_cooldown_mins,
-                state_path="data/streak_state.json",
+                state_path=os.path.join(config.lagbot_data_dir, "streak_state.json"),
             ),
             logger=self._logger,
         )
@@ -143,6 +144,7 @@ class SignalBot:
         # 11. Signal feed (created last so health monitor is ready)
         self._feed = None
         self._momentum_feed = None
+        self._weather_feed = None
         if config.signal_mode == "binance_momentum":
             # Momentum mode: Binance prices are the PRIMARY signal source
             self._momentum_feed = BinanceMomentumFeed(
@@ -155,6 +157,23 @@ class SignalBot:
                 f"Signal mode: Binance momentum (primary)"
                 f"{f' | shadow={shadow}' if shadow else ''}"
             )
+        elif config.signal_mode == "noaa_weather":
+            from .weather_feed import WeatherFeed
+            self._weather_feed = WeatherFeed(
+                config=config,
+                clob=self._clob,
+                on_signal=self._on_signal,
+                db=self._tracker.db,
+            )
+            self._logger.info("Signal mode: NOAA weather arb")
+
+        # Telegram approval gate (weather mode only; no-op if token not configured)
+        self._telegram = TelegramApprover(
+            config=config,
+            on_execute=self._execute_weather_signal,
+        )
+        if self._telegram.enabled:
+            self._logger.info("Telegram approval gate ENABLED")
         else:
             # Copy-trade mode (existing behavior)
             if config.signal_feed_mode == "polling":
@@ -224,6 +243,7 @@ class SignalBot:
                     builder_secret=config.builder_secret,
                     builder_passphrase=config.builder_passphrase,
                     signature_type=config.signature_type,
+                    data_dir=config.lagbot_data_dir,
                 )
                 self._redeemer.set_position_store(self._store)
                 if self._accumulator:
@@ -236,7 +256,7 @@ class SignalBot:
         self._gabagool_tracker = None
         self._adaptive_tuner = None
         if self._accumulator:
-            self._accum_metrics = AccumulatorMetrics("data/accum_metrics.db")
+            self._accum_metrics = AccumulatorMetrics(os.path.join(config.lagbot_data_dir, "accum_metrics.db"))
             self._accumulator.set_metrics(self._accum_metrics)
 
             self._gabagool_tracker = GabagoolTracker()
@@ -244,7 +264,7 @@ class SignalBot:
                 metrics=self._accum_metrics,
                 tracker=self._gabagool_tracker,
                 config=config,
-                state_path="data/adaptive_state.json",
+                state_path=os.path.join(config.lagbot_data_dir, "adaptive_state.json"),
             )
             self._accumulator.set_adaptive_tuner(self._adaptive_tuner)
             self._logger.info("Learning stack ENABLED (metrics + gabagool + tuner)")
@@ -256,7 +276,7 @@ class SignalBot:
         self._regime_detector = None
 
         if config.enable_signal_logging:
-            self._signal_logger = SignalLogger()
+            self._signal_logger = SignalLogger(db_path=os.path.join(config.lagbot_data_dir, "signals.db"))
             self._logger.info("SignalLogger ENABLED")
 
         if config.enable_regime_detection:
@@ -264,12 +284,13 @@ class SignalBot:
             self._logger.info("RegimeDetector ENABLED")
 
         if config.enable_fill_optimizer:
-            self._fill_optimizer = FillOptimizer()
+            self._fill_optimizer = FillOptimizer(db_path=os.path.join(config.lagbot_data_dir, "fill_optimizer.db"))
             self._logger.info("FillOptimizer ENABLED")
 
         if config.enable_signal_scoring and self._signal_logger:
             self._signal_scorer = SignalScorer(
                 signal_logger=self._signal_logger,
+                model_path=os.path.join(config.lagbot_data_dir, "signal_model.pkl"),
                 mode=config.signal_score_mode,
                 threshold=config.signal_score_threshold,
             )
@@ -278,6 +299,7 @@ class SignalBot:
         # Wire data science modules to existing components
         if self._fill_optimizer:
             self._executor._fill_optimizer = self._fill_optimizer
+        self._executor._performance_db = self._tracker.db  # Kelly sizing (no-op if disabled)
         if self._regime_detector and self._momentum_feed:
             self._momentum_feed._regime_detector = self._regime_detector
         if self._momentum_feed:
@@ -334,18 +356,25 @@ class SignalBot:
         else:
             self._logger.info(f"PREFLIGHT [OK]   wallet balance ${balance:.2f}")
 
-        # 3. Binance WS host TCP reachability
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection("stream.binance.com", 9443, ssl=True),
-                timeout=8.0,
-            )
-            writer.close()
-            await writer.wait_closed()
-            self._logger.info("PREFLIGHT [OK]   Binance WS host reachable")
-        except Exception as e:
-            self._logger.critical(f"PREFLIGHT [FAIL] Binance WS unreachable: {e}")
-            ok = False
+        # 3. Binance WS host TCP reachability (skip for modes that don't use Binance)
+        needs_binance = (
+            self._config.signal_mode == "binance_momentum"
+            or self._config.enable_binance_confirmation
+        )
+        if needs_binance:
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection("stream.binance.com", 9443, ssl=True),
+                    timeout=8.0,
+                )
+                writer.close()
+                await writer.wait_closed()
+                self._logger.info("PREFLIGHT [OK]   Binance WS host reachable")
+            except Exception as e:
+                self._logger.critical(f"PREFLIGHT [FAIL] Binance WS unreachable: {e}")
+                ok = False
+        else:
+            self._logger.info("PREFLIGHT [SKIP] Binance WS (not needed for this signal mode)")
 
         self._logger.info("--- END PREFLIGHT ---")
         if not ok:
@@ -364,7 +393,7 @@ class SignalBot:
             await self._run_preflight()
 
             # 1. Create data directory
-            os.makedirs("data", exist_ok=True)
+            os.makedirs(self._config.lagbot_data_dir, exist_ok=True)
 
             # 2. Load positions from DB
             count = self._store.load_from_db(self._db_path)
@@ -375,6 +404,9 @@ class SignalBot:
             for pos in list(self._store.get_open()):
                 # Skip accumulator positions — managed by AccumulatorEngine
                 if pos.metadata and pos.metadata.get("is_accumulator"):
+                    continue
+                # Skip weather positions — no epoch in slug, redeemer handles resolution
+                if pos.metadata and pos.metadata.get("is_weather"):
                     continue
                 try:
                     # Parse epoch from slug: e.g., btc-updown-5m-1770944400
@@ -408,6 +440,10 @@ class SignalBot:
             for pos in list(self._store.get_open()):
                 # Skip accumulator positions — managed by AccumulatorEngine
                 if pos.metadata and pos.metadata.get("is_accumulator"):
+                    continue
+                # Skip weather positions — weather markets resolve over 24-48h,
+                # not within the 5-minute CLOB settlement window used by this check
+                if pos.metadata and pos.metadata.get("is_weather"):
                     continue
                 try:
                     shares = await self._clob.get_share_balance(pos.token_id)
@@ -468,6 +504,10 @@ class SignalBot:
                 tasks.append(self._feed.start())
             if self._momentum_feed:
                 tasks.append(self._momentum_feed.start())
+            if self._weather_feed:
+                tasks.append(self._weather_feed.start())
+            if self._telegram.enabled:
+                tasks.append(self._safe_task(self._telegram.start(), "telegram_approver"))
             # Critical tasks — crash the bot if they fail
             tasks.extend([
                 self._exit_loop(),
@@ -497,6 +537,8 @@ class SignalBot:
                 tasks.append(self._safe_task(self._gabagool_tracker.start(), "gabagool_tracker"))
             if self._adaptive_tuner:
                 tasks.append(self._safe_task(self._adaptive_tuner.start(), "adaptive_tuner"))
+            if self._config.enable_pair_arb and self._momentum_feed:
+                tasks.append(self._safe_task(self._momentum_feed.pair_arb_scan_loop(), "pair_arb_scan"))
             await asyncio.gather(*tasks)
 
         except KeyboardInterrupt:
@@ -582,7 +624,7 @@ class SignalBot:
 
             # 2. Binance momentum confirmation (skip if signal IS from momentum feed)
             asset = signal.get('asset', '')
-            is_momentum_signal = signal.get('source') in ('binance_momentum', 'window_delta')
+            is_momentum_signal = signal.get('source') in ('binance_momentum', 'window_delta', 'pair_arb', 'noaa_weather')
             if self._binance_feed and asset in ASSET_TO_BINANCE and not is_momentum_signal:
                 if self._binance_feed.in_grace_period():
                     self._momentum_stats["bypassed"] += 1
@@ -632,8 +674,8 @@ class SignalBot:
                         f"[{phase} | {lookback}m | thresh={threshold:.4f}]"
                     )
 
-            # 2c. Regime check (skip flat markets)
-            if self._regime_detector:
+            # 2c. Regime check (skip flat markets — not applicable to price arb or weather)
+            if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather'):
                 if not self._regime_detector.should_trade(signal.get("asset", "BTC")):
                     if self._signal_logger and signal_id > 0:
                         self._signal_logger.update_signal(signal_id, {"outcome": "regime_filtered"})
@@ -709,6 +751,11 @@ class SignalBot:
                 )
                 return
 
+            # 5b. Telegram approval gate (weather signals only)
+            if signal.get('source') == 'noaa_weather' and self._telegram.enabled:
+                await self._telegram.submit(signal)
+                return  # execution happens via _execute_weather_signal callback
+
             # 6. Execute buy
             exec_result = await self._executor.execute_buy(signal, available)
 
@@ -755,6 +802,46 @@ class SignalBot:
         except Exception as e:
             self._logger.exception(f"Error in _on_signal: {e}")
             self._health.record_error()
+
+    async def _execute_weather_signal(self, signal: dict) -> None:
+        """Called by TelegramApprover when user taps Approve. Executes the weather buy."""
+        try:
+            available = await self._balance.get_available()
+            if available < self._config.min_bet:
+                self._logger.warning(
+                    f"Telegram-approved signal skipped: insufficient capital "
+                    f"${available:.2f} < ${self._config.min_bet:.2f}"
+                )
+                return
+
+            exec_result = await self._executor.execute_buy(signal, available)
+            if not exec_result.success:
+                self._logger.error(
+                    f"Telegram-approved buy failed for {signal.get('slug', '?')}: "
+                    f"{exec_result.error}"
+                )
+                raise RuntimeError(exec_result.error)
+
+            self._logger.info(
+                f"Telegram-approved buy executed: {signal.get('slug', '?')} "
+                f"@ ${exec_result.fill_price:.4f} x {exec_result.fill_size:.1f}"
+            )
+
+            await self._tracker.record_entry(
+                trade_id=exec_result.order_id,
+                token_id=signal.get("token_id", ""),
+                slug=signal.get("slug", ""),
+                entry_price=exec_result.fill_price,
+                entry_size=exec_result.fill_size,
+                entry_tx_hash=exec_result.order_id,
+                outcome=signal.get("outcome", ""),
+                market_title=signal.get("market_title", ""),
+                entry_time=time.time(),
+                filter_score=None,
+            )
+        except Exception as e:
+            self._logger.exception(f"_execute_weather_signal error: {e}")
+            raise
 
     def _momentum_confirms(self, signal: dict, momentum: MomentumResult) -> bool:
         """Check if Binance momentum confirms the signal direction.
