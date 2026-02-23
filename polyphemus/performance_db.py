@@ -440,3 +440,38 @@ class PerformanceDB:
             }
         finally:
             conn.close()
+
+    def get_wr_for_bucket(self, asset: str, bucket: float) -> tuple:
+        """Return (wr, n) for market_resolved trades in a price bucket for an asset.
+
+        Args:
+            asset: Asset name (e.g. 'BTC', 'ETH'). Matched via slug prefix.
+            bucket: Price bucket (0.1 wide, e.g. 0.4, 0.5, 0.6).
+
+        Returns:
+            (win_rate, n) where n is the number of resolved trades in the bucket.
+            Returns (0.0, 0) if no trades found or on error.
+        """
+        slug_prefix = f"{asset.lower()}-%"
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                """
+                SELECT COUNT(*) AS n,
+                       SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS wr
+                FROM trades
+                WHERE slug LIKE ?
+                  AND exit_reason = 'market_resolved'
+                  AND ROUND(entry_price * 10.0) / 10.0 = ?
+                  AND pnl IS NOT NULL
+                """,
+                (slug_prefix, round(bucket, 1)),
+            )
+            row = cur.fetchone()
+            n = row["n"] or 0
+            wr = row["wr"] or 0.0
+            return float(wr), int(n)
+        except Exception:
+            return 0.0, 0
+        finally:
+            conn.close()

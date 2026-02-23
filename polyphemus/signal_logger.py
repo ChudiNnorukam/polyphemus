@@ -109,6 +109,16 @@ class SignalLogger:
         """)
         self._conn.commit()
 
+        # Additive migrations — try/except pattern (ALTER TABLE IF NOT EXISTS not valid in SQLite)
+        _pair_arb_cols = [("strategy_type", "TEXT"), ("pair_cost", "REAL"), ("source", "TEXT")]
+        for col_name, col_def in _pair_arb_cols:
+            try:
+                self._conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+                self._logger.info(f"Migration: added column signals.{col_name}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        self._conn.commit()
+
     def log_signal(self, features: Dict[str, Any]) -> int:
         """Log a signal with its feature vector. Returns the signal ID.
 

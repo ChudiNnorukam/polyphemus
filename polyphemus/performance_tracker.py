@@ -159,6 +159,10 @@ class PerformanceTracker:
 
         return stats
 
+    def get_wr_by_bucket(self, asset: str, bucket: float) -> tuple:
+        """Return (wr, n) for resolved trades in a price bucket. Sync, no await needed."""
+        return self.db.get_wr_for_bucket(asset, bucket)
+
     def check_survivorship_bias(self, stats: Dict) -> None:
         """
         Detect and warn about survivorship bias in statistics.

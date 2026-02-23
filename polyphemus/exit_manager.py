@@ -112,6 +112,10 @@ class ExitManager:
         if pos.metadata and pos.metadata.get("is_accumulator"):
             return None
 
+        # === ROUTE weather positions to dedicated evaluator (48h hold, fixed price target) ===
+        if pos.metadata and pos.metadata.get("is_weather"):
+            return self._evaluate_weather(pos, now)
+
         # === TIME CHECK #1: max_hold (TIME, independent of price) ===
         if self._check_max_hold(pos, now):
             return ExitSignal(
@@ -185,6 +189,75 @@ class ExitManager:
                 reason=ExitReason.SELL_SIGNAL.value,
                 exit_price=pos.current_price or pos.entry_price,
             )
+
+        return None
+
+    def _evaluate_weather(self, pos: Position, now: datetime) -> Optional[ExitSignal]:
+        """Evaluate a weather position with long-hold logic.
+
+        Uses hours-based max hold (not minutes) and a fixed absolute price target
+        instead of a percentage profit_target. Skips max_hold_mins and time_exit_buffer.
+        """
+        # 1. Max hold in hours (weather positions can hold 24-48h)
+        if pos.entry_time is None:
+            self._logger.warning(
+                f"Weather position missing entry_time | token_id={pos.token_id} | "
+                f"will rely on market_resolved or profit_target to exit"
+            )
+        else:
+            max_hold_hours = pos.metadata.get("weather_max_hold_hours", 48.0)
+            hold_hours = (now - pos.entry_time).total_seconds() / 3600
+            if hold_hours >= max_hold_hours:
+                self._logger.debug(
+                    f"weather max_hold triggered | token_id={pos.token_id} | "
+                    f"hold_hours={hold_hours:.1f} | max={max_hold_hours}"
+                )
+                return ExitSignal(
+                    token_id=pos.token_id,
+                    reason=ExitReason.MAX_HOLD.value,
+                    exit_price=pos.current_price or pos.entry_price,
+                )
+
+        # 2. Market resolved (redeemer handles, no SELL needed)
+        if pos.is_resolved:
+            return ExitSignal(
+                token_id=pos.token_id,
+                reason=ExitReason.MARKET_RESOLVED.value,
+                exit_price=None,
+            )
+
+        # 3. Hold to resolution: skip price exit
+        if pos.metadata.get("weather_hold_to_resolution"):
+            return None
+
+        # 4. Price target: sell when market corrects to weather_exit_price
+        exit_price_target = pos.metadata.get("weather_exit_price", 0.45)
+        if pos.current_price > 0 and pos.current_price >= exit_price_target:
+            self._logger.debug(
+                f"weather profit_target triggered | token_id={pos.token_id} | "
+                f"current_price={pos.current_price:.4f} | target={exit_price_target:.4f}"
+            )
+            return ExitSignal(
+                token_id=pos.token_id,
+                reason=ExitReason.PROFIT_TARGET.value,
+                exit_price=pos.current_price,
+            )
+
+        # 5. Time-decay exit: <2h to resolution, price still low — cut the loss
+        market_end_ts = pos.metadata.get("weather_market_end_ts")
+        if market_end_ts and pos.current_price > 0:
+            hours_to_resolution = (market_end_ts - now.timestamp()) / 3600
+            if hours_to_resolution < 2.0 and pos.current_price < 0.20:
+                self._logger.info(
+                    f"weather time_decay exit | token_id={pos.token_id} | "
+                    f"{hours_to_resolution:.1f}h to resolution | "
+                    f"price={pos.current_price:.4f} < 0.20 | cutting loss"
+                )
+                return ExitSignal(
+                    token_id=pos.token_id,
+                    reason="weather_time_decay",
+                    exit_price=pos.current_price,
+                )
 
         return None
 

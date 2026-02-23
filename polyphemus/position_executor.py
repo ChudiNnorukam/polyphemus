@@ -52,6 +52,8 @@ class PositionExecutor:
         self._tuner = tuner
         self._logger = setup_logger("polyphemus.executor")
         self._fill_optimizer = None  # Set by signal_bot after init
+        self._performance_db = None  # Set by signal_bot after init (Kelly sizing)
+        self._kelly_cache: dict = {}  # (asset, bucket) -> (wr, n, fetched_at)
 
     async def execute_buy(
         self,
@@ -82,9 +84,25 @@ class PositionExecutor:
         # Extract asset for per-asset sizing
         asset = signal.get("asset", "")
         liq_conviction = signal.get("liq_conviction", 0.0)
+        sig_meta = signal.get("metadata", {}) or {}
 
-        # Calculate position size (3-layer sizing + asset multiplier + liquidation boost)
-        size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction)
+        # Weather signals use their own kelly-based sizing (not the bot's base_bet_pct)
+        if sig_meta.get("is_weather"):
+            kelly = signal.get("kelly_fraction", self._config.weather_base_bet_pct)
+            spend = kelly * available_capital
+            spend = max(
+                self._config.weather_base_bet_pct * available_capital,
+                min(spend, self._config.weather_max_bet_pct * available_capital),
+            )
+            spend = min(spend, self._config.weather_max_spend)  # hard cap — no min_bet floor (min_bet > cap)
+            size = spend / price if price > 0 else 0.0
+            self._logger.info(
+                f"Weather sizing: kelly={kelly:.3f}, spend={spend:.2f}, "
+                f"size={size:.2f} shares @ {price:.4f}"
+            )
+        else:
+            # Calculate position size (3-layer sizing + asset multiplier + liquidation boost)
+            size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction)
         if size <= 0:
             msg = (
                 f"Size calculation failed for {slug} @ {price}: "
@@ -263,13 +281,32 @@ class PositionExecutor:
         # Create position
         now_utc = datetime.now(timezone.utc)
 
-        # Compute market_end_time from slug epoch (e.g., btc-updown-15m-1770620400)
+        # Compute market_end_time — prefer signal override (for weather/non-epoch slugs)
         market_end_time = now_utc  # fallback
-        parts = slug.rsplit('-', 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            from .types import parse_window_from_slug
-            market_epoch = int(parts[1])
-            market_end_time = datetime.fromtimestamp(market_epoch + parse_window_from_slug(slug), tz=timezone.utc)
+        if signal and signal.get("market_end_time_iso"):
+            try:
+                _s = str(signal["market_end_time_iso"]).replace("Z", "+00:00")
+                market_end_time = datetime.fromisoformat(_s)
+                if market_end_time.tzinfo is None:
+                    market_end_time = market_end_time.replace(tzinfo=timezone.utc)
+            except (ValueError, OSError):
+                pass
+        else:
+            parts = slug.rsplit('-', 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                from .types import parse_window_from_slug
+                market_epoch = int(parts[1])
+                market_end_time = datetime.fromtimestamp(market_epoch + parse_window_from_slug(slug), tz=timezone.utc)
+
+        # Merge signal metadata (e.g. is_weather, weather_exit_price) into position metadata.
+        # Signal-provided keys are set first so that standard fields take precedence on conflict.
+        sig_meta = signal.get("metadata", {}) if signal else {}
+        metadata = {
+            **sig_meta,
+            "market_title": market_title,
+            "signal_usdc_size": usdc_size,
+            "condition_id": signal.get("condition_id", "") if signal else "",
+        }
 
         position = Position(
             token_id=token_id,
@@ -279,11 +316,7 @@ class PositionExecutor:
             entry_time=now_utc,
             entry_tx_hash=order_id,
             market_end_time=market_end_time,
-            metadata={
-                "market_title": market_title,
-                "signal_usdc_size": usdc_size,
-                "condition_id": signal.get("condition_id", "") if signal else "",
-            },
+            metadata=metadata,
         )
 
         self._store.add(position)
@@ -334,7 +367,17 @@ class PositionExecutor:
                 f"using {hc_pct:.0%} instead of {self._config.base_bet_pct:.0%}"
             )
         else:
-            effective_pct = self._config.base_bet_pct
+            if self._config.enable_kelly_sizing:
+                kelly_f = self._compute_kelly(asset, price)
+                if kelly_f is not None:
+                    effective_pct = min(
+                        kelly_f * self._config.kelly_fraction,
+                        self._config.kelly_max_fraction,
+                    )
+                else:
+                    effective_pct = self._config.base_bet_pct
+            else:
+                effective_pct = self._config.base_bet_pct
         base_spend = available_capital * effective_pct
         self._logger.debug(
             f"Layer 1 (base): available={available_capital:.2f}, "
@@ -401,6 +444,44 @@ class PositionExecutor:
         )
 
         return size
+
+    def _compute_kelly(self, asset: str, price: float) -> Optional[float]:
+        """Kelly fraction: f* = (p*b - (1-p)) / b
+
+        p = WR from performance.db for (asset, price bucket)
+        b = (1/price) - 1  (net odds per share)
+        Returns None if fewer than kelly_min_trades in bucket (falls back to flat bet).
+        """
+        if not self._performance_db:
+            return None
+        bucket = round(price * 10) / 10
+        cache_key = (asset.upper(), bucket)
+        now = time.time()
+        cached = self._kelly_cache.get(cache_key)
+        if cached and (now - cached[2]) < 1800:
+            wr, n = cached[0], cached[1]
+        else:
+            try:
+                wr, n = self._performance_db.get_wr_for_bucket(asset, bucket)
+                self._kelly_cache[cache_key] = (wr, n, now)
+            except Exception as e:
+                self._logger.debug(f"Kelly DB query failed: {e}")
+                return None
+        if n < self._config.kelly_min_trades:
+            self._logger.debug(
+                f"Kelly fallback to flat: n={n} < min={self._config.kelly_min_trades} "
+                f"for {asset}@{bucket:.1f}"
+            )
+            return None
+        b = (1.0 / price) - 1.0
+        if b <= 0:
+            return None
+        f = (wr * b - (1.0 - wr)) / b
+        kelly_f = max(0.0, f)
+        self._logger.info(
+            f"kelly_fraction={kelly_f:.3f} (WR={wr:.2f}, n={n}, entry={price:.2f})"
+        )
+        return kelly_f
 
     async def _poll_for_fill(
         self,

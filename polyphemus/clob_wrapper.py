@@ -289,22 +289,39 @@ class ClobWrapper:
             return 0.0
 
     async def ping(self) -> bool:
-        """Test CLOB API connectivity. Returns True if API responds within 10s."""
+        """Test CLOB API connectivity. Returns True if API responds within 10s.
+
+        Tries /ok first (lightweight). If it hangs (Polymarket occasionally lets /ok
+        timeout while the API is fully functional), falls back to get_sampling_markets
+        as a connectivity proof.
+        """
         t0 = time.time()
         try:
             loop = asyncio.get_event_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(None, self._client.get_ok),
-                timeout=10.0,
+                timeout=6.0,
             )
             ms = (time.time() - t0) * 1000
-            self._logger.info(f"CLOB ping OK ({ms:.0f}ms)")
+            self._logger.info(f"CLOB ping OK via /ok ({ms:.0f}ms)")
             return True
-        except asyncio.TimeoutError:
-            self._logger.error("CLOB ping timeout (>10s)")
-            return False
+        except (asyncio.TimeoutError, Exception) as first_err:
+            self._logger.debug(f"CLOB /ok failed ({first_err}), trying fallback endpoint")
+
+        # Fallback: /markets?limit=1 proves API is reachable even when /ok hangs
+        try:
+            t1 = time.time()
+            await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, lambda: self._client.get_markets(next_cursor="")
+                ),
+                timeout=8.0,
+            )
+            ms = (time.time() - t1) * 1000
+            self._logger.info(f"CLOB ping OK via /markets fallback ({ms:.0f}ms)")
+            return True
         except Exception as e:
-            self._logger.error(f"CLOB ping failed: {e}")
+            self._logger.error(f"CLOB ping failed (both /ok and /markets): {e}")
             return False
 
     def set_market_ws(self, ws) -> None:

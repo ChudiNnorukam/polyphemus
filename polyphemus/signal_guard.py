@@ -66,6 +66,8 @@ class SignalGuard:
         # Check if this is a momentum signal (skip some filters for momentum)
         is_momentum = signal.get('source') == 'binance_momentum'
         is_window_delta = signal.get('source') == 'window_delta'
+        is_pair_arb = signal.get('source') == 'pair_arb'
+        is_weather = signal.get('source') == 'noaa_weather'
 
         # ====================================================================
         # FILTER 1: Direction Check (only BUY signals from DB)
@@ -79,7 +81,7 @@ class SignalGuard:
         # FILTER 2: Outcome Check (UP or DOWN outcomes)
         # ====================================================================
         outcome = signal.get('outcome', '').lower()
-        if outcome not in ('up', 'down'):
+        if not is_weather and outcome not in ('up', 'down'):
             reasons.append('invalid_outcome')
 
         # ====================================================================
@@ -96,6 +98,10 @@ class SignalGuard:
         if is_window_delta:
             if price > self._config.window_delta_max_price:
                 reasons.append('price_out_of_range')
+        elif is_pair_arb:
+            pass  # pair_arb uses pair_cost filter in scan loop, not entry price range
+        elif is_weather:
+            pass  # weather uses weather_entry_max_price filter in scan loop
         elif price < min_price or price > max_price:
             reasons.append('price_out_of_range')
 
@@ -111,7 +117,7 @@ class SignalGuard:
         # ====================================================================
         asset = signal.get('asset', '').upper()
         allowed_assets = self._config.get_asset_filter()
-        if allowed_assets and asset not in allowed_assets:
+        if allowed_assets and asset not in allowed_assets and not is_weather:
             reasons.append('asset_not_in_filter')
 
         # ====================================================================
@@ -139,7 +145,7 @@ class SignalGuard:
         slug = signal.get('slug', '')
         from .types import parse_window_from_slug
         window = parse_window_from_slug(slug)
-        if not is_window_delta:
+        if not is_window_delta and not is_weather:
             # Cap min_secs at 40% of window so 5m markets (300s) aren't blocked
             # 5m: min(360, 120) = 120s → 3min entry window
             # 15m: min(360, 360) = 360s → 9min entry window
@@ -159,19 +165,35 @@ class SignalGuard:
         if self._store.get_by_slug(slug) is not None:
             reasons.append('duplicate_slug')
 
+        # VALIDATOR 2b: Pair arb — block if root slug already held directionally
+        # e.g. 'btc-updown-5m-1770944400:up' -> root = 'btc-updown-5m-1770944400'
+        if is_pair_arb and ':' in slug:
+            root_slug = slug.rsplit(':', 1)[0]
+            if self._store.get_by_slug(root_slug) is not None:
+                reasons.append('pair_arb_blocked_by_directional')
+
         # ====================================================================
         # VALIDATOR 3: Max Positions Check
+        # Weather uses its own slot budget so momentum/arb positions don't crowd them out
         # ====================================================================
-        if self._store.count_open() >= self._config.max_open_positions:
+        if is_weather:
+            weather_open = sum(
+                1 for p in self._store.get_open()
+                if p.metadata and p.metadata.get("is_weather")
+            )
+            if weather_open >= self._config.weather_max_open_positions:
+                reasons.append('max_positions')
+        elif self._store.count_open() >= self._config.max_open_positions:
             reasons.append('max_positions')
 
         # ====================================================================
         # VALIDATOR 3b: Direction Limiter (max 2 same-direction positions)
         # Prevents correlated wipeouts when all positions are same direction
+        # Weather positions use "yes"/"no" (not "up"/"down") — skip this check
         # ====================================================================
         MAX_SAME_DIRECTION = 4
         signal_outcome = signal.get('outcome', '').lower()
-        if signal_outcome:
+        if signal_outcome and not is_weather:
             same_dir_count = sum(
                 1 for pos in self._store.get_open()
                 if getattr(pos, 'outcome', '').lower() == signal_outcome
@@ -183,7 +205,7 @@ class SignalGuard:
         # VALIDATOR 4: Minimum Conviction Check
         # ====================================================================
         usdc_size = signal.get('usdc_size', 0)
-        if not is_momentum and not is_window_delta:
+        if not is_momentum and not is_window_delta and not is_weather:
             if usdc_size < self._config.min_db_signal_size:
                 reasons.append('low_conviction')
 
