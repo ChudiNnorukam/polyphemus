@@ -26,6 +26,7 @@ from polyphemus.balance_manager import BalanceManager
 from polyphemus.fill_optimizer import FillOptimizer, ArmState
 from polyphemus.exit_handler import ExitHandler
 from polyphemus.binance_momentum import BinanceMomentumFeed, BINANCE_TO_ASSET
+from polyphemus.signal_guard import SignalGuard
 
 
 def make_config(**overrides):
@@ -1382,6 +1383,55 @@ class TestConfigHelpers:
         assert config.get_asset_multiplier("ETH") == 1.2
         assert config.get_asset_multiplier("XRP") == 0.8
         assert config.get_asset_multiplier("DOGE") == 1.0  # default
+
+
+class TestSignalGuardShadowAssets:
+    """Shadow assets pass asset filter so guard_passed reflects real criteria."""
+
+    def _make_guard(self, asset_filter="BTC", shadow_assets="ETH"):
+        config = make_config(
+            asset_filter=asset_filter,
+            shadow_assets=shadow_assets,
+            min_entry_price=0.20,
+            max_entry_price=0.98,
+            momentum_trigger_pct=0.003,
+        )
+        store = MagicMock()
+        store.count_open.return_value = 0
+        store.get_open_positions.return_value = []
+        return SignalGuard(config, store)
+
+    def _signal(self, asset="ETH", price=0.85, momentum_pct=0.004, time_remaining=180):
+        return {
+            "asset": asset,
+            "price": price,
+            "momentum_pct": momentum_pct,
+            "time_remaining_secs": time_remaining,
+            "source": "binance_momentum",
+            "outcome": "Up",
+            "slug": f"{asset.lower()}-updown-5m-9999999",
+        }
+
+    def test_shadow_asset_not_blocked_by_asset_filter(self):
+        guard = self._make_guard(asset_filter="BTC", shadow_assets="ETH")
+        result = guard.check(self._signal(asset="ETH", price=0.85))
+        assert "asset_not_in_filter" not in result.reasons
+
+    def test_non_shadow_non_filter_asset_still_blocked(self):
+        guard = self._make_guard(asset_filter="BTC", shadow_assets="ETH")
+        result = guard.check(self._signal(asset="SOL", price=0.85))
+        assert "asset_not_in_filter" in result.reasons
+
+    def test_shadow_asset_no_filter_reason_on_pass(self):
+        guard = self._make_guard(asset_filter="BTC", shadow_assets="ETH")
+        result = guard.check(self._signal(asset="ETH", price=0.85, momentum_pct=0.004))
+        assert "asset_not_in_filter" not in result.reasons
+
+    def test_shadow_asset_no_filter_reason_on_fail(self):
+        guard = self._make_guard(asset_filter="BTC", shadow_assets="ETH")
+        result = guard.check(self._signal(asset="ETH", price=0.10))  # price out of range
+        assert "asset_not_in_filter" not in result.reasons
+        assert "price_out_of_range" in result.reasons
 
 
 if __name__ == "__main__":

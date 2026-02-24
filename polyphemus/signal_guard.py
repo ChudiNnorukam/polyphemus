@@ -117,7 +117,8 @@ class SignalGuard:
         # ====================================================================
         asset = signal.get('asset', '').upper()
         allowed_assets = self._config.get_asset_filter()
-        if allowed_assets and asset not in allowed_assets and not is_weather:
+        shadow_assets = self._config.get_shadow_assets()
+        if allowed_assets and asset not in allowed_assets and asset not in shadow_assets and not is_weather:
             reasons.append('asset_not_in_filter')
 
         # ====================================================================
