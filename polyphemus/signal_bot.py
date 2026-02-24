@@ -174,6 +174,8 @@ class SignalBot:
         )
         if self._telegram.enabled:
             self._logger.info("Telegram approval gate ENABLED")
+        elif config.signal_mode in ("binance_momentum", "noaa_weather"):
+            self._logger.info("Signal feed: disabled (dedicated feed active for signal_mode=%s)", config.signal_mode)
         else:
             # Copy-trade mode (existing behavior)
             if config.signal_feed_mode == "polling":
