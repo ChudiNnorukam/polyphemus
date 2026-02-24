@@ -1,0 +1,9 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+slack-bolt==1.20.0
+slack-sdk==3.31.0
+anthropic==0.40.0
+asyncpg==0.30.0
+redis[asyncio]==5.0.0
+pydantic-settings==2.6.0
+python-dotenv==1.0.0

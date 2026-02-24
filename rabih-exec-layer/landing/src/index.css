@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Noise overlay — eliminates flat digital gradients */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 128px 128px;
+}
+
+html { scroll-behavior: smooth; }
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  background-color: #FAF8F5;
+  color: #0D0D12;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Magnetic button */
+.btn-magnetic {
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+.btn-magnetic:hover { transform: scale(1.03); }
+.btn-bg {
+  position: absolute;
+  inset: 0;
+  transform: translateY(101%);
+  transition: transform 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+.btn-magnetic:hover .btn-bg { transform: translateY(0); }
+
+/* Nav link lift */
+.nav-link { transition: transform 0.2s ease, opacity 0.2s ease; }
+.nav-link:hover { transform: translateY(-1px); opacity: 0.7; }
+
+/* Blinking cursor */
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+.cursor-blink { animation: blink 1s step-end infinite; }
+
+/* Pulsing dot */
+@keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(1.4)} }
+.pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+
+/* EKG stroke */
+@keyframes ekg { from{stroke-dashoffset:600} to{stroke-dashoffset:0} }
+.ekg-path { animation: ekg 2.5s linear infinite; }
+
+/* Laser scan */
+@keyframes scan { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
+.laser-scan { animation: scan 2s ease-in-out infinite; }
+
+/* Rotate */
+@keyframes slow-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+.slow-spin { animation: slow-spin 12s linear infinite; }
+
+/* Green operational pulse */
+@keyframes op-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,0.4)} 70%{box-shadow:0 0 0 6px rgba(34,197,94,0)} }
+.op-dot { animation: op-pulse 2s ease-in-out infinite; }
