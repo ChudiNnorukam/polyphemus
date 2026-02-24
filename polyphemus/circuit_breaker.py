@@ -91,8 +91,8 @@ class StreakTracker:
                     'consecutive_losses': self._consecutive_losses,
                     'cooldown_until': self._cooldown_until,
                 }, f)
-        except Exception as e:
-            self._logger.warning(f"StreakTracker save failed: {e}")
+        except Exception:
+            pass  # StreakTracker has no logger; silently ignore save failures
 
     def _load_state(self):
         try:
@@ -150,3 +150,13 @@ class CircuitBreaker:
                 f"Circuit breaker: loss ${pnl:.2f} | "
                 f"streak={self._st.consecutive_losses}/{self._st._max}"
             )
+            if self._st._max > 0 and self._st.consecutive_losses >= self._st._max:
+                try:
+                    if self._ks._path:
+                        with open(self._ks._path, 'w') as f:
+                            f.write(f"Hard stop: {self._st._max} consecutive losses\n")
+                except Exception as ks_err:
+                    self._logger.error(f"Failed to write kill switch: {ks_err}")
+                self._logger.critical(
+                    f"HARD STOP: {self._st._max} consecutive losses — kill switch written to {self._ks._path}"
+                )
