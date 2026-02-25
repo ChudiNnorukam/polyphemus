@@ -58,6 +58,9 @@ class Settings(BaseSettings):
 
     min_bet: float = 5.0
     max_bet: float = 50.0
+    auto_max_bet: bool = False
+    auto_max_bet_pct: float = 0.05       # 5% of available capital
+    auto_max_bet_cap: float = 6500.0     # liquidity ceiling (12.5% of $52K window vol)
     risk_multiplier_min: float = 0.5
     risk_multiplier_max: float = 1.5
 

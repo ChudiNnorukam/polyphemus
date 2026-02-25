@@ -470,10 +470,15 @@ class PositionExecutor:
             self._logger.debug("Layer 2 (tuner): disabled")
 
         # Layer 3: Hard bounds (min/max bet)
-        spend = max(self._config.min_bet, min(spend, self._config.max_bet))
+        # Auto-scale max_bet: 5% of capital, floored at config max_bet, capped at $6,500 (liquidity)
+        if self._config.auto_max_bet:
+            effective_max = max(self._config.max_bet, min(available_capital * self._config.auto_max_bet_pct, self._config.auto_max_bet_cap))
+        else:
+            effective_max = self._config.max_bet
+        spend = max(self._config.min_bet, min(spend, effective_max))
         self._logger.debug(
             f"Layer 3a (hard bounds): min={self._config.min_bet:.2f}, "
-            f"max={self._config.max_bet:.2f}, after_bounds={spend:.2f}"
+            f"max={effective_max:.2f}, after_bounds={spend:.2f}"
         )
 
         # Layer 3 continued: Deployment ratio cap
