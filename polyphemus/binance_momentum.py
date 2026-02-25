@@ -114,6 +114,7 @@ class BinanceMomentumFeed:
             self._liquidation_connect_loop(),
             self._funding_rate_poll_loop(),
             self._market_prefetch_loop(),
+            self._watch_new_markets(),
         )
 
     async def start_stale_watchdog(self) -> None:
@@ -334,6 +335,28 @@ class BinanceMomentumFeed:
         for window in self._config.get_market_windows(asset):
             await self._generate_signal_for_window(asset, direction, momentum_pct, window, shadow=is_shadow)
 
+        # Lag signals: fire companion assets with configurable delay after BTC fires
+        # Prereq: ETH/SOL WR >= 60% with n >= 30 in backtest before enabling
+        if (not is_shadow
+                and self._config.enable_lag_signals
+                and self._config.lag_assets.strip()):
+            direction_outcome = "Up" if direction == "UP" else "Down"
+            for lag_spec in self._config.lag_assets.split(","):
+                lag_spec = lag_spec.strip()
+                if ":" not in lag_spec:
+                    continue
+                lag_asset_raw, lag_secs_str = lag_spec.split(":", 1)
+                try:
+                    lag_secs = int(lag_secs_str.strip())
+                except ValueError:
+                    continue
+                lag_asset_upper = lag_asset_raw.strip().upper()
+                if allowed and lag_asset_upper not in allowed:
+                    continue  # lag asset must be in ASSET_FILTER
+                asyncio.create_task(
+                    self._fire_lag_signal(lag_asset_upper.lower(), lag_secs, direction_outcome)
+                )
+
         # Companion assets: fire in the same direction as this (lead) asset
         if not is_shadow:
             for companion in self._config.get_companion_assets():
@@ -413,14 +436,24 @@ class BinanceMomentumFeed:
         # Spread check: reject if bid-ask spread too wide (maker orders won't fill)
         # Skip check if MarketWS has no data yet (-1.0 sentinel) — newly subscribed tokens
         max_spread = self._config.max_entry_spread
-        if max_spread > 0 and self._market_ws:
-            spread = self._market_ws.get_spread(token_id)
-            if spread > 0 and spread > max_spread:
+        spread_val = None
+        best_bid_val = None
+        best_ask_val = None
+        book_imbalance_val = None
+        if self._market_ws:
+            raw_spread = self._market_ws.get_spread(token_id)
+            if raw_spread > 0:
+                spread_val = raw_spread
+            if max_spread > 0 and raw_spread > 0 and raw_spread > max_spread:
                 self._logger.info(
-                    f"Spread too wide: {slug} {outcome} spread=${spread:.3f} "
+                    f"Spread too wide: {slug} {outcome} spread=${raw_spread:.3f} "
                     f"> ${max_spread:.3f} — skipping"
                 )
                 return
+            best_bid_val = self._market_ws.get_best_bid(token_id) or None
+            best_ask_val = self._market_ws.get_best_ask(token_id) or None
+            depth = self._market_ws.get_book_depth(token_id)
+            book_imbalance_val = depth["imbalance"] if depth else None
 
         self.signals_generated += 1
 
@@ -450,6 +483,10 @@ class BinanceMomentumFeed:
             "liq_conviction": liq_conviction,
             "shadow": shadow,
             "condition_id": market_info.get("condition_id", ""),
+            "spread": spread_val,
+            "best_bid": best_bid_val,
+            "best_ask": best_ask_val,
+            "book_imbalance": book_imbalance_val,
         }
 
         shadow_tag = " [SHADOW]" if shadow else ""
@@ -872,8 +909,172 @@ class BinanceMomentumFeed:
             await asyncio.sleep(sleep_time)
 
     # -----------------------------------------------------------------------
+    # Build 6: Lag signal execution
+    # -----------------------------------------------------------------------
+
+    async def _fire_lag_signal(self, asset: str, delay_secs: int, outcome: str) -> None:
+        """Fire a companion lag signal after delay_secs.
+
+        Skips if: market has too little time left, companion midpoint already
+        moved more than lag_neutral_band from 0.50 (market already repriced).
+        Signal source = 'binance_momentum_lag' so guard/logger treat it like momentum.
+        """
+        await asyncio.sleep(delay_secs)
+
+        now = time.time()
+        epoch = int(now // 300) * 300
+        slug = f"{asset}-updown-5m-{epoch}"
+
+        secs_left = (epoch + 300) - now
+        min_secs = self._config.get_min_secs_remaining(300)
+        if secs_left < min_secs:
+            self._logger.debug(
+                f"Lag signal skip: {slug} {outcome} — only {secs_left:.0f}s left"
+            )
+            return
+
+        market_info = await self._discover_market(slug)
+        if not market_info:
+            return
+
+        token_id = (
+            market_info["up_token_id"] if outcome == "Up"
+            else market_info["down_token_id"]
+        )
+
+        midpoint = 0.0
+        if self._market_ws:
+            midpoint = self._market_ws.get_midpoint(token_id)
+        if midpoint <= 0:
+            midpoint = await self._clob.get_midpoint(token_id)
+        if midpoint <= 0:
+            return
+
+        # Skip if companion market has already repriced more than neutral_band from 0.50
+        band = self._config.lag_neutral_band
+        if outcome == "Up" and midpoint > 0.50 + band:
+            self._logger.info(
+                f"Lag signal skip: {slug} {outcome} already repriced to {midpoint:.4f}"
+            )
+            return
+        if outcome == "Down" and midpoint < 0.50 - band:
+            self._logger.info(
+                f"Lag signal skip: {slug} {outcome} already repriced to {midpoint:.4f}"
+            )
+            return
+
+        spread_val = None
+        book_imbalance_val = None
+        if self._market_ws:
+            raw_spread = self._market_ws.get_spread(token_id)
+            if raw_spread > 0:
+                spread_val = raw_spread
+            depth = self._market_ws.get_book_depth(token_id)
+            book_imbalance_val = depth["imbalance"] if depth else None
+
+        signal = {
+            "token_id": token_id,
+            "price": midpoint,
+            "slug": slug,
+            "market_title": market_info.get("market_title", slug),
+            "usdc_size": 999.0,
+            "direction": "BUY",
+            "outcome": outcome,
+            "asset": asset.upper(),
+            "tx_hash": f"lag-{slug}-{int(now)}",
+            "timestamp": now,
+            "source": "binance_momentum_lag",
+            "momentum_pct": 0.0,
+            "time_remaining_secs": int(secs_left),
+            "market_window_secs": 300,
+            "spread": spread_val,
+            "book_imbalance": book_imbalance_val,
+        }
+
+        self._logger.info(
+            f"Lag signal: {asset.upper()} {outcome} @ {midpoint:.4f} "
+            f"({secs_left:.0f}s left, delay={delay_secs}s)"
+        )
+        self.signals_generated += 1
+        await self._on_signal(signal)
+
+    # -----------------------------------------------------------------------
+    # Build 5: New market subscription watcher
+    # Polls Gamma API every 30s for active 5m slugs we haven't cached yet.
+    # Catches markets that epoch-math prefetch might miss on first run.
+    # -----------------------------------------------------------------------
+
+    async def _watch_new_markets(self) -> None:
+        """Poll Gamma API every 30s for currently-active 5m markets.
+
+        Complements _market_prefetch_loop (epoch-computed slugs) by fetching
+        actual live slugs from the API — catches markets we couldn't predict.
+        On new slug: calls _discover_market() which caches + subscribes MarketWS.
+        """
+        await asyncio.sleep(10)  # brief startup delay — let prefetch run first
+        while True:
+            try:
+                url = f"{GAMMA_API_URL}/markets?active=true&closed=false&limit=100"
+                session = self._gamma_session or aiohttp.ClientSession()
+                close_session = self._gamma_session is None
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            await asyncio.sleep(30)
+                            continue
+                        data = await resp.json()
+                finally:
+                    if close_session:
+                        await session.close()
+
+                new_count = 0
+                for market in data if isinstance(data, list) else []:
+                    slug = market.get("slug", "")
+                    if not slug or "-5m-" not in slug:
+                        continue
+                    if slug in self._market_cache:
+                        continue
+                    info = await self._discover_market(slug)
+                    if info:
+                        new_count += 1
+                        self._logger.info(f"New market watcher: subscribed {slug}")
+
+                if new_count:
+                    self._logger.info(f"Market watcher: +{new_count} new 5m markets discovered")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._logger.debug(f"Market watcher error (non-fatal): {e}")
+
+            await asyncio.sleep(30)
+
+    # -----------------------------------------------------------------------
     # Pair arb scan (Phase 2) — wired via signal_bot._safe_task(), not gather()
     # -----------------------------------------------------------------------
+
+    def get_current_momentum_pct(self, asset: str) -> Optional[float]:
+        """Return current momentum pct for asset within the configured window.
+
+        Used by ExitManager reversal check. Returns None if data unavailable.
+        """
+        symbol = ASSET_TO_BINANCE.get(asset.upper())
+        if not symbol:
+            return None
+        buffer = self._price_buffers.get(symbol)
+        if not buffer or len(buffer) < 2:
+            return None
+        now = time.time()
+        cutoff = now - self._config.momentum_window_secs
+        oldest_price = None
+        current_price = buffer[-1][1]
+        for ts, price in buffer:
+            if ts >= cutoff:
+                oldest_price = price
+                break
+        if oldest_price is None or oldest_price <= 0:
+            return None
+        return (current_price - oldest_price) / oldest_price
 
     def increment_pair_arb_count(self) -> None:
         self._active_pair_arb_count += 1

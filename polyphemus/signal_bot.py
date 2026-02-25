@@ -152,6 +152,7 @@ class SignalBot:
                 clob=self._clob,
                 on_signal=self._on_signal,
             )
+            self._exit_mgr.set_momentum_feed(self._momentum_feed)
             shadow = config.get_shadow_assets()
             self._logger.info(
                 f"Signal mode: Binance momentum (primary)"
@@ -583,6 +584,11 @@ class SignalBot:
                     "market_window_secs": signal.get("market_window_secs", 0),
                     "guard_passed": 1 if result.passed else 0,
                     "guard_reasons": ",".join(result.reasons) if result.reasons else "",
+                    "source": signal.get("source", ""),
+                    "spread": signal.get("spread"),
+                    "book_depth_bid": signal.get("best_bid"),
+                    "book_depth_ask": signal.get("best_ask"),
+                    "book_imbalance": signal.get("book_imbalance"),
                 }
                 # Compute time_remaining from slug if not in signal
                 time_remaining = signal.get("time_remaining_secs", 0)
@@ -626,7 +632,7 @@ class SignalBot:
 
             # 2. Binance momentum confirmation (skip if signal IS from momentum feed)
             asset = signal.get('asset', '')
-            is_momentum_signal = signal.get('source') in ('binance_momentum', 'window_delta', 'pair_arb', 'noaa_weather')
+            is_momentum_signal = signal.get('source') in ('binance_momentum', 'binance_momentum_lag', 'window_delta', 'pair_arb', 'noaa_weather')
             if self._binance_feed and asset in ASSET_TO_BINANCE and not is_momentum_signal:
                 if self._binance_feed.in_grace_period():
                     self._momentum_stats["bypassed"] += 1
@@ -667,6 +673,8 @@ class SignalBot:
                             f"({momentum.momentum_pct:+.3%}) "
                             f"[{phase} | {lookback}m | thresh={threshold:.4f}]"
                         )
+                        if self._signal_logger and signal_id > 0:
+                            self._signal_logger.update_signal(signal_id, {"outcome": "binance_filtered"})
                         return
                     self._momentum_stats["approved"] += 1
                     self._logger.info(
@@ -692,6 +700,8 @@ class SignalBot:
                 features = self._signal_scorer.build_feature_dict(
                     momentum_pct=signal.get("momentum_pct", 0.0),
                     midpoint=signal.get("price", 0.0),
+                    spread=signal.get("spread") or 0.0,
+                    book_imbalance=signal.get("book_imbalance") or 0.0,
                     time_remaining_secs=signal.get("time_remaining_secs", 0),
                     hour_utc=now_utc.hour,
                     day_of_week=now_utc.weekday(),
@@ -746,7 +756,7 @@ class SignalBot:
             if self._dry_run:
                 price = signal.get('price', 0)
                 asset = signal.get('asset', '')
-                projected = self._executor._calculate_size(price, available, asset)
+                projected = self._executor._calculate_size(price, available, asset, spread=signal.get("spread"))
                 self._logger.info(
                     f"[DRY RUN] Would execute BUY: {signal.get('slug', 'unknown')} "
                     f"@ ${price:.4f} (projected ${projected:.2f} / ${available:.2f} avail)"
@@ -757,6 +767,12 @@ class SignalBot:
             if signal.get('source') == 'noaa_weather' and self._telegram.enabled:
                 await self._telegram.submit(signal)
                 return  # execution happens via _execute_weather_signal callback
+
+            # 5c. Snapshot entry momentum direction for reversal exit (momentum signals only)
+            if signal.get('source') in ('binance_momentum', 'binance_momentum_lag') and self._momentum_feed:
+                signal.setdefault("metadata", {})
+                signal["metadata"]["entry_momentum_direction"] = signal.get("outcome", "").lower()
+                signal["metadata"]["entry_momentum_ts"] = time.time()
 
             # 6. Execute buy
             exec_result = await self._executor.execute_buy(signal, available)

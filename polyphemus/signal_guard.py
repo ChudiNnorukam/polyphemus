@@ -64,7 +64,7 @@ class SignalGuard:
         self.signals_received += 1
 
         # Check if this is a momentum signal (skip some filters for momentum)
-        is_momentum = signal.get('source') == 'binance_momentum'
+        is_momentum = signal.get('source') in ('binance_momentum', 'binance_momentum_lag')
         is_window_delta = signal.get('source') == 'window_delta'
         is_pair_arb = signal.get('source') == 'pair_arb'
         is_weather = signal.get('source') == 'noaa_weather'
@@ -83,6 +83,31 @@ class SignalGuard:
         outcome = signal.get('outcome', '').lower()
         if not is_weather and outcome not in ('up', 'down'):
             reasons.append('invalid_outcome')
+
+        # ====================================================================
+        # FILTER 2b: Market Window Type — momentum only trades 5m markets
+        # 15m markets have too much reversal risk for a 60s momentum signal
+        # ====================================================================
+        slug_check = signal.get('slug', '')
+        if is_momentum and slug_check and '-5m-' not in slug_check:
+            reasons.append('not_5m_market')
+
+        # ====================================================================
+        # FILTER 2c: Book Imbalance Alignment (momentum signals only)
+        # book_imbalance = bid/(bid+ask). >0.5 = buy pressure, <0.5 = sell pressure.
+        # For "Up" bet: want buy-side dominance (imbalance >= threshold)
+        # For "Down" bet: want sell-side dominance (imbalance <= 1 - threshold)
+        # Skip if imbalance is None (market_ws has no data yet — don't reject)
+        # ====================================================================
+        alignment_thresh = self._config.min_book_imbalance_alignment
+        if is_momentum and alignment_thresh > 0:
+            book_imbalance = signal.get("book_imbalance")
+            if book_imbalance is not None:
+                signal_direction = signal.get("outcome", "").lower()
+                if signal_direction == "up" and book_imbalance < alignment_thresh:
+                    reasons.append("book_imbalance_misaligned")
+                elif signal_direction == "down" and book_imbalance > (1.0 - alignment_thresh):
+                    reasons.append("book_imbalance_misaligned")
 
         # ====================================================================
         # FILTER 3: Price Range Check (window-aware)
@@ -135,6 +160,15 @@ class SignalGuard:
         blackout_hours = self._config.get_blackout_hours()
         if hour_utc in blackout_hours:
             reasons.append('blackout_hour')
+
+        # ====================================================================
+        # FILTER 5b: Economic Calendar Blackout (FOMC / CPI / NFP / PCE)
+        # BTC moves 1-3% on macro releases — fundamental repricing breaks arb thesis
+        # ====================================================================
+        if not is_weather and self._config.macro_blackout_mins > 0:
+            from .economic_calendar import is_macro_blackout
+            if is_macro_blackout(self._config.macro_blackout_mins):
+                reasons.append('macro_blackout')
 
         # ====================================================================
         # VALIDATOR 1: Market Expiry Check (configurable window)

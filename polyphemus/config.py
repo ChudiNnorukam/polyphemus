@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     accum_max_concurrent: int = 1        # max simultaneous accumulator positions
     accum_daily_loss_limit: float = -50.0  # stop accumulator if session PnL drops below this
 
+    # Cross-asset lag signals (fire ETH/SOL signal N secs after BTC momentum)
+    enable_lag_signals: bool = False   # default off — enable after Build 1 confirms ETH/SOL WR >= 60%
+    lag_assets: str = ""               # format: "ETH:40,SOL:60" — asset:delay_secs pairs
+    lag_neutral_band: float = 0.05     # skip if companion midpoint already moved >5c from 0.50
+
+    # Hour-of-day sizing multiplier (requires 200+ trades to calibrate)
+    hour_size_weights: str = ""  # CSV: "13:1.2,14:1.2,0:0.8" — only set after WR-by-hour analysis
+
     # Pair arb (Phase 2 — maker-only pair cost arbitrage on 5m markets)
     enable_pair_arb: bool = False
     pair_arb_dry_run: bool = True              # log only, no orders placed
@@ -159,6 +167,16 @@ class Settings(BaseSettings):
     dual_window_assets: str = ""  # Assets on BOTH default AND 15m windows (e.g., "BTC")
     momentum_max_pct: float = 0.02  # 2% cap — reject flash crashes / data glitches
     max_entry_spread: float = 0.04  # $0.04 max bid-ask spread for entry (wider = unfilled maker)
+    min_book_imbalance_alignment: float = 0.0  # 0=disabled. E.g. 0.53: Up signals need bid/(bid+ask)>=0.53, Down signals need <=0.47
+    macro_blackout_mins: int = 45              # blackout window around FOMC/CPI/NFP events (0=disabled)
+    spread_size_scaling: bool = False   # Scale position size down when spread is wide
+    spread_full_max: float = 0.02       # Spreads <= this get full position size
+    spread_reduced_size: float = 0.75   # Multiplier when spread > spread_full_max (0.75 = 75% of full size)
+
+    # Binance reversal exit (default off — enable after validating reversal rate)
+    momentum_reversal_exit: bool = False       # enable reversal exit check
+    momentum_reversal_pct: float = 0.002       # 0.2% reversal from entry triggers exit
+    momentum_reversal_window_secs: int = 180   # only check within first N secs of entry
 
     # Window Delta mode (buy winning side at T-N seconds before 5m window close)
     enable_window_delta: bool = False

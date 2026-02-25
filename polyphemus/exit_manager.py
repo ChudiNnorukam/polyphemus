@@ -44,6 +44,8 @@ class ExitManager:
         self._pending_exits: Set[str] = set()
         # Track failed exit attempts: token_id -> (attempt_count, last_attempt_time)
         self._exit_failures: Dict[str, Tuple[int, float]] = {}
+        # Optional momentum feed for reversal exit (set via set_momentum_feed)
+        self._momentum_feed = None
 
     def check_all(self, current_time: datetime) -> list[ExitSignal]:
         """
@@ -159,6 +161,38 @@ class ExitManager:
                 reason=ExitReason.MARKET_RESOLVED.value,
                 exit_price=None,  # Redeemer handles, no SELL needed
             )
+
+        # === CHECK #3b: momentum reversal exit ===
+        # If Binance momentum has reversed since entry, exit early rather than
+        # riding to a loss. Only fires within momentum_reversal_window_secs of entry.
+        # Default off (MOMENTUM_REVERSAL_EXIT=false). No-op if momentum feed not wired.
+        if (self._config.momentum_reversal_exit
+                and self._momentum_feed
+                and pos.metadata
+                and pos.metadata.get("entry_momentum_ts")):
+            ts = pos.metadata["entry_momentum_ts"]
+            secs_since = time.time() - ts
+            if 0 < secs_since < self._config.momentum_reversal_window_secs:
+                asset = pos.slug.split("-")[0].upper()
+                current_pct = self._momentum_feed.get_current_momentum_pct(asset)
+                if current_pct is not None:
+                    entry_dir = pos.metadata.get("entry_momentum_direction", "")
+                    threshold = self._config.momentum_reversal_pct
+                    reversed_ = (
+                        entry_dir == "up" and current_pct < -threshold
+                        or entry_dir == "down" and current_pct > threshold
+                    )
+                    if reversed_:
+                        self._logger.info(
+                            f"momentum_reversal triggered | token_id={pos.token_id} | "
+                            f"entry_dir={entry_dir} | current_pct={current_pct:+.3%} | "
+                            f"threshold={threshold:.3%}"
+                        )
+                        return ExitSignal(
+                            token_id=pos.token_id,
+                            reason="momentum_reversal",
+                            exit_price=pos.current_price or pos.entry_price,
+                        )
 
         # === HOLD-TO-RESOLUTION: skip stop_loss and profit_target on 5m markets ===
         if self._config.hold_to_resolution and window_secs <= 300:
@@ -403,6 +437,10 @@ class ExitManager:
             )
 
         return triggered
+
+    def set_momentum_feed(self, feed) -> None:
+        """Inject BinanceMomentumFeed for reversal exit checks."""
+        self._momentum_feed = feed
 
     def complete_exit(self, token_id: str) -> None:
         """

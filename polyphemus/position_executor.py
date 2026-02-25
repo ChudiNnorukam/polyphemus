@@ -102,7 +102,7 @@ class PositionExecutor:
             )
         else:
             # Calculate position size (3-layer sizing + asset multiplier + liquidation boost)
-            size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction)
+            size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction, spread=signal.get("spread"))
         if size <= 0:
             msg = (
                 f"Size calculation failed for {slug} @ {price}: "
@@ -337,7 +337,7 @@ class PositionExecutor:
             fill_size=size,
         )
 
-    def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0) -> float:
+    def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0, spread: Optional[float] = None) -> float:
         """Calculate position size using 3-layer sizing model + asset multiplier.
 
         Layer 1: Base percentage of available capital
@@ -389,6 +389,16 @@ class PositionExecutor:
             f"base_pct={effective_pct}, base_spend={base_spend:.2f}"
         )
 
+        # Layer 1a: Spread scaling (wider spread = smaller position)
+        if self._config.spread_size_scaling and spread is not None and spread > 0:
+            if spread > self._config.spread_full_max:
+                spread_mult = self._config.spread_reduced_size
+                base_spend *= spread_mult
+                self._logger.info(
+                    f"Layer 1a (spread): spread={spread:.3f} > full_max={self._config.spread_full_max:.3f}, "
+                    f"scaling to {spread_mult:.0%}: spend={base_spend:.2f}"
+                )
+
         # Layer 1b: Per-asset multiplier
         if asset:
             asset_mult = self._config.get_asset_multiplier(asset)
@@ -406,6 +416,26 @@ class PositionExecutor:
                 f"Layer 1c (liq boost): conviction={liq_conviction:.2f}, "
                 f"boost={liq_boost:.2f}x, after_liq={base_spend:.2f}"
             )
+
+        # Layer 1d: Hour-of-day sizing multiplier (requires 200+ trades to calibrate)
+        if self._config.hour_size_weights.strip():
+            hour = datetime.now(timezone.utc).hour
+            weights = {}
+            for part in self._config.hour_size_weights.split(","):
+                part = part.strip()
+                if ":" in part:
+                    try:
+                        h, w = part.split(":", 1)
+                        weights[int(h.strip())] = float(w.strip())
+                    except ValueError:
+                        pass
+            hour_mult = weights.get(hour, 1.0)
+            if hour_mult != 1.0:
+                base_spend *= hour_mult
+                self._logger.info(
+                    f"Layer 1d (hour): hour={hour}UTC, mult={hour_mult:.2f}, "
+                    f"after_hour={base_spend:.2f}"
+                )
 
         # Layer 2: Tuner multiplier
         spend = base_spend

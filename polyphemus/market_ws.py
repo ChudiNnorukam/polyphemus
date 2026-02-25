@@ -31,6 +31,8 @@ class MarketWS:
         self._midpoints: Dict[str, float] = {}  # token_id -> midpoint
         self._best_bids: Dict[str, float] = {}
         self._best_asks: Dict[str, float] = {}
+        self._bid_sizes: Dict[str, float] = {}   # top-of-book bid quantity
+        self._ask_sizes: Dict[str, float] = {}   # top-of-book ask quantity
         self._last_update: Dict[str, float] = {}  # token_id -> epoch of last update
         self._subscribed: Set[str] = set()
         self._pending_subscribe: Set[str] = set()  # tokens to sub on (re)connect
@@ -69,6 +71,8 @@ class MarketWS:
             self._midpoints.pop(t, None)
             self._best_bids.pop(t, None)
             self._best_asks.pop(t, None)
+            self._bid_sizes.pop(t, None)
+            self._ask_sizes.pop(t, None)
             self._last_update.pop(t, None)
 
     def get_midpoint(self, token_id: str) -> float:
@@ -103,6 +107,20 @@ class MarketWS:
         if bid <= 0 or ask <= 0:
             return -1.0  # No data — caller should skip spread check
         return ask - bid
+
+    def get_book_depth(self, token_id: str) -> Optional[dict]:
+        """Return top-of-book qty imbalance. None if no size data yet.
+
+        imbalance = bid_qty / (bid_qty + ask_qty)
+        > 0.5 = buy pressure, < 0.5 = sell pressure.
+        Only populated from 'book' snapshot messages (not price_change).
+        """
+        bid_q = self._bid_sizes.get(token_id, 0.0)
+        ask_q = self._ask_sizes.get(token_id, 0.0)
+        if bid_q <= 0 or ask_q <= 0:
+            return None
+        imbalance = bid_q / (bid_q + ask_q)
+        return {"bid_qty": bid_q, "ask_qty": ask_q, "imbalance": round(imbalance, 4)}
 
     @property
     def is_connected(self) -> bool:
@@ -180,10 +198,11 @@ class MarketWS:
             self._logger.debug(f"MarketWS unhandled event: {event_type}")
 
     def _handle_book(self, data: dict) -> None:
-        """Full book snapshot — extract best bid/ask.
+        """Full book snapshot — extract best bid/ask and top-of-book quantities.
 
         CLOB WS sends 'buys' (bids) and 'sells' (asks), each sorted
         best-first: buys[0] = highest bid, sells[0] = lowest ask.
+        Each entry has both 'price' and 'size' keys.
         """
         asset_id = data.get("asset_id", "")
         if not asset_id or asset_id not in self._subscribed:
@@ -194,6 +213,12 @@ class MarketWS:
 
         best_bid = float(buys[0]["price"]) if buys else 0.0
         best_ask = float(sells[0]["price"]) if sells else 0.0
+
+        # Store top-of-book quantities for true imbalance calculation
+        if buys:
+            self._bid_sizes[asset_id] = float(buys[0].get("size", 0))
+        if sells:
+            self._ask_sizes[asset_id] = float(sells[0].get("size", 0))
 
         self._update_prices(asset_id, best_bid, best_ask)
 
