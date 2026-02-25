@@ -173,6 +173,11 @@ class Settings(BaseSettings):
     spread_full_max: float = 0.02       # Spreads <= this get full position size
     spread_reduced_size: float = 0.75   # Multiplier when spread > spread_full_max (0.75 = 75% of full size)
 
+    # 15m momentum trading (late-entry only — backtest: 90% WR in last 300s, 0.55-0.90 range)
+    enable_15m_momentum: bool = False       # default off — enable after backtest validation
+    momentum_15m_max_secs_remaining: int = 300  # only enter 15m markets with <= this many secs left
+    momentum_15m_min_secs_remaining: int = 60   # need at least this many secs to get filled
+
     # Binance reversal exit (default off — enable after validating reversal rate)
     momentum_reversal_exit: bool = False       # enable reversal exit check
     momentum_reversal_pct: float = 0.002       # 0.2% reversal from entry triggers exit

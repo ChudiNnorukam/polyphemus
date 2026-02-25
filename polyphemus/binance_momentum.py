@@ -1030,7 +1030,11 @@ class BinanceMomentumFeed:
                 new_count = 0
                 for market in data if isinstance(data, list) else []:
                     slug = market.get("slug", "")
-                    if not slug or "-5m-" not in slug:
+                    if not slug:
+                        continue
+                    if "-5m-" not in slug and not (
+                        "-15m-" in slug and self._config.enable_15m_momentum
+                    ):
                         continue
                     if slug in self._market_cache:
                         continue
@@ -1040,7 +1044,7 @@ class BinanceMomentumFeed:
                         self._logger.info(f"New market watcher: subscribed {slug}")
 
                 if new_count:
-                    self._logger.info(f"Market watcher: +{new_count} new 5m markets discovered")
+                    self._logger.info(f"Market watcher: +{new_count} new markets discovered")
 
             except asyncio.CancelledError:
                 raise

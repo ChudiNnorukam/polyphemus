@@ -85,12 +85,32 @@ class SignalGuard:
             reasons.append('invalid_outcome')
 
         # ====================================================================
-        # FILTER 2b: Market Window Type — momentum only trades 5m markets
-        # 15m markets have too much reversal risk for a 60s momentum signal
+        # FILTER 2b: Market Window Type
+        # 5m markets: always allowed for momentum
+        # 15m markets: allowed if enable_15m_momentum=true AND entering late
+        #   (backtest: 90% WR when entering in last 300s with midpoint 0.55-0.90)
         # ====================================================================
         slug_check = signal.get('slug', '')
-        if is_momentum and slug_check and '-5m-' not in slug_check:
-            reasons.append('not_5m_market')
+        is_15m_momentum = False
+        if is_momentum and slug_check:
+            if '-5m-' in slug_check:
+                pass  # 5m always allowed
+            elif '-15m-' in slug_check and self._config.enable_15m_momentum:
+                parts_15m = slug_check.rsplit('-', 1)
+                if len(parts_15m) == 2 and parts_15m[1].isdigit():
+                    market_epoch_15m = int(parts_15m[1])
+                    market_end_15m = market_epoch_15m + 900
+                    secs_left_15m = market_end_15m - time.time()
+                    if secs_left_15m > self._config.momentum_15m_max_secs_remaining:
+                        reasons.append('15m_too_early')
+                    elif secs_left_15m < self._config.momentum_15m_min_secs_remaining:
+                        reasons.append('market_expired')
+                    else:
+                        is_15m_momentum = True
+                else:
+                    reasons.append('not_5m_market')
+            else:
+                reasons.append('not_5m_market')
 
         # ====================================================================
         # FILTER 2c: Book Imbalance Alignment (momentum signals only)
@@ -180,10 +200,10 @@ class SignalGuard:
         slug = signal.get('slug', '')
         from .types import parse_window_from_slug
         window = parse_window_from_slug(slug)
-        if not is_window_delta and not is_weather:
+        if not is_window_delta and not is_weather and not is_15m_momentum:
             # Cap min_secs at 40% of window so 5m markets (300s) aren't blocked
             # 5m: min(360, 120) = 120s → 3min entry window
-            # 15m: min(360, 360) = 360s → 9min entry window
+            # 15m momentum: skipped here — timing validated in FILTER 2b
             min_secs = min(self._config.min_secs_remaining, int(window * 0.4))
             parts = slug.rsplit('-', 1)
             if len(parts) == 2 and parts[1].isdigit():
