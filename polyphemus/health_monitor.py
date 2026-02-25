@@ -151,7 +151,7 @@ class HealthMonitor:
 
                 self._logger.info(
                     f"health_log: uptime={uptime_hours:.1f}h, positions={open_positions}, "
-                    f"signal_age={signal_age_secs}s, balance={balance}, errors={self._error_count}"
+                    f"signal_age={signal_age_secs if signal_age_secs is not None else 'N/A'}, balance={balance}, errors={self._error_count}"
                     f"{guard_info}"
                 )
 

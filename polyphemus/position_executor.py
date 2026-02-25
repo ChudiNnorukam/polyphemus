@@ -203,7 +203,12 @@ class PositionExecutor:
 
         if not fill_result.success:
             # Attempt cancel
-            await self._clob.cancel_order(order_id)
+            cancel_ok = await self._clob.cancel_order(order_id)
+            if not cancel_ok:
+                self._logger.warning(
+                    f"cancel_order failed after maker timeout (order_id={order_id}) — "
+                    f"taker fallback may cause double-buy"
+                )
 
             # Hybrid fallback: if maker timed out, retry as taker
             if use_maker and fill_result.reason == "timeout":

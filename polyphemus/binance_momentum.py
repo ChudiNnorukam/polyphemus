@@ -273,6 +273,10 @@ class BinanceMomentumFeed:
         if not asset:
             return
 
+        # Companion assets don't fire independently — they follow the lead asset's trigger
+        if asset.upper() in self._config.get_companion_assets():
+            return
+
         # Per-asset cooldown: suppress duplicate detections for 5s
         cooldown_key = f"{asset}_{direction}"
         last_fire = self._momentum_cooldown.get(cooldown_key, 0.0)
@@ -329,6 +333,25 @@ class BinanceMomentumFeed:
         # Generate signal for each window (e.g., BTC → [300, 900] for dual-window)
         for window in self._config.get_market_windows(asset):
             await self._generate_signal_for_window(asset, direction, momentum_pct, window, shadow=is_shadow)
+
+        # Companion assets: fire in the same direction as this (lead) asset
+        if not is_shadow:
+            for companion in self._config.get_companion_assets():
+                if allowed and companion not in allowed:
+                    continue  # companion must also be in ASSET_FILTER
+                if cooldown > 0 and self._last_signal_time.get(companion, 0) > 0:
+                    elapsed = time.time() - self._last_signal_time.get(companion, 0)
+                    if elapsed < cooldown:
+                        self._logger.debug(
+                            f"Companion cooldown: {companion} skipped "
+                            f"({cooldown - elapsed:.0f}s remaining)"
+                        )
+                        continue
+                self._logger.info(
+                    f"Companion signal: {companion} follows {asset} {direction} {momentum_pct:+.3%}"
+                )
+                for window in self._config.get_market_windows(companion):
+                    await self._generate_signal_for_window(companion, direction, momentum_pct, window, shadow=False)
 
     async def _generate_signal_for_window(self, asset: str, direction: str,
                                            momentum_pct: float, window: int,

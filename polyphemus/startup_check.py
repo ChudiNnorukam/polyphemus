@@ -143,7 +143,10 @@ def check_build(package_dir: Optional[Path] = None) -> list:
 
 def check_ranges(env: dict) -> list:
     findings = []
+    accum_enabled = (env.get("ENABLE_ACCUMULATOR") or os.environ.get("ENABLE_ACCUMULATOR", "false")).lower() == "true"
     for key, rule in RANGE_CHECKS.items():
+        if key.startswith("ACCUM_") and not accum_enabled:
+            continue
         raw = env.get(key) or os.environ.get(key)
         if raw is None:
             findings.append(Finding(

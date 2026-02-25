@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     entry_trap_high: float = 0.0  # Set both >0 to enable (e.g. 0.60/0.80)
     asset_filter: str = ""  # Allow-list: only trade these assets (comma-separated, e.g. "ETH")
     shadow_assets: str = ""  # Log signals but don't execute (comma-separated, e.g. "ETH,SOL,XRP")
+    companion_assets: str = ""  # Follow lead asset direction only (e.g. "ETH" follows BTC trigger, no independent firing)
     blocked_assets: str = ""
     blackout_hours: str = ""
     max_open_positions: int = 3
@@ -85,12 +86,12 @@ class Settings(BaseSettings):
     poll_interval: float = 1.0  # seconds between polls (polling mode only)
 
     enable_sell_signals: bool = True
-    enable_self_tuning: bool = True
+    enable_self_tuning: bool = False
     enable_auto_redemption: bool = True
     dry_run: bool = True
 
     # Arbitrage mode
-    enable_arb: bool = True
+    enable_arb: bool = False
     arb_assets: str = "BTC,ETH,SOL"
     arb_max_pair_cost: float = 0.980
     arb_min_net_profit_pct: float = 0.005
@@ -211,6 +212,12 @@ class Settings(BaseSettings):
         if not self.shadow_assets.strip():
             return []
         return [a.strip().upper() for a in self.shadow_assets.split(',') if a.strip()]
+
+    def get_companion_assets(self) -> List[str]:
+        """Return companion assets (trade only when lead asset fires, same direction)."""
+        if not self.companion_assets.strip():
+            return []
+        return [a.strip().upper() for a in self.companion_assets.split(',') if a.strip()]
 
     def get_blocked_assets(self) -> List[str]:
         return [asset.strip() for asset in self.blocked_assets.split(',')]
