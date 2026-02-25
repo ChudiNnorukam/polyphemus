@@ -437,6 +437,21 @@ class PositionExecutor:
                     f"after_hour={base_spend:.2f}"
                 )
 
+        # Layer 1e: Entry-price scaling (lower entry = bigger bet)
+        if self._config.entry_price_scaling and price > 0:
+            anchor = self._config.entry_price_anchor
+            if anchor < 1.0:
+                raw_mult = (1.0 - price) / (1.0 - anchor)
+                ep_mult = max(
+                    self._config.entry_price_scale_min,
+                    min(raw_mult, self._config.entry_price_scale_max),
+                )
+                base_spend *= ep_mult
+                self._logger.info(
+                    f"Layer 1e (entry-price): price={price:.2f}, anchor={anchor:.2f}, "
+                    f"mult={ep_mult:.2f}x, after_ep={base_spend:.2f}"
+                )
+
         # Layer 2: Tuner multiplier
         spend = base_spend
         tuner_multiplier = 1.0

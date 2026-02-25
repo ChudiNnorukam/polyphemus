@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     asset_multiplier_sol: float = 1.2
     asset_multiplier_xrp: float = 0.8  # Conservative — less liquidity than ETH/SOL
 
+    entry_price_scaling: bool = False
+    entry_price_anchor: float = 0.80
+    entry_price_scale_min: float = 0.5
+    entry_price_scale_max: float = 2.0
+
     low_balance_threshold: float = 10.0
     max_deployment_ratio: float = 0.50
 
