@@ -24,19 +24,21 @@ import aiosqlite
 API_TOKEN = os.environ.get("DASHBOARD_TOKEN", "changeme")
 
 BOTS = {
-    "lagbot": {
-        "db": "/opt/lagbot/data/performance.db",
-        "env": "/opt/lagbot/lagbot/.env",
-        "service": "lagbot",
-        "health_dir": "/opt/lagbot/data",
-        "kill_switch": "/opt/lagbot/KILL_SWITCH",
+    "emmanuel": {
+        "db": "/opt/lagbot/instances/emmanuel/data/performance.db",
+        "signals_db": "/opt/lagbot/instances/emmanuel/data/signals.db",
+        "env": "/opt/lagbot/instances/emmanuel/.env",
+        "service": "lagbot@emmanuel",
+        "health_dir": "/opt/lagbot/instances/emmanuel/data",
+        "kill_switch": "/opt/lagbot/instances/emmanuel/KILL_SWITCH",
     },
     "polyphemus": {
-        "db": "/opt/polyphemus/data/performance.db",
-        "env": "/opt/polyphemus/polyphemus/.env",
-        "service": "polyphemus",
-        "health_dir": "/opt/polyphemus/data",
-        "kill_switch": "/opt/polyphemus/KILL_SWITCH",
+        "db": "/opt/lagbot/instances/polyphemus/data/performance.db",
+        "signals_db": "/opt/lagbot/instances/polyphemus/data/signals.db",
+        "env": "/opt/lagbot/instances/polyphemus/.env",
+        "service": "lagbot@polyphemus",
+        "health_dir": "/opt/lagbot/instances/polyphemus/data",
+        "kill_switch": "/opt/lagbot/instances/polyphemus/KILL_SWITCH",
     },
 }
 
@@ -137,6 +139,24 @@ async def query_db(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
         async with db.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+
+async def query_signals_db(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
+    """Run a read-only query against a bot's signals.db."""
+    if not Path(db_path).exists():
+        return []
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+def confidence_label(n: int) -> str:
+    if n < 30:   return f"ANECDOTAL (n={n})"
+    if n < 107:  return f"LOW (n={n})"
+    if n < 385:  return f"MODERATE (n={n})"
+    return f"SIGNIFICANT (n={n})"
 
 
 def has_column(db_path: str, table: str, column: str) -> bool:
@@ -440,6 +460,114 @@ async def restart_service(
         return {"status": "restarted", "bot": bot}
     except subprocess.TimeoutExpired:
         raise HTTPException(500, "Restart timed out")
+
+
+@app.get("/api/signals")
+async def signals_endpoint(
+    bot: Optional[str] = Query(None),
+    limit: int = Query(20, le=200),
+    asset: Optional[str] = Query(None),
+    guard_passed: Optional[int] = Query(None),
+    token: str = Depends(verify_token),
+):
+    """Recent signals from signals.db across instances."""
+    all_signals = []
+    targets = {bot: BOTS[bot]} if bot and bot in BOTS else BOTS
+
+    for bot_name, bot_cfg in targets.items():
+        sig_db = bot_cfg.get("signals_db", "")
+        where = []
+        params: list = []
+        if asset:
+            where.append("asset = ?")
+            params.append(asset.upper())
+        if guard_passed is not None:
+            where.append("guard_passed = ?")
+            params.append(guard_passed)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        rows = await query_signals_db(sig_db, f"""
+            SELECT timestamp, asset, direction, midpoint, guard_passed,
+                   guard_reasons, slug, time_remaining_secs, pnl, outcome
+            FROM signals {where_sql}
+            ORDER BY timestamp DESC LIMIT ?
+        """, (*params, limit))
+        for r in rows:
+            r["bot"] = bot_name
+        all_signals.extend(rows)
+
+    all_signals.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    return {"signals": all_signals[:limit], "count": len(all_signals)}
+
+
+@app.get("/api/inference")
+async def inference(token: str = Depends(verify_token)):
+    """Running WR analytics from signals.db with confidence labels."""
+    results = {}
+    for bot_name, bot_cfg in BOTS.items():
+        sig_db = bot_cfg.get("signals_db", "")
+
+        bucket_rows = await query_signals_db(sig_db, """
+            SELECT
+                CASE
+                    WHEN midpoint < 0.55 THEN '0.50-0.55'
+                    WHEN midpoint < 0.65 THEN '0.55-0.65'
+                    WHEN midpoint < 0.75 THEN '0.65-0.75'
+                    ELSE '0.75+'
+                END as bucket,
+                COUNT(*) as n,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins
+            FROM signals
+            WHERE guard_passed=1 AND pnl IS NOT NULL
+            GROUP BY bucket ORDER BY bucket
+        """)
+
+        asset_rows = await query_signals_db(sig_db, """
+            SELECT asset,
+                COUNT(*) as n,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins
+            FROM signals
+            WHERE guard_passed=1 AND pnl IS NOT NULL
+            GROUP BY asset
+        """)
+
+        cb_state: dict = {}
+        try:
+            cb_path = bot_cfg["health_dir"] + "/circuit_breaker.json"
+            with open(cb_path) as f:
+                cb_state = json.load(f)
+        except Exception:
+            pass
+
+        pending = await query_signals_db(sig_db, """
+            SELECT COUNT(*) as n FROM signals WHERE guard_passed=1 AND pnl IS NULL
+        """)
+        pending_n = pending[0]["n"] if pending else 0
+
+        results[bot_name] = {
+            "by_bucket": [
+                {
+                    "bucket": r["bucket"],
+                    "n": r["n"],
+                    "wins": r["wins"] or 0,
+                    "win_rate": round((r["wins"] or 0) / r["n"] * 100, 1) if r["n"] else 0,
+                    "confidence": confidence_label(r["n"]),
+                }
+                for r in bucket_rows
+            ],
+            "by_asset": [
+                {
+                    "asset": r["asset"],
+                    "n": r["n"],
+                    "wins": r["wins"] or 0,
+                    "win_rate": round((r["wins"] or 0) / r["n"] * 100, 1) if r["n"] else 0,
+                    "confidence": confidence_label(r["n"]),
+                }
+                for r in asset_rows
+            ],
+            "circuit_breaker": cb_state,
+            "pending_signals": pending_n,
+        }
+    return results
 
 
 @app.post("/api/config")
