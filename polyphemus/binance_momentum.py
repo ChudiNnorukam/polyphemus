@@ -396,9 +396,14 @@ class BinanceMomentumFeed:
         self._state_store.save("signaled_slugs", self._signaled_slugs)
 
         # Check time remaining (per-window threshold)
+        # 15m momentum uses its own late-entry window (validated in signal_guard FILTER 2b)
         market_end = epoch + window
         secs_left = market_end - time.time()
-        min_secs = self._config.get_min_secs_remaining(window)
+        is_15m = window == 900
+        if is_15m and self._config.enable_15m_momentum:
+            min_secs = self._config.momentum_15m_min_secs_remaining
+        else:
+            min_secs = self._config.get_min_secs_remaining(window)
         if secs_left < min_secs:
             self._logger.info(
                 f"Skipping {slug}: only {secs_left:.0f}s left "
