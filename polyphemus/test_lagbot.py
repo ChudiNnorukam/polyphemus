@@ -1022,7 +1022,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_entry_cooldown(self):
         feed, _, on_signal = self._make_feed(entry_cooldown_secs=120)
-        feed._last_signal_time = time.time()  # just signaled
+        feed._last_signal_time = {"BTC": time.time()}  # just signaled
 
         # Mock _discover_market to avoid Gamma API calls
         feed._discover_market = AsyncMock(return_value={
@@ -1036,7 +1036,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_cooldown_expired(self):
         feed, _, on_signal = self._make_feed(entry_cooldown_secs=120)
-        feed._last_signal_time = time.time() - 130  # 130s ago > 120s cooldown
+        feed._last_signal_time = {"BTC": time.time() - 130}  # 130s ago > 120s cooldown
 
         feed._discover_market = AsyncMock(return_value={
             "up_token_id": "0xup", "down_token_id": "0xdown",
@@ -1050,7 +1050,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_asset_filter_blocks(self):
         feed, _, on_signal = self._make_feed(asset_filter="ETH")
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
 
         await feed._generate_signal("BTC", "UP")  # BTC not in filter
         on_signal.assert_not_called()
@@ -1058,7 +1058,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_asset_filter_allows(self):
         feed, _, on_signal = self._make_feed(asset_filter="BTC")
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
         feed._discover_market = AsyncMock(return_value={
             "up_token_id": "0xup", "down_token_id": "0xdown",
             "market_title": "test"
@@ -1070,7 +1070,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_direction_filter(self):
         feed, _, on_signal = self._make_feed(direction_filter="Up")
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
 
         await feed._generate_signal("BTC", "DOWN")  # DOWN filtered out
         on_signal.assert_not_called()
@@ -1079,7 +1079,7 @@ class TestBinanceMomentumFeed:
     async def test_slug_debounce(self):
         """Same slug can only be signaled once."""
         feed, _, on_signal = self._make_feed(entry_cooldown_secs=0)
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
         feed._discover_market = AsyncMock(return_value={
             "up_token_id": "0xup", "down_token_id": "0xdown",
             "market_title": "test"
@@ -1102,7 +1102,7 @@ class TestBinanceMomentumFeed:
     async def test_signal_dict_structure(self):
         """Verify the signal dict has all required fields."""
         feed, clob, on_signal = self._make_feed(entry_cooldown_secs=0)
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
         clob.get_midpoint = AsyncMock(return_value=0.48)
         feed._discover_market = AsyncMock(return_value={
             "up_token_id": "0xup_token", "down_token_id": "0xdown_token",
@@ -1134,7 +1134,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_down_signal_uses_down_token(self):
         feed, clob, on_signal = self._make_feed(entry_cooldown_secs=0)
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
         clob.get_midpoint = AsyncMock(return_value=0.52)
         feed._discover_market = AsyncMock(return_value={
             "up_token_id": "0xup", "down_token_id": "0xdown",
@@ -1220,7 +1220,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_no_signal_when_midpoint_zero(self):
         feed, clob, on_signal = self._make_feed(entry_cooldown_secs=0)
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
         clob.get_midpoint = AsyncMock(return_value=0.0)  # bad midpoint
         feed._discover_market = AsyncMock(return_value={
             "up_token_id": "0xup", "down_token_id": "0xdown",
@@ -1238,7 +1238,7 @@ class TestBinanceMomentumFeed:
     @pytest.mark.asyncio
     async def test_no_signal_when_market_not_found(self):
         feed, _, on_signal = self._make_feed(entry_cooldown_secs=0)
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
         feed._discover_market = AsyncMock(return_value=None)
 
         window = 300
@@ -1254,7 +1254,7 @@ class TestBinanceMomentumFeed:
             min_secs_remaining=60,
             market_window_secs=300,
         )
-        feed._last_signal_time = 0
+        feed._last_signal_time = {}
         feed._discover_market = AsyncMock(return_value={
             "up_token_id": "0xup", "down_token_id": "0xdown",
             "market_title": "test"

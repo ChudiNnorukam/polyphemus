@@ -73,7 +73,7 @@ class BinanceMomentumFeed:
         self._regime_detector = None  # Set by signal_bot after init
 
         # Entry stagger: cooldown between entries to prevent correlated cluster wipeouts
-        self._last_signal_time: float = 0
+        self._last_signal_time: dict = {}  # per-asset: {asset: timestamp}
 
         # Fee gate: if ANY 5m market has fees, halt all signal generation
         self._fee_gate_active: bool = False
@@ -304,8 +304,8 @@ class BinanceMomentumFeed:
 
         # Entry cooldown: prevent correlated cluster entries (skip for shadow)
         cooldown = self._config.entry_cooldown_secs
-        if not is_shadow and cooldown > 0 and self._last_signal_time > 0:
-            elapsed = time.time() - self._last_signal_time
+        if not is_shadow and cooldown > 0 and self._last_signal_time.get(asset.upper(), 0) > 0:
+            elapsed = time.time() - self._last_signal_time.get(asset.upper(), 0)
             if elapsed < cooldown:
                 self._logger.debug(
                     f"Entry cooldown: {asset} {direction} skipped "
@@ -437,7 +437,7 @@ class BinanceMomentumFeed:
 
         # Update cooldown timer BEFORE sending signal (not for shadow)
         if not shadow:
-            self._last_signal_time = time.time()
+            self._last_signal_time[asset.upper()] = time.time()
 
         await self._on_signal(signal)
 
@@ -586,6 +586,13 @@ class BinanceMomentumFeed:
             midpoint = await self._clob.get_midpoint(token_id)
         if midpoint <= 0:
             self._logger.warning(f"Window delta: no midpoint for {slug} {outcome}")
+            return
+
+        if midpoint > self._config.window_delta_max_price:
+            self._logger.debug(
+                f"Window delta: {slug} {outcome} midpoint {midpoint:.4f} > "
+                f"window_delta_max_price {self._config.window_delta_max_price} — skip"
+            )
             return
 
         self.signals_generated += 1
