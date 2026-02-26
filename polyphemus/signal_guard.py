@@ -191,13 +191,25 @@ class SignalGuard:
                 reasons.append('macro_blackout')
 
         # ====================================================================
-        # FILTER 6: Fear & Greed Regime Check
-        # Hard block when F&G <= fg_min_threshold (extreme fear = whipsaw kills arb)
+        # FILTER 6a: Fear & Greed Regime Check (legacy, default disabled)
         # ====================================================================
         if self._config.fg_min_threshold > 0 and not is_weather:
             fg_value = signal.get('fear_greed')
             if fg_value is not None and fg_value <= self._config.fg_min_threshold:
                 reasons.append('extreme_fear_regime')
+
+        # ====================================================================
+        # FILTER 6b: Whipsaw Regime Guard
+        # Block when volatility is high but net direction is low (chop kills arb)
+        # directionality = |trend_1h| / volatility_1h
+        # ====================================================================
+        if self._config.whipsaw_max_ratio > 0 and not is_weather:
+            vol_1h = signal.get('volatility_1h')
+            trend_1h = signal.get('trend_1h')
+            if vol_1h is not None and trend_1h is not None and vol_1h >= self._config.whipsaw_min_vol:
+                directionality = abs(trend_1h) / vol_1h
+                if directionality < self._config.whipsaw_max_ratio:
+                    reasons.append('whipsaw_regime')
 
         # ====================================================================
         # VALIDATOR 1: Market Expiry Check (configurable window)

@@ -607,6 +607,12 @@ class SignalBot:
                 if fg_val is not None:
                     signal["fear_greed"] = fg_val
 
+            # 0c. Inject regime data (volatility_1h, trend_1h) for whipsaw guard
+            if self._regime_detector:
+                regime = self._regime_detector.get_regime(signal.get("asset", "BTC"))
+                signal["volatility_1h"] = regime.volatility_1h
+                signal["trend_1h"] = regime.trend_1h
+
             # 1. Run through signal guard
             result = self._guard.check(signal)
 

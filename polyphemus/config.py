@@ -225,11 +225,15 @@ class Settings(BaseSettings):
 
     market_context_path: str = "/opt/openclaw/data/lagbot_context.json"
 
-    # Fear & Greed regime filter (auto-stop in extreme fear)
-    fg_min_threshold: int = 25            # hard block entries when F&G <= this (0=disabled)
+    # Fear & Greed regime filter (watchdog handles start/stop; hard block disabled by default)
+    fg_min_threshold: int = 0             # hard block entries when F&G <= this (0=disabled)
     fg_caution_threshold: int = 40        # reduce sizing when F&G between min and this
     fg_caution_size_mult: float = 0.5     # sizing multiplier in caution zone (50%)
     max_trade_amount: float = 0.0         # absolute $ cap per trade (0=disabled, e.g. 100.0)
+
+    # Whipsaw regime guard (blocks trades when volatility is high but net direction is low)
+    whipsaw_max_ratio: float = 0.20       # block when directionality < this (0=disabled)
+    whipsaw_min_vol: float = 0.005        # only apply when volatility_1h > 0.5% (skip calm/noisy)
 
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training

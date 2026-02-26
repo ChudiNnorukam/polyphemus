@@ -102,7 +102,7 @@ class PositionExecutor:
             )
         else:
             # Calculate position size (3-layer sizing + asset multiplier + liquidation boost)
-            size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction, spread=signal.get("spread"), fear_greed=signal.get("fear_greed"))
+            size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction, spread=signal.get("spread"), fear_greed=signal.get("fear_greed"), signal=signal)
         if size <= 0:
             msg = (
                 f"Size calculation failed for {slug} @ {price}: "
@@ -337,7 +337,7 @@ class PositionExecutor:
             fill_size=size,
         )
 
-    def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0, spread: Optional[float] = None, fear_greed: Optional[float] = None) -> float:
+    def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0, spread: Optional[float] = None, fear_greed: Optional[float] = None, signal: Optional[dict] = None) -> float:
         """Calculate position size using 3-layer sizing model + asset multiplier.
 
         Layer 1: Base percentage of available capital
@@ -452,16 +452,19 @@ class PositionExecutor:
                     f"mult={ep_mult:.2f}x, after_ep={base_spend:.2f}"
                 )
 
-        # Layer 1f: Fear & Greed caution zone (reduce size in moderate fear)
-        fg_value = fear_greed
-        if fg_value is not None and self._config.fg_caution_threshold > 0:
-            if self._config.fg_min_threshold < fg_value <= self._config.fg_caution_threshold:
-                fg_mult = self._config.fg_caution_size_mult
-                base_spend *= fg_mult
-                self._logger.info(
-                    f"Layer 1f (F&G caution): F&G={fg_value} in [{self._config.fg_min_threshold+1},{self._config.fg_caution_threshold}], "
-                    f"mult={fg_mult:.0%}, after_fg={base_spend:.2f}"
-                )
+        # Layer 1f: Whipsaw caution zone (reduce size in moderate chop)
+        if self._config.whipsaw_max_ratio > 0:
+            vol_1h = signal.get('volatility_1h') if signal else None
+            trend_1h = signal.get('trend_1h') if signal else None
+            if vol_1h is not None and trend_1h is not None and vol_1h >= self._config.whipsaw_min_vol:
+                directionality = abs(trend_1h) / vol_1h
+                if directionality < 0.40:
+                    ws_mult = self._config.fg_caution_size_mult
+                    base_spend *= ws_mult
+                    self._logger.info(
+                        f"Layer 1f (whipsaw caution): directionality={directionality:.3f} < 0.40, "
+                        f"vol={vol_1h:.4f}, mult={ws_mult:.0%}, after_ws={base_spend:.2f}"
+                    )
 
         # Layer 2: Tuner multiplier
         spend = base_spend
