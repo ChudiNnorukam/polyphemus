@@ -642,7 +642,6 @@ class SignalBot:
                 # Add OpenClaw market context (F&G, OI) if available
                 mkt_ctx = self._read_market_context()
                 if mkt_ctx:
-                    log_features["fear_greed"] = mkt_ctx.get("fear_greed")
                     log_features["market_regime"] = mkt_ctx.get("market_regime", "")
                     asset_ctx = mkt_ctx.get(signal.get("asset", "BTC"), {})
                     log_features["oi_change_pct"] = asset_ctx.get("oi_change_pct")
