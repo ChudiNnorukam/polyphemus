@@ -191,6 +191,15 @@ class SignalGuard:
                 reasons.append('macro_blackout')
 
         # ====================================================================
+        # FILTER 6: Fear & Greed Regime Check
+        # Hard block when F&G <= fg_min_threshold (extreme fear = whipsaw kills arb)
+        # ====================================================================
+        if self._config.fg_min_threshold > 0 and not is_weather:
+            fg_value = signal.get('fear_greed')
+            if fg_value is not None and fg_value <= self._config.fg_min_threshold:
+                reasons.append('extreme_fear_regime')
+
+        # ====================================================================
         # VALIDATOR 1: Market Expiry Check (configurable window)
         # Parse epoch from slug like "btc-updown-15m-1770598800"
         # Reject if market has < min_secs_remaining left

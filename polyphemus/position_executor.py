@@ -102,7 +102,7 @@ class PositionExecutor:
             )
         else:
             # Calculate position size (3-layer sizing + asset multiplier + liquidation boost)
-            size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction, spread=signal.get("spread"))
+            size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction, spread=signal.get("spread"), fear_greed=signal.get("fear_greed"))
         if size <= 0:
             msg = (
                 f"Size calculation failed for {slug} @ {price}: "
@@ -337,7 +337,7 @@ class PositionExecutor:
             fill_size=size,
         )
 
-    def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0, spread: Optional[float] = None) -> float:
+    def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0, spread: Optional[float] = None, fear_greed: Optional[float] = None) -> float:
         """Calculate position size using 3-layer sizing model + asset multiplier.
 
         Layer 1: Base percentage of available capital
@@ -452,6 +452,17 @@ class PositionExecutor:
                     f"mult={ep_mult:.2f}x, after_ep={base_spend:.2f}"
                 )
 
+        # Layer 1f: Fear & Greed caution zone (reduce size in moderate fear)
+        fg_value = fear_greed
+        if fg_value is not None and self._config.fg_caution_threshold > 0:
+            if self._config.fg_min_threshold < fg_value <= self._config.fg_caution_threshold:
+                fg_mult = self._config.fg_caution_size_mult
+                base_spend *= fg_mult
+                self._logger.info(
+                    f"Layer 1f (F&G caution): F&G={fg_value} in [{self._config.fg_min_threshold+1},{self._config.fg_caution_threshold}], "
+                    f"mult={fg_mult:.0%}, after_fg={base_spend:.2f}"
+                )
+
         # Layer 2: Tuner multiplier
         spend = base_spend
         tuner_multiplier = 1.0
@@ -488,6 +499,15 @@ class PositionExecutor:
             f"Layer 3b (deployment ratio): max_ratio={self._config.max_deployment_ratio}, "
             f"max_deployment={max_deployment:.2f}, final_spend={spend:.2f}"
         )
+
+        # Layer 3c: Absolute $ cap per trade (hard ceiling regardless of sizing)
+        if self._config.max_trade_amount > 0:
+            if spend > self._config.max_trade_amount:
+                self._logger.info(
+                    f"Layer 3c (max_trade_amount): spend={spend:.2f} > cap={self._config.max_trade_amount:.2f}, "
+                    f"capping to ${self._config.max_trade_amount:.2f}"
+                )
+                spend = self._config.max_trade_amount
 
         # Convert to shares and enforce minimum
         size = spend / price

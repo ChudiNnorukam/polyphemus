@@ -600,6 +600,13 @@ class SignalBot:
         try:
             self._logger.debug(f"Received signal: {signal.get('slug', 'unknown')}")
 
+            # 0b. Inject F&G from market context into signal for guard check
+            mkt_ctx_guard = self._read_market_context()
+            if mkt_ctx_guard:
+                fg_val = mkt_ctx_guard.get("fear_greed")
+                if fg_val is not None:
+                    signal["fear_greed"] = fg_val
+
             # 1. Run through signal guard
             result = self._guard.check(signal)
 
@@ -642,6 +649,7 @@ class SignalBot:
                 # Add OpenClaw market context (F&G, OI) if available
                 mkt_ctx = self._read_market_context()
                 if mkt_ctx:
+                    log_features["fear_greed"] = mkt_ctx.get("fear_greed")
                     log_features["market_regime"] = mkt_ctx.get("market_regime", "")
                     asset_ctx = mkt_ctx.get(signal.get("asset", "BTC"), {})
                     log_features["oi_change_pct"] = asset_ctx.get("oi_change_pct")
