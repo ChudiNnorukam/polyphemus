@@ -10,6 +10,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
@@ -41,6 +42,7 @@ from .gabagool_tracker import GabagoolTracker
 from .adaptive_tuner import AdaptiveTuner
 from .market_ws import MarketWS
 from .telegram_approver import TelegramApprover
+from .slack_notifier import SlackNotifier
 
 
 class SignalBot:
@@ -195,6 +197,17 @@ class SignalBot:
                     mock_file=mock_file,
                 )
                 self._logger.info("Signal feed: RTDS WebSocket mode")
+
+        # Slack trade notifier (no-op if no credentials set)
+        # Derive instance name from data dir path: /opt/lagbot/instances/emmanuel/data -> emmanuel
+        data_dir = config.lagbot_data_dir
+        instance_name = Path(data_dir).parent.name if "/instances/" in data_dir else "lagbot"
+        self._slack = SlackNotifier(
+            webhook_url=config.slack_webhook_url,
+            instance_name=instance_name,
+            bot_token=config.slack_bot_token,
+            channel_id=config.slack_channel_id,
+        )
 
         # Link signal feed to health monitor
         if self._feed:
@@ -805,6 +818,20 @@ class SignalBot:
                 filter_score=signal_score,
             )
 
+            # 7b. Slack notification (non-fatal)
+            try:
+                self._slack.notify_entry(
+                    slug=signal.get("slug", ""),
+                    asset=signal.get("asset", ""),
+                    direction=signal.get("outcome", ""),
+                    entry_price=exec_result.fill_price,
+                    size_usd=exec_result.fill_price * exec_result.fill_size,
+                    shares=exec_result.fill_size,
+                    momentum_pct=signal.get("momentum_pct", 0.0),
+                )
+            except Exception:
+                pass
+
             # 8. Update signal logger with execution result
             if self._signal_logger and signal_id > 0:
                 self._signal_logger.update_signal(signal_id, {
@@ -812,10 +839,12 @@ class SignalBot:
                     "entry_price": exec_result.fill_price,
                     "fill_mode": self._config.entry_mode,
                 })
-                # Store signal_id in position for exit tracking
+                # Store signal_id + trade context in position for exit tracking
                 stored_pos = self._store.get(signal.get("token_id", ""))
                 if stored_pos and stored_pos.metadata is not None:
                     stored_pos.metadata["signal_id"] = signal_id
+                    stored_pos.metadata["asset"] = signal.get("asset", "")
+                    stored_pos.metadata["direction"] = signal.get("outcome", "")
 
         except Exception as e:
             self._logger.exception(f"Error in _on_signal: {e}")
@@ -1110,7 +1139,32 @@ class SignalBot:
             except Exception as sl_err:
                 self._logger.error(f"Signal logger exit update failed (non-fatal): {sl_err}")
 
-            # 5d. Update fill optimizer profit (non-fatal)
+            # 5d. Slack exit notification (non-fatal)
+            try:
+                exit_pnl = (exec_result.fill_price - pos.entry_price) * exec_result.fill_size
+                hold_secs = time.time() - pos.entry_time.timestamp()
+                slug_parts = pos.slug.rsplit("-", 2) if pos.slug else []
+                asset = pos.metadata.get("asset", "") if pos.metadata else ""
+                direction = pos.metadata.get("direction", "") if pos.metadata else ""
+                if not asset and len(slug_parts) >= 3:
+                    asset = slug_parts[0].upper()
+                if not direction and len(slug_parts) >= 2:
+                    direction = slug_parts[-2].capitalize()
+                self._slack.notify_exit(
+                    slug=pos.slug,
+                    asset=asset,
+                    direction=direction,
+                    entry_price=pos.entry_price,
+                    exit_price=exec_result.fill_price,
+                    shares=exec_result.fill_size,
+                    pnl=exit_pnl,
+                    exit_reason=exit_signal.reason,
+                    hold_secs=hold_secs,
+                )
+            except Exception:
+                pass
+
+            # 5e. Update fill optimizer profit (non-fatal)
             try:
                 if self._fill_optimizer:
                     fo_pnl = (exec_result.fill_price - pos.entry_price) * exec_result.fill_size
