@@ -6,6 +6,7 @@ performance tracking, balance management, and health monitoring.
 """
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -565,6 +566,25 @@ class SignalBot:
             self._health.record_error()
             sys.exit(1)
 
+    def _read_market_context(self) -> dict:
+        """Read OpenClaw market context (F&G, OI trends). Returns {} on any failure."""
+        try:
+            ctx_path = self._config.market_context_path
+            if not ctx_path or not os.path.exists(ctx_path):
+                return {}
+            with open(ctx_path) as f:
+                ctx = json.load(f)
+            # Stale check: skip if older than 30 min
+            updated = ctx.get("updated_at", "")
+            if updated:
+                from datetime import datetime as dt
+                ctx_time = dt.strptime(updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - ctx_time).total_seconds() > 1800:
+                    return {}
+            return ctx
+        except Exception:
+            return {}
+
     def _on_invariant_halt(self, reason: str):
         """Called by HealthMonitor when a CRITICAL invariant is violated."""
         self._trading_halted = True
@@ -619,6 +639,14 @@ class SignalBot:
                     log_features["regime"] = regime.regime
                     log_features["volatility_1h"] = regime.volatility_1h
                     log_features["trend_1h"] = regime.trend_1h
+                # Add OpenClaw market context (F&G, OI) if available
+                mkt_ctx = self._read_market_context()
+                if mkt_ctx:
+                    log_features["fear_greed"] = mkt_ctx.get("fear_greed")
+                    log_features["market_regime"] = mkt_ctx.get("market_regime", "")
+                    asset_ctx = mkt_ctx.get(signal.get("asset", "BTC"), {})
+                    log_features["oi_change_pct"] = asset_ctx.get("oi_change_pct")
+                    log_features["oi_trend"] = asset_ctx.get("oi_trend", "")
                 signal_id = self._signal_logger.log_signal(log_features)
 
             # Shadow mode: log signal but don't execute

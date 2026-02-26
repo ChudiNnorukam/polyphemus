@@ -223,6 +223,8 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     slack_channel_id: str = ""
 
+    market_context_path: str = "/opt/openclaw/data/lagbot_context.json"
+
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training
     enable_signal_scoring: bool = True    # XGBoost signal quality scoring
