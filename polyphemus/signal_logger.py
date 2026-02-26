@@ -110,8 +110,12 @@ class SignalLogger:
         self._conn.commit()
 
         # Additive migrations — try/except pattern (ALTER TABLE IF NOT EXISTS not valid in SQLite)
-        _pair_arb_cols = [("strategy_type", "TEXT"), ("pair_cost", "REAL"), ("source", "TEXT")]
-        for col_name, col_def in _pair_arb_cols:
+        _migration_cols = [
+            ("strategy_type", "TEXT"), ("pair_cost", "REAL"), ("source", "TEXT"),
+            ("fear_greed", "REAL"), ("market_regime", "TEXT"),
+            ("oi_change_pct", "REAL"), ("oi_trend", "TEXT"),
+        ]
+        for col_name, col_def in _migration_cols:
             try:
                 self._conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
                 self._logger.info(f"Migration: added column signals.{col_name}")
