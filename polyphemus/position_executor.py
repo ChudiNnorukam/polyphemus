@@ -465,13 +465,25 @@ class PositionExecutor:
             trend_1h = signal.get('trend_1h') if signal else None
             if vol_1h is not None and trend_1h is not None and vol_1h >= self._config.whipsaw_min_vol:
                 directionality = abs(trend_1h) / vol_1h
-                if directionality < 0.40:
+                if directionality < self._config.whipsaw_caution_ratio:
                     ws_mult = self._config.fg_caution_size_mult
                     base_spend *= ws_mult
                     self._logger.info(
                         f"Layer 1f (whipsaw caution): directionality={directionality:.3f} < 0.40, "
                         f"vol={vol_1h:.4f}, mult={ws_mult:.0%}, after_ws={base_spend:.2f}"
                     )
+
+        # Layer 1g: Danger hours sizing (reduce size during loss-clustering hours)
+        danger_hours = self._config.get_danger_hours()
+        if danger_hours:
+            hour_utc = datetime.now(timezone.utc).hour
+            if hour_utc in danger_hours:
+                dh_mult = self._config.danger_hours_size_mult
+                base_spend *= dh_mult
+                self._logger.info(
+                    f"Layer 1g (danger hour): hour={hour_utc}UTC in {danger_hours}, "
+                    f"mult={dh_mult:.0%}, after_dh={base_spend:.2f}"
+                )
 
         # Layer 2: Tuner multiplier
         spend = base_spend

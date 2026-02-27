@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     polygon_chain_id: int = 137
     polygon_rpc_url: str
 
-    min_entry_price: float = 0.60
+    min_entry_price: float = 0.72
     max_entry_price: float = 0.85
     entry_trap_low: float = 0.0   # Trap zone: skip midpoints between trap_low and trap_high
     entry_trap_high: float = 0.0  # Set both >0 to enable (e.g. 0.60/0.80)
@@ -234,6 +234,12 @@ class Settings(BaseSettings):
     # Whipsaw regime guard (blocks trades when volatility is high but net direction is low)
     whipsaw_max_ratio: float = 0.20       # block when directionality < this (0=disabled)
     whipsaw_min_vol: float = 0.005        # only apply when volatility_1h > 0.5% (skip calm/noisy)
+    whipsaw_caution_ratio: float = 0.40   # caution zone: directionality between max_ratio and this
+    eth_block_on_whipsaw_caution: bool = True  # block ETH when in whipsaw caution zone (ETH 6/9 losses)
+
+    # Danger hours sizing (UTC hours where losses cluster — reduce size, don't block)
+    danger_hours: str = ""                 # CSV of UTC hours, e.g. "1,2,3" (5-7pm PST)
+    danger_hours_size_mult: float = 0.5    # sizing multiplier during danger hours
 
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training
@@ -273,6 +279,11 @@ class Settings(BaseSettings):
 
     def get_blackout_hours(self) -> List[int]:
         return [int(h.strip()) for h in self.blackout_hours.split(',') if h.strip()]
+
+    def get_danger_hours(self) -> List[int]:
+        if not self.danger_hours.strip():
+            return []
+        return [int(h.strip()) for h in self.danger_hours.split(',') if h.strip()]
 
     def get_market_window(self, asset: str) -> int:
         """Return market window in seconds for a given asset.

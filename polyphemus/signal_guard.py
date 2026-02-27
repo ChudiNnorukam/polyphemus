@@ -210,6 +210,10 @@ class SignalGuard:
                 directionality = abs(trend_1h) / vol_1h
                 if directionality < self._config.whipsaw_max_ratio:
                     reasons.append('whipsaw_regime')
+                elif (directionality < self._config.whipsaw_caution_ratio
+                      and self._config.eth_block_on_whipsaw_caution
+                      and asset == 'ETH'):
+                    reasons.append('eth_whipsaw_caution')
 
         # ====================================================================
         # VALIDATOR 1: Market Expiry Check (configurable window)
