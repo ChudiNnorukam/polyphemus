@@ -727,6 +727,11 @@ class BinanceMomentumFeed:
             window_end = current_epoch + window
             secs_to_end = window_end - now
 
+            # Record open price if not already set (self-contained, no window_delta dependency)
+            open_key = (asset, current_epoch)
+            if open_key not in self._window_open_prices:
+                self._window_open_prices[open_key] = current_price
+
             # Only fire in the snipe window
             if secs_to_end > self._config.snipe_max_secs_remaining:
                 continue
@@ -739,9 +744,6 @@ class BinanceMomentumFeed:
                 continue
 
             # Check Binance price vs window open
-            open_key = (asset, current_epoch)
-            if open_key not in self._window_open_prices:
-                continue
             open_price = self._window_open_prices[open_key]
             if open_price <= 0:
                 continue
