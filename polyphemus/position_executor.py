@@ -242,13 +242,13 @@ class PositionExecutor:
                 live_midpoint = await self._clob.get_midpoint(token_id)
                 if live_midpoint <= 0:
                     return fill_result  # Can't get midpoint, give up
-                if live_midpoint > self._config.max_entry_price:
+                taker_price = round(min(live_midpoint + 0.02, 0.99), 2)
+                if taker_price > self._config.max_entry_price:
                     self._logger.warning(
-                        f"Taker fallback aborted: midpoint {live_midpoint:.4f} > "
+                        f"Taker fallback aborted: taker_price {taker_price:.4f} > "
                         f"max_entry_price {self._config.max_entry_price} for {slug}"
                     )
                     return fill_result
-                taker_price = round(min(live_midpoint + 0.02, 0.99), 2)
                 taker_result = await self._clob.place_order(
                     token_id=token_id,
                     price=taker_price,
