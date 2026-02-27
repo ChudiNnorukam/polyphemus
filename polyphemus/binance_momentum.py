@@ -751,6 +751,15 @@ class BinanceMomentumFeed:
 
             # Need minimum directional conviction from Binance
             if abs(pct_change) < self._config.snipe_min_momentum_pct:
+                # Log once per window when in timing range but no momentum
+                dbg_key = f"snipe-dbg-{asset.lower()}-{window // 60}m-{current_epoch}"
+                if dbg_key not in self._snipe_fired:
+                    self._snipe_fired.add(dbg_key)
+                    self._logger.info(
+                        f"Snipe timing OK but low momentum: {asset} {window//60}m "
+                        f"{pct_change:+.4%} (need {self._config.snipe_min_momentum_pct:+.3%}), "
+                        f"{secs_to_end:.0f}s left"
+                    )
                 continue
 
             direction = "UP" if pct_change > 0 else "DOWN"

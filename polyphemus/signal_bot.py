@@ -739,7 +739,7 @@ class SignalBot:
                     )
 
             # 2c. Regime check (skip flat markets — not applicable to price arb or weather)
-            if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather'):
+            if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather', 'resolution_snipe'):
                 if not self._regime_detector.should_trade(signal.get("asset", "BTC")):
                     if self._signal_logger and signal_id > 0:
                         self._signal_logger.update_signal(signal_id, {"outcome": "regime_filtered"})
