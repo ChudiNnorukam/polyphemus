@@ -174,6 +174,12 @@ class Settings(BaseSettings):
     entry_cooldown_secs: int = 120  # Cooldown between entries to prevent correlated positions
     dual_window_assets: str = ""  # Assets on BOTH default AND 15m windows (e.g., "BTC")
     momentum_max_pct: float = 0.02  # 2% cap — reject flash crashes / data glitches
+
+    # Sharp move detector (fires on 0.2% in 15s alongside the 60s rolling window)
+    enable_sharp_move: bool = False
+    sharp_move_window_secs: int = 15       # rolling sub-window for sharp spike detection
+    sharp_move_trigger_pct: float = 0.002  # 0.2% in 15s = sharp move
+    sharp_move_shadow: bool = True         # shadow mode: log only, no execution
     max_entry_spread: float = 0.04  # $0.04 max bid-ask spread for entry (wider = unfilled maker)
     min_book_imbalance_alignment: float = 0.0  # 0=disabled. E.g. 0.53: Up signals need bid/(bid+ask)>=0.53, Down signals need <=0.47
     macro_blackout_mins: int = 45              # blackout window around FOMC/CPI/NFP events (0=disabled)

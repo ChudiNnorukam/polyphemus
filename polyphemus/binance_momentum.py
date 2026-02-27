@@ -51,6 +51,13 @@ class BinanceMomentumFeed:
             for symbol in BINANCE_SYMBOLS
         }
 
+        # Sharp move detector: separate short-window buffer
+        self._sharp_buffers: Dict[str, deque] = {
+            symbol: deque(maxlen=30)  # ~30s of 1s updates
+            for symbol in BINANCE_SYMBOLS
+        }
+        self._sharp_cooldown: Dict[str, float] = {}  # asset_dir -> last_fire_time
+
         # Per-asset momentum cooldown: asset -> last_signal_time
         self._momentum_cooldown: Dict[str, float] = self._state_store.load("momentum_cooldown", ttl_secs=300)
         self._last_prune_time: float = 0.0
@@ -203,11 +210,14 @@ class BinanceMomentumFeed:
                     continue
                 now = time.time()
                 self._price_buffers[symbol].append((now, price))
+                self._sharp_buffers[symbol].append((now, price))
                 if self._regime_detector:
                     asset = BINANCE_TO_ASSET.get(symbol)
                     if asset:
                         self._regime_detector.update(asset, price, now)
                 await self._check_momentum(symbol, now, price)
+                if self._config.enable_sharp_move:
+                    await self._check_sharp_move(symbol, now, price)
                 if self._config.enable_window_delta:
                     await self._check_window_delta(symbol, now, price)
 
@@ -226,6 +236,7 @@ class BinanceMomentumFeed:
 
         now = time.time()
         self._price_buffers[symbol].append((now, price))
+        self._sharp_buffers[symbol].append((now, price))
 
         # Feed regime detector with every price tick
         if self._regime_detector:
@@ -235,6 +246,10 @@ class BinanceMomentumFeed:
 
         # Check momentum
         await self._check_momentum(symbol, now, price)
+
+        # Check sharp move (15s sub-window)
+        if self._config.enable_sharp_move:
+            await self._check_sharp_move(symbol, now, price)
 
         # Check window delta (T-10 late entry)
         if self._config.enable_window_delta:
@@ -305,12 +320,58 @@ class BinanceMomentumFeed:
         # Generate signal
         await self._generate_signal(asset, direction, momentum_pct=pct_change)
 
-    async def _generate_signal(self, asset: str, direction: str, momentum_pct: float = 0.0) -> None:
+    async def _check_sharp_move(self, symbol: str, now: float, current_price: float) -> None:
+        """Detect sharp price spikes (e.g. 0.2% in 15s) that create brief MM lag."""
+        buffer = self._sharp_buffers[symbol]
+        window = self._config.sharp_move_window_secs
+        threshold = self._config.sharp_move_trigger_pct
+
+        cutoff = now - window
+        oldest_price = None
+        for ts, price in buffer:
+            if ts >= cutoff:
+                oldest_price = price
+                break
+
+        if oldest_price is None or oldest_price <= 0:
+            return
+
+        pct_change = (current_price - oldest_price) / oldest_price
+        if abs(pct_change) < threshold:
+            return
+
+        direction = "UP" if pct_change > 0 else "DOWN"
+        asset = BINANCE_TO_ASSET.get(symbol)
+        if not asset:
+            return
+
+        # Per-asset cooldown: suppress duplicate sharp detections for 30s
+        cooldown_key = f"sharp_{asset}_{direction}"
+        last_fire = self._sharp_cooldown.get(cooldown_key, 0.0)
+        if now - last_fire < 30.0:
+            return
+        self._sharp_cooldown[cooldown_key] = now
+
+        is_shadow = self._config.sharp_move_shadow
+        tag = " [SHADOW]" if is_shadow else ""
+        self._logger.info(
+            f"Sharp move{tag}: {asset} {direction} {pct_change:+.3%} "
+            f"in {window}s ({oldest_price:.4f} -> {current_price:.4f})"
+        )
+
+        # Generate signal - shadow mode logs without executing
+        await self._generate_signal(
+            asset, direction, momentum_pct=pct_change,
+            sharp_shadow=is_shadow, source_override="sharp_move"
+        )
+
+    async def _generate_signal(self, asset: str, direction: str, momentum_pct: float = 0.0,
+                                sharp_shadow: bool = False, source_override: str = "") -> None:
         """Generate trading signals for ALL applicable windows for this asset."""
         # Early filter: skip assets not in allow-list or shadow-list
         allowed = self._config.get_asset_filter()
         shadow = self._config.get_shadow_assets()
-        is_shadow = asset.upper() in shadow
+        is_shadow = asset.upper() in shadow or sharp_shadow
 
         # Entry cooldown: prevent correlated cluster entries (skip for shadow)
         cooldown = self._config.entry_cooldown_secs
@@ -338,7 +399,10 @@ class BinanceMomentumFeed:
 
         # Generate signal for each window (e.g., BTC → [300, 900] for dual-window)
         for window in self._config.get_market_windows(asset):
-            await self._generate_signal_for_window(asset, direction, momentum_pct, window, shadow=is_shadow)
+            await self._generate_signal_for_window(
+                asset, direction, momentum_pct, window,
+                shadow=is_shadow, source_override=source_override
+            )
 
         # Lag signals: fire companion assets with configurable delay after BTC fires
         # Prereq: ETH/SOL WR >= 60% with n >= 30 in backtest before enabling
@@ -383,7 +447,8 @@ class BinanceMomentumFeed:
 
     async def _generate_signal_for_window(self, asset: str, direction: str,
                                            momentum_pct: float, window: int,
-                                           shadow: bool = False) -> None:
+                                           shadow: bool = False,
+                                           source_override: str = "") -> None:
         """Generate a trading signal for a specific market window."""
         # Fee gate: hard block if 5m fees detected (5-min TTL auto-expires)
         if self._fee_gate_active:
@@ -491,7 +556,7 @@ class BinanceMomentumFeed:
             "asset": asset,
             "tx_hash": f"momentum-{slug}-{int(time.time())}",
             "timestamp": time.time(),
-            "source": "binance_momentum",
+            "source": source_override or "binance_momentum",
             "momentum_pct": momentum_pct,
             "time_remaining_secs": int(secs_left),
             "market_window_secs": window,

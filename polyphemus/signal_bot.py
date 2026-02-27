@@ -686,7 +686,7 @@ class SignalBot:
 
             # 2. Binance momentum confirmation (skip if signal IS from momentum feed)
             asset = signal.get('asset', '')
-            is_momentum_signal = signal.get('source') in ('binance_momentum', 'binance_momentum_lag', 'window_delta', 'pair_arb', 'noaa_weather', 'resolution_snipe')
+            is_momentum_signal = signal.get('source') in ('binance_momentum', 'binance_momentum_lag', 'window_delta', 'pair_arb', 'noaa_weather', 'resolution_snipe', 'sharp_move')
             if self._binance_feed and asset in ASSET_TO_BINANCE and not is_momentum_signal:
                 if self._binance_feed.in_grace_period():
                     self._momentum_stats["bypassed"] += 1
@@ -823,7 +823,7 @@ class SignalBot:
                 return  # execution happens via _execute_weather_signal callback
 
             # 5c. Snapshot entry momentum direction for reversal exit (momentum signals only)
-            if signal.get('source') in ('binance_momentum', 'binance_momentum_lag') and self._momentum_feed:
+            if signal.get('source') in ('binance_momentum', 'binance_momentum_lag', 'sharp_move') and self._momentum_feed:
                 signal.setdefault("metadata", {})
                 signal["metadata"]["entry_momentum_direction"] = signal.get("outcome", "").lower()
                 signal["metadata"]["entry_momentum_ts"] = time.time()
