@@ -252,6 +252,7 @@ class Settings(BaseSettings):
     # Danger hours sizing (UTC hours where losses cluster — reduce size, don't block)
     danger_hours: str = ""                 # CSV of UTC hours, e.g. "1,2,3" (5-7pm PST)
     danger_hours_size_mult: float = 0.5    # sizing multiplier during danger hours
+    up_direction_size_mult: float = 0.5    # sizing multiplier for Up direction trades (Down=1.0)
 
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training

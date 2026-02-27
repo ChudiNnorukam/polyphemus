@@ -522,6 +522,17 @@ class PositionExecutor:
                     f"mult={dh_mult:.0%}, after_dh={base_spend:.2f}"
                 )
 
+        # Layer 1h: Up direction reduction (Down is 20W/1L, Up is 19W/6L)
+        if signal:
+            direction = signal.get("direction", "")
+            if direction.lower() == "up" and self._config.up_direction_size_mult < 1.0:
+                up_mult = self._config.up_direction_size_mult
+                base_spend *= up_mult
+                self._logger.info(
+                    f"Layer 1h (up direction): mult={up_mult:.0%}, "
+                    f"after_up={base_spend:.2f}"
+                )
+
         # Layer 2: Tuner multiplier
         spend = base_spend
         tuner_multiplier = 1.0

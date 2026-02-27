@@ -112,7 +112,7 @@ class SignalLogger:
         # Additive migrations — try/except pattern (ALTER TABLE IF NOT EXISTS not valid in SQLite)
         _migration_cols = [
             ("strategy_type", "TEXT"), ("pair_cost", "REAL"), ("source", "TEXT"),
-            ("market_regime", "TEXT"),
+            ("fear_greed", "REAL"), ("market_regime", "TEXT"),
             ("oi_change_pct", "REAL"), ("oi_trend", "TEXT"),
         ]
         for col_name, col_def in _migration_cols:
