@@ -705,7 +705,11 @@ class BinanceMomentumFeed:
     # ========================================================================
 
     async def _check_snipe(self, symbol: str, now: float, current_price: float) -> None:
-        """Buy near-certain winning side in last N seconds before market close."""
+        """Buy near-certain winning side in last N seconds before market close.
+
+        No Binance confirmation needed - the Polymarket midpoint IS the signal.
+        If one side is 0.90+, the market has already decided.
+        """
         asset = BINANCE_TO_ASSET.get(symbol)
         if not asset:
             return
@@ -727,11 +731,6 @@ class BinanceMomentumFeed:
             window_end = current_epoch + window
             secs_to_end = window_end - now
 
-            # Record open price if not already set (self-contained, no window_delta dependency)
-            open_key = (asset, current_epoch)
-            if open_key not in self._window_open_prices:
-                self._window_open_prices[open_key] = current_price
-
             # Only fire in the snipe window
             if secs_to_end > self._config.snipe_max_secs_remaining:
                 continue
@@ -743,115 +742,81 @@ class BinanceMomentumFeed:
             if snipe_key in self._snipe_fired:
                 continue
 
-            # Check Binance price vs window open
-            open_price = self._window_open_prices[open_key]
-            if open_price <= 0:
-                continue
-            pct_change = (current_price - open_price) / open_price
-
-            # Need minimum directional conviction from Binance
-            if abs(pct_change) < self._config.snipe_min_momentum_pct:
-                # Log once per window when in timing range but no momentum
-                dbg_key = f"snipe-dbg-{asset.lower()}-{window // 60}m-{current_epoch}"
-                if dbg_key not in self._snipe_fired:
-                    self._snipe_fired.add(dbg_key)
-                    self._logger.info(
-                        f"Snipe timing OK but low momentum: {asset} {window//60}m "
-                        f"{pct_change:+.4%} (need {self._config.snipe_min_momentum_pct:+.3%}), "
-                        f"{secs_to_end:.0f}s left"
-                    )
-                continue
-
-            direction = "UP" if pct_change > 0 else "DOWN"
-
             # Skip if normal momentum already fired on this market
             slug = f"{asset.lower()}-updown-{window // 60}m-{current_epoch}"
             if slug in self._signaled_slugs:
                 continue
 
-            # Mark fired
+            # Mark fired (before async calls to prevent re-entry)
             self._snipe_fired.add(snipe_key)
 
-            self._logger.info(
-                f"Resolution snipe trigger: {asset} {direction} {pct_change:+.3%} "
-                f"(open={open_price:.4f} now={current_price:.4f}, {secs_to_end:.0f}s left)"
-            )
-
             await self._generate_snipe_signal(
-                asset, direction, slug, pct_change, secs_to_end, window, is_shadow
+                asset, slug, secs_to_end, window, is_shadow
             )
 
-    async def _generate_snipe_signal(self, asset: str, direction: str, slug: str,
-                                      pct_change: float, secs_left: float,
+    async def _generate_snipe_signal(self, asset: str, slug: str,
+                                      secs_left: float,
                                       window: int, shadow: bool) -> None:
-        """Generate a resolution snipe signal."""
+        """Check both sides' midpoints and buy whichever is in snipe range."""
         market_info = await self._discover_market(slug)
         if not market_info:
             self._logger.warning(f"Snipe: market not found: {slug}")
             return
 
-        outcome = "Up" if direction == "UP" else "Down"
-        token_id = (
-            market_info["up_token_id"] if outcome == "Up"
-            else market_info["down_token_id"]
-        )
+        # Check BOTH sides - buy whichever the market has priced as the winner
+        for outcome, token_key in [("Up", "up_token_id"), ("Down", "down_token_id")]:
+            token_id = market_info[token_key]
 
-        # Get midpoint - prefer WS, fallback to REST
-        midpoint = 0.0
-        if self._market_ws:
-            midpoint = self._market_ws.get_midpoint(token_id)
-        if midpoint <= 0:
-            midpoint = await self._clob.get_midpoint(token_id)
-        if midpoint <= 0:
-            self._logger.warning(f"Snipe: no midpoint for {slug} {outcome}")
-            return
+            midpoint = 0.0
+            if self._market_ws:
+                midpoint = self._market_ws.get_midpoint(token_id)
+            if midpoint <= 0:
+                midpoint = await self._clob.get_midpoint(token_id)
+            if midpoint <= 0:
+                continue
 
-        # Check snipe price range
-        if midpoint < self._config.snipe_min_entry_price:
-            return
-        if midpoint > self._config.snipe_max_entry_price:
-            self._logger.debug(
-                f"Snipe: {slug} midpoint {midpoint:.4f} > "
-                f"max {self._config.snipe_max_entry_price}"
-            )
-            return
+            # Check snipe price range — the midpoint IS the signal
+            if midpoint < self._config.snipe_min_entry_price:
+                continue
+            if midpoint > self._config.snipe_max_entry_price:
+                continue
 
-        if shadow:
+            # Found a side in snipe range
+            if shadow:
+                self._logger.info(
+                    f"[SHADOW] Snipe: {slug} {outcome} @ {midpoint:.4f} "
+                    f"({secs_left:.0f}s left)"
+                )
+                return
+
+            self._signaled_slugs.add(slug)
+            self._state_store.save("signaled_slugs", self._signaled_slugs)
+            self.signals_generated += 1
+
+            signal = {
+                "token_id": token_id,
+                "price": midpoint,
+                "slug": slug,
+                "market_title": market_info.get("market_title", slug),
+                "usdc_size": 999.0,
+                "direction": "BUY",
+                "outcome": outcome,
+                "asset": asset,
+                "tx_hash": f"snipe-{slug}-{int(time.time())}",
+                "timestamp": time.time(),
+                "source": "resolution_snipe",
+                "time_remaining_secs": int(secs_left),
+                "market_window_secs": window,
+                "condition_id": market_info.get("condition_id", ""),
+            }
+
             self._logger.info(
-                f"[SHADOW] Snipe: {slug} {outcome} @ {midpoint:.4f} "
-                f"({secs_left:.0f}s left, delta={pct_change:+.3%})"
+                f"Snipe signal: {slug} {outcome} @ {midpoint:.4f} "
+                f"({secs_left:.0f}s left)"
             )
+
+            await self._on_signal(signal)
             return
-
-        # Add to signaled_slugs to prevent momentum from double-firing
-        self._signaled_slugs.add(slug)
-        self._state_store.save("signaled_slugs", self._signaled_slugs)
-        self.signals_generated += 1
-
-        signal = {
-            "token_id": token_id,
-            "price": midpoint,
-            "slug": slug,
-            "market_title": market_info.get("market_title", slug),
-            "usdc_size": 999.0,
-            "direction": "BUY",
-            "outcome": outcome,
-            "asset": asset,
-            "tx_hash": f"snipe-{slug}-{int(time.time())}",
-            "timestamp": time.time(),
-            "source": "resolution_snipe",
-            "momentum_pct": pct_change,
-            "time_remaining_secs": int(secs_left),
-            "market_window_secs": window,
-            "condition_id": market_info.get("condition_id", ""),
-        }
-
-        self._logger.info(
-            f"Snipe signal: {slug} {outcome} @ {midpoint:.4f} "
-            f"({secs_left:.0f}s left, Binance delta={pct_change:+.3%})"
-        )
-
-        await self._on_signal(signal)
 
     def prune_stale(self) -> None:
         """Prune old signaled slugs and market cache. Call periodically.
