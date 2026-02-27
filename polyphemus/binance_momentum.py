@@ -722,7 +722,7 @@ class BinanceMomentumFeed:
 
         is_shadow = asset.upper() in shadow and asset.upper() not in (allowed or [])
 
-        for window in self.get_market_windows(asset):
+        for window in self._config.get_market_windows(asset):
             current_epoch = (int(now) // window) * window
             window_end = current_epoch + window
             secs_to_end = window_end - now
