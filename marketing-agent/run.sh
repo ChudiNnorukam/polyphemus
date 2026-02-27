@@ -1,0 +1,55 @@
+#!/bin/bash
+# Marketing Agent — Entrypoint
+# Usage: ./run.sh <script> <command>
+# Example: ./run.sh email_sequence send
+#          ./run.sh marketing_resolve
+#          ./run.sh enrich_lead run
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/scripts" && pwd)"
+ENV_FILE="$(dirname "$0")/.env"
+
+# Load env
+if [ -f "$ENV_FILE" ]; then
+    set -o allexport
+    source "$ENV_FILE"
+    set +o allexport
+fi
+
+SCRIPT="$1"
+shift || true
+
+if [ -z "$SCRIPT" ]; then
+    echo "Usage: ./run.sh <script> [command]"
+    echo ""
+    echo "Wings 1 + 2 (Cold Email + LinkedIn):"
+    echo "  init_db            -- Initialize database"
+    echo "  load_prospects     -- Load ICP CSV into DB"
+    echo "  enrich_lead        -- Find + verify emails (scan|run|credits)"
+    echo "  email_sequence     -- Email cadence (scan|send|status|replies)"
+    echo "  check_accepted     -- Manage pending connections"
+    echo "  marketing_resolve  -- Print outreach funnel stats"
+    echo ""
+    echo "Wing 3 (Social Media Manager):"
+    echo "  funnel_db_init     -- Extend DB with Wings 3+4 tables (extend|status)"
+    echo "  repurpose          -- Convert blog posts to social content (--file|--dir)"
+    echo "  publisher          -- Post queued social content (--dry-run)"
+    echo "  token_manager      -- Check OAuth token expiry (--check|--refresh-pinterest)"
+    echo "  social_analytics   -- Pull Pinterest pin analytics (--days N)"
+    echo "  social_resolve     -- Print social media stats"
+    echo ""
+    echo "Wing 4 (Digital Product Funnel):"
+    echo "  funnel_webhook     -- Start webhook server (Gumroad + Stripe)"
+    echo "  funnel_sequence    -- Fire due funnel emails (send|status)"
+    echo "  upsell_trigger     -- Enroll engaged buyers in upsell sequence"
+    echo "  funnel_resolve     -- Print funnel stats"
+    exit 1
+fi
+
+PYTHON="${VENV_PYTHON:-python3}"
+if [ -f "/opt/lagbot/venv/bin/python3" ]; then
+    PYTHON="/opt/lagbot/venv/bin/python3"
+fi
+
+exec "$PYTHON" "$SCRIPT_DIR/${SCRIPT}.py" "$@"
