@@ -8,6 +8,7 @@ Responsibilities:
 - Startup wallet reconciliation
 """
 
+import asyncio
 import time
 import logging
 from typing import TYPE_CHECKING
@@ -166,6 +167,11 @@ class BalanceManager:
             True if safe to trade, False otherwise (logs warnings)
         """
         balance = await self.get_balance()
+
+        # Retry once on 0.0 — could be API error, not actually broke
+        if balance == 0.0:
+            await asyncio.sleep(3)
+            balance = await self.get_balance()
 
         # Check low balance guard
         if balance < self._config.low_balance_threshold:

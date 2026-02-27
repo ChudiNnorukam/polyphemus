@@ -162,6 +162,7 @@ class PositionStore:
                     entry_tx_hash='',
                     market_end_time=market_end_time,
                     metadata=pos_metadata,
+                    outcome=outcome or '',
                 )
 
                 self.add(pos)

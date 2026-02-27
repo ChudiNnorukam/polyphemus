@@ -24,7 +24,7 @@ RECONNECT_MULTIPLIER = 2
 class MarketWS:
     """Real-time midpoint feed via CLOB WebSocket."""
 
-    MIDPOINT_MAX_AGE_SECS = 5.0  # Reject midpoints older than this
+    MIDPOINT_MAX_AGE_SECS = 15.0  # Was 5.0; 15s balances freshness vs REST fallback
 
     def __init__(self):
         self._logger = setup_logger("polyphemus.market_ws")

@@ -267,7 +267,9 @@ class Settings(BaseSettings):
         return [a.strip().upper() for a in self.companion_assets.split(',') if a.strip()]
 
     def get_blocked_assets(self) -> List[str]:
-        return [asset.strip() for asset in self.blocked_assets.split(',')]
+        if not self.blocked_assets.strip():
+            return []
+        return [a.strip().upper() for a in self.blocked_assets.split(',') if a.strip()]
 
     def get_blackout_hours(self) -> List[int]:
         return [int(h.strip()) for h in self.blackout_hours.split(',') if h.strip()]

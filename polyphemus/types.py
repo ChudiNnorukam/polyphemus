@@ -84,6 +84,7 @@ class Position:
     is_resolved: bool = False
     is_redeemed: bool = False
     metadata: dict = field(default_factory=dict)
+    outcome: str = ""  # "up" or "down" for direction limiter
 
 
 @dataclass

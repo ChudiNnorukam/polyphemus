@@ -77,6 +77,7 @@ class BinanceMomentumFeed:
 
         # Fee gate: if ANY 5m market has fees, halt all signal generation
         self._fee_gate_active: bool = False
+        self._fee_gate_set_at: float = 0.0
 
         # Persistent Gamma API session (reused across _discover_market calls)
         self._gamma_session: Optional[aiohttp.ClientSession] = None
@@ -380,9 +381,14 @@ class BinanceMomentumFeed:
                                            momentum_pct: float, window: int,
                                            shadow: bool = False) -> None:
         """Generate a trading signal for a specific market window."""
-        # Fee gate: hard block if 5m fees detected
+        # Fee gate: hard block if 5m fees detected (5-min TTL auto-expires)
         if self._fee_gate_active:
-            return
+            if time.time() - self._fee_gate_set_at > 300:
+                self._logger.info("Fee gate expired after 5 min, resuming signal generation")
+                self._fee_gate_active = False
+            else:
+                self._logger.warning(f"Fee gate active, blocking {asset}-{window}s signal")
+                return
 
         # Compute current market slug for THIS window
         epoch = int(time.time() // window) * window
@@ -544,6 +550,7 @@ class BinanceMomentumFeed:
                     f"HALTING entries. Set TAKER_ON_5M=false to use fee-free maker."
                 )
                 self._fee_gate_active = True
+                self._fee_gate_set_at = time.time()
                 return None
             elif fee_rate > 0 and "5m" in slug:
                 self._logger.info(

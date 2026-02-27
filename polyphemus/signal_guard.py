@@ -221,6 +221,7 @@ class SignalGuard:
         slug = signal.get('slug', '')
         from .types import parse_window_from_slug
         window = parse_window_from_slug(slug)
+        min_secs = 0
         if not is_window_delta and not is_weather and not is_15m_momentum:
             # Cap min_secs at 40% of window so 5m markets (300s) aren't blocked
             # 5m: min(360, 120) = 120s → 3min entry window

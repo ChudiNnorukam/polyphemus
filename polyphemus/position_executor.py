@@ -219,6 +219,12 @@ class PositionExecutor:
                 live_midpoint = await self._clob.get_midpoint(token_id)
                 if live_midpoint <= 0:
                     return fill_result  # Can't get midpoint, give up
+                if live_midpoint > self._config.max_entry_price:
+                    self._logger.warning(
+                        f"Taker fallback aborted: midpoint {live_midpoint:.4f} > "
+                        f"max_entry_price {self._config.max_entry_price} for {slug}"
+                    )
+                    return fill_result
                 taker_price = round(min(live_midpoint + 0.02, 0.99), 2)
                 taker_result = await self._clob.place_order(
                     token_id=token_id,
@@ -322,6 +328,7 @@ class PositionExecutor:
             entry_tx_hash=order_id,
             market_end_time=market_end_time,
             metadata=metadata,
+            outcome=signal.get('outcome', '') if signal else '',
         )
 
         self._store.add(position)
@@ -640,7 +647,7 @@ class PositionExecutor:
         # Timeout — check for partial fill before giving up
         total_wait = max_polls * ORDER_POLL_INTERVAL
         details = await self._clob.get_order_details(order_id)
-        size_matched = details["size_matched"] if details else 0
+        size_matched = details.get("size_matched", 0) if details else 0
 
         if size_matched >= MIN_SHARES_FOR_SELL:
             # Cancel unfilled remainder, keep partial fill
