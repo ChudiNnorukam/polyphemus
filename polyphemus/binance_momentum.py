@@ -61,6 +61,7 @@ class BinanceMomentumFeed:
         # Window Delta: track open prices per (asset, window_epoch)
         self._window_open_prices: Dict[tuple, float] = {}
         self._delta_fired: Set[str] = set()  # slugs already fired for delta
+        self._snipe_fired: Set[str] = set()  # slugs already fired for resolution snipe
 
         # Connection state
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -206,6 +207,8 @@ class BinanceMomentumFeed:
                 await self._check_momentum(symbol, now, price)
                 if self._config.enable_window_delta:
                     await self._check_window_delta(symbol, now, price)
+                if self._config.enable_resolution_snipe:
+                    await self._check_snipe(symbol, now, price)
 
     async def _process_binance_update(self, data: dict) -> None:
         """Process a Binance kline update."""
@@ -235,6 +238,10 @@ class BinanceMomentumFeed:
         # Check window delta (T-10 late entry)
         if self._config.enable_window_delta:
             await self._check_window_delta(symbol, now, price)
+
+        # Check resolution snipe (last 8-45s, near-certain outcomes)
+        if self._config.enable_resolution_snipe:
+            await self._check_snipe(symbol, now, price)
 
     async def _check_momentum(self, symbol: str, now: float, current_price: float) -> None:
         """Check if price has moved enough within the window to trigger a signal."""
@@ -693,6 +700,148 @@ class BinanceMomentumFeed:
 
         await self._on_signal(signal)
 
+    # ========================================================================
+    # Resolution Snipe: Buy near-certain winner in last seconds before close
+    # ========================================================================
+
+    async def _check_snipe(self, symbol: str, now: float, current_price: float) -> None:
+        """Buy near-certain winning side in last N seconds before market close."""
+        asset = BINANCE_TO_ASSET.get(symbol)
+        if not asset:
+            return
+
+        # Check asset filter
+        snipe_assets = self._config.snipe_assets.strip()
+        if snipe_assets:
+            allowed = [a.strip().upper() for a in snipe_assets.split(',') if a.strip()]
+        else:
+            allowed = self._config.get_asset_filter()
+        shadow = self._config.get_shadow_assets()
+        if allowed and asset.upper() not in allowed and asset.upper() not in shadow:
+            return
+
+        is_shadow = asset.upper() in shadow and asset.upper() not in (allowed or [])
+
+        for window in self.get_market_windows(asset):
+            current_epoch = (int(now) // window) * window
+            window_end = current_epoch + window
+            secs_to_end = window_end - now
+
+            # Only fire in the snipe window
+            if secs_to_end > self._config.snipe_max_secs_remaining:
+                continue
+            if secs_to_end < self._config.snipe_min_secs_remaining:
+                continue
+
+            # Already fired for this window+asset?
+            snipe_key = f"snipe-{asset.lower()}-{window // 60}m-{current_epoch}"
+            if snipe_key in self._snipe_fired:
+                continue
+
+            # Check Binance price vs window open
+            open_key = (asset, current_epoch)
+            if open_key not in self._window_open_prices:
+                continue
+            open_price = self._window_open_prices[open_key]
+            if open_price <= 0:
+                continue
+            pct_change = (current_price - open_price) / open_price
+
+            # Need minimum directional conviction from Binance
+            if abs(pct_change) < self._config.snipe_min_momentum_pct:
+                continue
+
+            direction = "UP" if pct_change > 0 else "DOWN"
+
+            # Skip if normal momentum already fired on this market
+            slug = f"{asset.lower()}-updown-{window // 60}m-{current_epoch}"
+            if slug in self._signaled_slugs:
+                continue
+
+            # Mark fired
+            self._snipe_fired.add(snipe_key)
+
+            self._logger.info(
+                f"Resolution snipe trigger: {asset} {direction} {pct_change:+.3%} "
+                f"(open={open_price:.4f} now={current_price:.4f}, {secs_to_end:.0f}s left)"
+            )
+
+            await self._generate_snipe_signal(
+                asset, direction, slug, pct_change, secs_to_end, window, is_shadow
+            )
+
+    async def _generate_snipe_signal(self, asset: str, direction: str, slug: str,
+                                      pct_change: float, secs_left: float,
+                                      window: int, shadow: bool) -> None:
+        """Generate a resolution snipe signal."""
+        market_info = await self._discover_market(slug)
+        if not market_info:
+            self._logger.warning(f"Snipe: market not found: {slug}")
+            return
+
+        outcome = "Up" if direction == "UP" else "Down"
+        token_id = (
+            market_info["up_token_id"] if outcome == "Up"
+            else market_info["down_token_id"]
+        )
+
+        # Get midpoint - prefer WS, fallback to REST
+        midpoint = 0.0
+        if self._market_ws:
+            midpoint = self._market_ws.get_midpoint(token_id)
+        if midpoint <= 0:
+            midpoint = await self._clob.get_midpoint(token_id)
+        if midpoint <= 0:
+            self._logger.warning(f"Snipe: no midpoint for {slug} {outcome}")
+            return
+
+        # Check snipe price range
+        if midpoint < self._config.snipe_min_entry_price:
+            return
+        if midpoint > self._config.snipe_max_entry_price:
+            self._logger.debug(
+                f"Snipe: {slug} midpoint {midpoint:.4f} > "
+                f"max {self._config.snipe_max_entry_price}"
+            )
+            return
+
+        if shadow:
+            self._logger.info(
+                f"[SHADOW] Snipe: {slug} {outcome} @ {midpoint:.4f} "
+                f"({secs_left:.0f}s left, delta={pct_change:+.3%})"
+            )
+            return
+
+        # Add to signaled_slugs to prevent momentum from double-firing
+        self._signaled_slugs.add(slug)
+        self._state_store.save("signaled_slugs", self._signaled_slugs)
+        self.signals_generated += 1
+
+        signal = {
+            "token_id": token_id,
+            "price": midpoint,
+            "slug": slug,
+            "market_title": market_info.get("market_title", slug),
+            "usdc_size": 999.0,
+            "direction": "BUY",
+            "outcome": outcome,
+            "asset": asset,
+            "tx_hash": f"snipe-{slug}-{int(time.time())}",
+            "timestamp": time.time(),
+            "source": "resolution_snipe",
+            "momentum_pct": pct_change,
+            "time_remaining_secs": int(secs_left),
+            "market_window_secs": window,
+            "condition_id": market_info.get("condition_id", ""),
+        }
+
+        self._logger.info(
+            f"Snipe signal: {slug} {outcome} @ {midpoint:.4f} "
+            f"({secs_left:.0f}s left, Binance delta={pct_change:+.3%})"
+        )
+
+        await self._on_signal(signal)
+
     def prune_stale(self) -> None:
         """Prune old signaled slugs and market cache. Call periodically.
 
@@ -717,6 +866,9 @@ class BinanceMomentumFeed:
 
         # Persist pruned slugs to disk
         self._state_store.save("signaled_slugs", self._signaled_slugs)
+
+        # Prune snipe dedup (keys are per-epoch, safe to clear on prune cycle)
+        self._snipe_fired.clear()
 
         # Prune old window open prices (keep only current + previous window)
         now = time.time()

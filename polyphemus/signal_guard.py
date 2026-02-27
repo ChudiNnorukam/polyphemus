@@ -68,11 +68,12 @@ class SignalGuard:
         is_window_delta = signal.get('source') == 'window_delta'
         is_pair_arb = signal.get('source') == 'pair_arb'
         is_weather = signal.get('source') == 'noaa_weather'
+        is_snipe = signal.get('source') == 'resolution_snipe'
 
         # ====================================================================
         # FILTER 1: Direction Check (only BUY signals from DB)
         # ====================================================================
-        if not is_momentum and not is_window_delta:
+        if not is_momentum and not is_window_delta and not is_snipe:
             direction = signal.get('direction', '').upper()
             if direction != 'BUY':
                 reasons.append('not_buy_signal')
@@ -142,6 +143,9 @@ class SignalGuard:
         # — exempt from standard price range, use dedicated max instead
         if is_window_delta:
             if price > self._config.window_delta_max_price:
+                reasons.append('price_out_of_range')
+        elif is_snipe:
+            if price < self._config.snipe_min_entry_price or price > self._config.snipe_max_entry_price:
                 reasons.append('price_out_of_range')
         elif is_pair_arb:
             pass  # pair_arb uses pair_cost filter in scan loop, not entry price range
@@ -226,7 +230,7 @@ class SignalGuard:
         from .types import parse_window_from_slug
         window = parse_window_from_slug(slug)
         min_secs = 0
-        if not is_window_delta and not is_weather and not is_15m_momentum:
+        if not is_window_delta and not is_weather and not is_15m_momentum and not is_snipe:
             # Cap min_secs at 40% of window so 5m markets (300s) aren't blocked
             # 5m: min(360, 120) = 120s → 3min entry window
             # 15m momentum: skipped here — timing validated in FILTER 2b
@@ -286,7 +290,7 @@ class SignalGuard:
         # VALIDATOR 4: Minimum Conviction Check
         # ====================================================================
         usdc_size = signal.get('usdc_size', 0)
-        if not is_momentum and not is_window_delta and not is_weather:
+        if not is_momentum and not is_window_delta and not is_weather and not is_snipe:
             if usdc_size < self._config.min_db_signal_size:
                 reasons.append('low_conviction')
 

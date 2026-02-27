@@ -124,6 +124,11 @@ class PositionExecutor:
                 f"slug={slug}"
             )
 
+        # Resolution snipe: always taker (no time for maker fill in last 8-45s)
+        is_snipe = signal.get('source') == 'resolution_snipe' if signal else False
+        if is_snipe:
+            use_maker = False
+
         maker_offset_used = None  # Track for fill optimizer
         self._logger.info(
             f"Entry mode: {'maker' if use_maker else 'taker'} | "
@@ -368,6 +373,20 @@ class PositionExecutor:
                 f"price={price}"
             )
             return 0.0
+
+        # Resolution snipe: flat sizing, skip all layers
+        is_snipe = signal.get('source') == 'resolution_snipe' if signal else False
+        if is_snipe:
+            base_spend = available_capital * self._config.snipe_bet_pct
+            base_spend = min(base_spend, self._config.snipe_max_bet)
+            base_spend = max(base_spend, self._config.min_bet)
+            size = base_spend / price
+            self._logger.info(
+                f"Snipe sizing: {self._config.snipe_bet_pct:.0%} of "
+                f"${available_capital:.0f} = ${base_spend:.2f} / "
+                f"{price:.4f} = {size:.1f} shares"
+            )
+            return max(0, size)
 
         # Layer 1: Base bet as percentage of available capital
         hc_thresh = self._config.high_confidence_threshold

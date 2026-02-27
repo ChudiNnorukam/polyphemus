@@ -198,6 +198,17 @@ class Settings(BaseSettings):
     window_delta_assets: str = ""  # comma-separated, empty = use asset_filter
     window_delta_max_price: float = 0.95  # max entry price for delta signals (breakeven ~95% WR)
 
+    # Resolution snipe: buy near-certain outcomes in last seconds before resolution
+    enable_resolution_snipe: bool = False
+    snipe_max_secs_remaining: int = 45   # enter up to 45s before close
+    snipe_min_secs_remaining: int = 8    # need at least 8s for taker fill
+    snipe_min_momentum_pct: float = 0.002  # 0.2% Binance move confirms direction
+    snipe_min_entry_price: float = 0.90  # snipe zone floor
+    snipe_max_entry_price: float = 0.985  # snipe zone ceiling (above = dust profit)
+    snipe_bet_pct: float = 0.04          # 4% of balance per snipe
+    snipe_max_bet: float = 50.0          # hard $ cap per snipe trade
+    snipe_assets: str = ""               # comma-separated, empty = use asset_filter
+
     # Order entry/exit mode
     entry_mode: str = "taker"  # "taker" (cross spread) or "maker" (post-only)
     maker_offset: float = 0.005  # place maker order this much below midpoint (DARIO: aggressive pricing better for snipers)

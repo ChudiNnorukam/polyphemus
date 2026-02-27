@@ -686,7 +686,7 @@ class SignalBot:
 
             # 2. Binance momentum confirmation (skip if signal IS from momentum feed)
             asset = signal.get('asset', '')
-            is_momentum_signal = signal.get('source') in ('binance_momentum', 'binance_momentum_lag', 'window_delta', 'pair_arb', 'noaa_weather')
+            is_momentum_signal = signal.get('source') in ('binance_momentum', 'binance_momentum_lag', 'window_delta', 'pair_arb', 'noaa_weather', 'resolution_snipe')
             if self._binance_feed and asset in ASSET_TO_BINANCE and not is_momentum_signal:
                 if self._binance_feed.in_grace_period():
                     self._momentum_stats["bypassed"] += 1
