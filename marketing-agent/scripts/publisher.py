@@ -231,7 +231,7 @@ def main():
 
     due_posts = conn.execute("""
         SELECT * FROM social_posts
-        WHERE status = 'pending'
+        WHERE status = 'approved'
           AND scheduled_at <= datetime('now')
         ORDER BY scheduled_at ASC
         LIMIT 10
