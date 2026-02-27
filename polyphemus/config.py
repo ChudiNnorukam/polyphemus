@@ -148,6 +148,15 @@ class Settings(BaseSettings):
     pair_arb_max_concurrent: int = 2           # max simultaneous pair arb slugs
     pair_arb_fill_deadline_secs: int = 120    # cancel unfilled leg after this
 
+    # Pair arb near-resolution: taker-based pair arb in last N seconds before epoch end
+    pair_arb_near_res_enabled: bool = False
+    pair_arb_near_res_max_secs: int = 45         # start scanning N seconds before epoch end
+    pair_arb_near_res_min_secs: int = 8          # stop scanning (need time for taker fill)
+    pair_arb_near_res_scan_interval: int = 3     # scan every N seconds in the window
+    pair_arb_near_res_max_pair_cost: float = 0.985  # fee-aware threshold (tighter than maker)
+    pair_arb_near_res_bet_pct: float = 0.04      # 4% of balance per leg
+    pair_arb_near_res_max_bet: float = 50.0      # hard $ cap per leg
+
     # NOAA Weather arb (buy underpriced temperature bucket markets using forecast edge)
     weather_entry_max_price: float = 0.15     # only enter if market price <= this
     weather_exit_min_price: float = 0.45      # sell when price corrects to >= this
@@ -180,6 +189,17 @@ class Settings(BaseSettings):
     sharp_move_window_secs: int = 15       # rolling sub-window for sharp spike detection
     sharp_move_trigger_pct: float = 0.002  # 0.2% in 15s = sharp move
     sharp_move_shadow: bool = True         # shadow mode: log only, no execution
+    sharp_move_max_entry_price: float = 0.95  # sharp moves can enter 0.90-0.95 with taker (fee <0.20%)
+
+    # Per-asset entry price ranges (0=use global min/max_entry_price)
+    asset_min_entry_btc: float = 0.0
+    asset_max_entry_btc: float = 0.0
+    asset_min_entry_eth: float = 0.0
+    asset_max_entry_eth: float = 0.0
+    asset_min_entry_sol: float = 0.0
+    asset_max_entry_sol: float = 0.0
+    asset_min_entry_xrp: float = 0.0
+    asset_max_entry_xrp: float = 0.0
     max_entry_spread: float = 0.04  # $0.04 max bid-ask spread for entry (wider = unfilled maker)
     min_book_imbalance_alignment: float = 0.0  # 0=disabled. E.g. 0.53: Up signals need bid/(bid+ask)>=0.53, Down signals need <=0.47
     macro_blackout_mins: int = 45              # blackout window around FOMC/CPI/NFP events (0=disabled)
@@ -324,6 +344,16 @@ class Settings(BaseSettings):
         """Return bet sizing multiplier for a given asset. Default 1.0."""
         key = f"asset_multiplier_{asset.lower()}"
         return getattr(self, key, 1.0)
+
+    def get_entry_range(self, asset: str) -> tuple:
+        """Return (min_price, max_price) for an asset. Falls back to global."""
+        a = asset.lower()
+        lo = getattr(self, f"asset_min_entry_{a}", 0.0)
+        hi = getattr(self, f"asset_max_entry_{a}", 0.0)
+        return (
+            lo if lo > 0 else self.min_entry_price,
+            hi if hi > 0 else self.max_entry_price,
+        )
 
     def get_market_windows(self, asset: str) -> List[int]:
         """Return list of market windows for an asset.

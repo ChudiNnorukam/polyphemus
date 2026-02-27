@@ -556,6 +556,8 @@ class SignalBot:
                 tasks.append(self._safe_task(self._adaptive_tuner.start(), "adaptive_tuner"))
             if self._config.enable_pair_arb and self._momentum_feed:
                 tasks.append(self._safe_task(self._momentum_feed.pair_arb_scan_loop(), "pair_arb_scan"))
+            if self._config.pair_arb_near_res_enabled and self._momentum_feed:
+                tasks.append(self._safe_task(self._momentum_feed.near_res_pair_arb_loop(), "near_res_pair_arb"))
             await asyncio.gather(*tasks)
 
         except KeyboardInterrupt:

@@ -69,6 +69,7 @@ class BinanceMomentumFeed:
         self._window_open_prices: Dict[tuple, float] = {}
         self._delta_fired: Set[str] = set()  # slugs already fired for delta
         self._snipe_fired: Set[str] = set()  # slugs already fired for resolution snipe
+        self._near_res_fired: Set[str] = set()  # epochs already fired for near-res pair arb
 
         # Connection state
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -954,8 +955,9 @@ class BinanceMomentumFeed:
         # Persist pruned slugs to disk
         self._state_store.save("signaled_slugs", self._signaled_slugs)
 
-        # Prune snipe dedup (keys are per-epoch, safe to clear on prune cycle)
+        # Prune snipe and near-res dedup (keys are per-epoch, safe to clear on prune cycle)
         self._snipe_fired.clear()
+        self._near_res_fired.clear()
 
         # Prune old window open prices (keep only current + previous window)
         now = time.time()
@@ -1396,9 +1398,11 @@ class BinanceMomentumFeed:
             if not triggered:
                 continue
 
-            if self._active_pair_arb_count >= self._config.pair_arb_max_concurrent:
+            # Count active pair arb trades from signaled slugs (each trade = 2 legs)
+            active_pairs = sum(1 for s in self._signaled_slugs if ':up' in s or ':down' in s) // 2
+            if active_pairs >= self._config.pair_arb_max_concurrent:
                 self._logger.debug(
-                    f"pair_arb: {slug} skipped (max concurrent={self._config.pair_arb_max_concurrent})"
+                    f"pair_arb: {slug} skipped (active={active_pairs}, max={self._config.pair_arb_max_concurrent})"
                 )
                 continue
 
@@ -1450,6 +1454,116 @@ class BinanceMomentumFeed:
             "time_remaining_secs": time_remaining,
             "market_window_secs": 300,
         }
+
+    async def near_res_pair_arb_loop(self) -> None:
+        """Scan every few seconds for near-resolution pair arb opportunities.
+        Focuses on the last N seconds of each 5m epoch where MMs pull liquidity.
+        Uses taker execution (no time for maker fills).
+        """
+        interval = self._config.pair_arb_near_res_scan_interval
+        while True:
+            try:
+                await self._do_near_res_pair_arb_scan()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._logger.warning(f"near_res_pair_arb error (non-fatal): {e}")
+            await asyncio.sleep(interval)
+
+    async def _do_near_res_pair_arb_scan(self) -> None:
+        """Check if we're in the near-resolution window and scan for pair arb."""
+        now = time.time()
+        epoch = int(now // 300) * 300
+        epoch_end = epoch + 300
+        secs_remaining = epoch_end - now
+
+        max_secs = self._config.pair_arb_near_res_max_secs
+        min_secs = self._config.pair_arb_near_res_min_secs
+
+        if secs_remaining > max_secs or secs_remaining < min_secs:
+            return
+
+        allowed = self._config.get_asset_filter() or ["BTC"]
+        for asset in allowed:
+            slug = f"{asset.lower()}-updown-5m-{epoch}"
+            dedup_key = f"nr-{asset}-{epoch}"
+
+            if dedup_key in self._near_res_fired:
+                continue
+
+            market_info = self._market_cache.get(slug)
+            if not market_info:
+                continue
+
+            up_token_id = market_info.get("up_token_id")
+            down_token_id = market_info.get("down_token_id")
+            if not up_token_id or not down_token_id:
+                continue
+
+            if not self._market_ws:
+                continue
+
+            await self._market_ws.subscribe([up_token_id, down_token_id])
+
+            ask_up = self._market_ws.get_best_ask(up_token_id)
+            ask_down = self._market_ws.get_best_ask(down_token_id)
+
+            if ask_up <= 0.0 or ask_down <= 0.0:
+                continue
+
+            # Fee-aware pair cost: include taker fees for both sides
+            fee_up = 0.25 * (ask_up * (1 - ask_up)) ** 2
+            fee_down = 0.25 * (ask_down * (1 - ask_down)) ** 2
+            raw_pair_cost = ask_up + ask_down
+            effective_pair_cost = raw_pair_cost + fee_up + fee_down
+
+            threshold = self._config.pair_arb_near_res_max_pair_cost
+            triggered = effective_pair_cost < threshold
+            margin_pct = (1.0 - effective_pair_cost) * 100
+
+            if triggered or margin_pct > -5:  # log when close to threshold or triggered
+                self._logger.info(
+                    f"near_res_arb: {asset} raw={raw_pair_cost:.4f} "
+                    f"fees={fee_up + fee_down:.4f} effective={effective_pair_cost:.4f} "
+                    f"threshold={threshold} {secs_remaining:.0f}s left "
+                    f"{'TRIGGER' if triggered else 'skip'} margin={margin_pct:.1f}%"
+                )
+
+            if not triggered:
+                continue
+
+            # Concurrent cap (shared with regular pair arb)
+            active_pairs = sum(1 for s in self._signaled_slugs if ':up' in s or ':down' in s) // 2
+            if active_pairs >= self._config.pair_arb_max_concurrent:
+                self._logger.debug(f"near_res_arb: {slug} skipped (concurrent cap)")
+                continue
+
+            self._near_res_fired.add(dedup_key)
+
+            if self._config.pair_arb_dry_run:
+                self._logger.info(
+                    f"near_res_arb DRY: {asset} pair_cost={raw_pair_cost:.4f} "
+                    f"effective={effective_pair_cost:.4f} margin={margin_pct:.1f}% "
+                    f"(up={ask_up:.4f} down={ask_down:.4f}) {secs_remaining:.0f}s left"
+                )
+                continue
+
+            # Build signals with near_resolution flag and taker strategy
+            up_signal = self._build_pair_arb_signal(
+                asset, "Up", up_token_id, slug, ask_up, raw_pair_cost, market_info, epoch
+            )
+            down_signal = self._build_pair_arb_signal(
+                asset, "Down", down_token_id, slug, ask_down, raw_pair_cost, market_info, epoch
+            )
+            # Override for near-resolution: taker execution, fee-aware metadata
+            for sig in (up_signal, down_signal):
+                sig["strategy"] = "taker"
+                sig["near_resolution"] = True
+                sig["effective_pair_cost"] = effective_pair_cost
+                sig["taker_fee"] = fee_up + fee_down
+
+            await self._on_signal(up_signal)
+            await self._on_signal(down_signal)
 
     async def close(self) -> None:
         """Clean up persistent sessions."""

@@ -129,6 +129,20 @@ class PositionExecutor:
         if is_snipe:
             use_maker = False
 
+        # Sharp move at 0.90+: taker entry (fee <0.20% at 0.90, near-zero above)
+        is_sharp = signal.get('source') == 'sharp_move' if signal else False
+        if is_sharp and price > 0.90:
+            use_maker = False
+            self._logger.info(
+                f"Sharp move taker override: midpoint={price:.4f} > 0.90, "
+                f"fee ~{0.25 * (price * (1 - price)) ** 2:.3%} | slug={slug}"
+            )
+
+        # Near-resolution pair arb: always taker (no time for maker in last 8-45s)
+        is_near_res_pair = signal.get('near_resolution', False) if signal else False
+        if is_near_res_pair:
+            use_maker = False
+
         maker_offset_used = None  # Track for fill optimizer
         self._logger.info(
             f"Entry mode: {'maker' if use_maker else 'taker'} | "
@@ -243,10 +257,14 @@ class PositionExecutor:
                 if live_midpoint <= 0:
                     return fill_result  # Can't get midpoint, give up
                 taker_price = round(min(live_midpoint + 0.02, 0.99), 2)
-                if taker_price > self._config.max_entry_price:
+                fallback_max = (
+                    self._config.sharp_move_max_entry_price
+                    if is_sharp else self._config.max_entry_price
+                )
+                if taker_price > fallback_max:
                     self._logger.warning(
                         f"Taker fallback aborted: taker_price {taker_price:.4f} > "
-                        f"max_entry_price {self._config.max_entry_price} for {slug}"
+                        f"max_entry_price {fallback_max} for {slug}"
                     )
                     return fill_result
                 taker_result = await self._clob.place_order(
@@ -401,6 +419,20 @@ class PositionExecutor:
             size = base_spend / price
             self._logger.info(
                 f"Snipe sizing: {self._config.snipe_bet_pct:.0%} of "
+                f"${available_capital:.0f} = ${base_spend:.2f} / "
+                f"{price:.4f} = {size:.1f} shares"
+            )
+            return max(0, size)
+
+        # Near-resolution pair arb: flat sizing with hard $ cap per leg
+        is_near_res = signal.get('near_resolution', False) if signal else False
+        if is_near_res:
+            base_spend = available_capital * self._config.pair_arb_near_res_bet_pct
+            base_spend = min(base_spend, self._config.pair_arb_near_res_max_bet)
+            base_spend = max(base_spend, self._config.min_bet)
+            size = base_spend / price
+            self._logger.info(
+                f"Near-res pair arb sizing: {self._config.pair_arb_near_res_bet_pct:.0%} of "
                 f"${available_capital:.0f} = ${base_spend:.2f} / "
                 f"{price:.4f} = {size:.1f} shares"
             )

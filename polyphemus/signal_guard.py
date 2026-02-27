@@ -69,6 +69,7 @@ class SignalGuard:
         is_pair_arb = signal.get('source') == 'pair_arb'
         is_weather = signal.get('source') == 'noaa_weather'
         is_snipe = signal.get('source') == 'resolution_snipe'
+        is_sharp = signal.get('source') == 'sharp_move'
 
         # ====================================================================
         # FILTER 1: Direction Check (only BUY signals from DB)
@@ -137,10 +138,12 @@ class SignalGuard:
         # ====================================================================
         price = signal.get('price', 0)
         market_window = signal.get('market_window_secs', 900)
-        min_price = self._config.min_entry_price
-        max_price = self._config.max_entry_price
+        asset = signal.get('asset', '').upper()
+        min_price, max_price = self._config.get_entry_range(asset) if asset else (
+            self._config.min_entry_price, self._config.max_entry_price
+        )
         # Window delta fires near expiry where prices are extreme (>0.90)
-        # — exempt from standard price range, use dedicated max instead
+        # -- exempt from standard price range, use dedicated max instead
         if is_window_delta:
             if price > self._config.window_delta_max_price:
                 reasons.append('price_out_of_range')
@@ -151,6 +154,11 @@ class SignalGuard:
             pass  # pair_arb uses pair_cost filter in scan loop, not entry price range
         elif is_weather:
             pass  # weather uses weather_entry_max_price filter in scan loop
+        elif is_sharp:
+            # Sharp moves use extended ceiling (0.90-0.95 zone, near-zero taker fee)
+            sharp_max = self._config.sharp_move_max_entry_price
+            if price < min_price or price > sharp_max:
+                reasons.append('price_out_of_range')
         elif price < min_price or price > max_price:
             reasons.append('price_out_of_range')
 
