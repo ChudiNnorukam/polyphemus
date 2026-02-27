@@ -159,14 +159,23 @@ class PositionExecutor:
                 post_only=True,
             )
         else:
-            # Taker mode: existing smart slippage logic
-            live_midpoint = await self._clob.get_midpoint(token_id)
+            # Taker mode: smart slippage logic
+            # Snipe: skip redundant midpoint fetch — signal.price IS the midpoint
+            if is_snipe:
+                live_midpoint = price
+            else:
+                live_midpoint = await self._clob.get_midpoint(token_id)
             base_price = max(price, live_midpoint) if live_midpoint > 0 else price
-            # +$0.02 on top of live price, but cap total overpay at $0.05 from signal
-            buy_price = round(min(base_price + 0.02, price + 0.05, 0.99), 2)
+            if is_snipe:
+                # Snipe: tight slippage — +$0.01 max, every cent matters at 0.90+
+                buy_price = round(min(price + 0.01, 0.99), 2)
+            else:
+                # +$0.02 on top of live price, but cap total overpay at $0.05 from signal
+                buy_price = round(min(base_price + 0.02, price + 0.05, 0.99), 2)
             self._logger.info(
-                f"Smart slippage: signal={price}, midpoint={live_midpoint:.4f}, "
-                f"buy_price={buy_price} (max overpay $0.05)"
+                f"{'Snipe' if is_snipe else 'Smart'} slippage: signal={price}, "
+                f"midpoint={live_midpoint:.4f}, buy_price={buy_price} "
+                f"(max overpay ${0.01 if is_snipe else 0.05})"
             )
             placement_result = await self._clob.place_order(
                 token_id=token_id,
@@ -191,6 +200,12 @@ class PositionExecutor:
 
         # Poll for fill — maker gets longer timeout, taker gets standard
         poll_max = MAKER_POLL_MAX if use_maker else TAKER_POLL_MAX
+        # Snipe: cap timeout at (time_remaining - 3s) to cancel before market close
+        if is_snipe:
+            secs_left = signal.get('time_remaining_secs', 15)
+            snipe_polls = max(1, int(secs_left) - 3)  # 3s safety buffer
+            poll_max = min(poll_max, snipe_polls)
+            self._logger.info(f"Snipe fill timeout: {poll_max}s ({secs_left}s remaining, 3s buffer)")
         fill_result = await self._poll_for_fill(order_id, token_id, price, size, max_polls=poll_max)
 
         # Record maker fill outcome to optimizer (before fallback)
@@ -211,9 +226,12 @@ class PositionExecutor:
             cancel_ok = await self._clob.cancel_order(order_id)
             if not cancel_ok:
                 self._logger.warning(
-                    f"cancel_order failed after maker timeout (order_id={order_id}) — "
-                    f"taker fallback may cause double-buy"
+                    f"cancel_order failed after {'snipe' if is_snipe else 'maker'} timeout "
+                    f"(order_id={order_id})"
                 )
+            if is_snipe:
+                self._logger.info(f"Snipe fill missed for {slug} — no retry near market close")
+                return fill_result
 
             # Hybrid fallback: if maker timed out, retry as taker
             if use_maker and fill_result.reason == "timeout":

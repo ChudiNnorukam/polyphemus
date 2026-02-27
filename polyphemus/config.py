@@ -208,6 +208,7 @@ class Settings(BaseSettings):
     snipe_bet_pct: float = 0.04          # 4% of balance per snipe
     snipe_max_bet: float = 50.0          # hard $ cap per snipe trade
     snipe_assets: str = ""               # comma-separated, empty = use asset_filter
+    snipe_max_daily_trades: int = 100    # hard cap on snipe trades per day (0=unlimited)
 
     # Order entry/exit mode
     entry_mode: str = "taker"  # "taker" (cross spread) or "maker" (post-only)

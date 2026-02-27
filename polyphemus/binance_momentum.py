@@ -111,13 +111,16 @@ class BinanceMomentumFeed:
         # Create persistent Gamma session
         self._gamma_session = aiohttp.ClientSession()
 
-        await asyncio.gather(
+        tasks = [
             self._connect_loop(),
             self._liquidation_connect_loop(),
             self._funding_rate_poll_loop(),
             self._market_prefetch_loop(),
             self._watch_new_markets(),
-        )
+        ]
+        if self._config.enable_resolution_snipe:
+            tasks.append(self._snipe_loop())
+        await asyncio.gather(*tasks)
 
     async def start_stale_watchdog(self) -> None:
         """Placeholder for API compatibility with signal feeds."""
@@ -207,8 +210,6 @@ class BinanceMomentumFeed:
                 await self._check_momentum(symbol, now, price)
                 if self._config.enable_window_delta:
                     await self._check_window_delta(symbol, now, price)
-                if self._config.enable_resolution_snipe:
-                    await self._check_snipe(symbol, now, price)
 
     async def _process_binance_update(self, data: dict) -> None:
         """Process a Binance kline update."""
@@ -238,10 +239,6 @@ class BinanceMomentumFeed:
         # Check window delta (T-10 late entry)
         if self._config.enable_window_delta:
             await self._check_window_delta(symbol, now, price)
-
-        # Check resolution snipe (last 8-45s, near-certain outcomes)
-        if self._config.enable_resolution_snipe:
-            await self._check_snipe(symbol, now, price)
 
     async def _check_momentum(self, symbol: str, now: float, current_price: float) -> None:
         """Check if price has moved enough within the window to trigger a signal."""
@@ -704,64 +701,111 @@ class BinanceMomentumFeed:
     # Resolution Snipe: Buy near-certain winner in last seconds before close
     # ========================================================================
 
-    async def _check_snipe(self, symbol: str, now: float, current_price: float) -> None:
-        """Buy near-certain winning side in last N seconds before market close.
+    async def _snipe_loop(self) -> None:
+        """Independent 1-second timer for resolution snipe.
 
-        No Binance confirmation needed - the Polymarket midpoint IS the signal.
-        If one side is 0.90+, the market has already decided.
+        Runs on its own clock so we never miss a window due to quiet Binance ticks.
+        Pre-caches market info at epoch boundaries to eliminate Gamma API latency at snipe time.
         """
-        asset = BINANCE_TO_ASSET.get(symbol)
-        if not asset:
-            return
-
-        # Check asset filter
-        snipe_assets = self._config.snipe_assets.strip()
-        if snipe_assets:
-            allowed = [a.strip().upper() for a in snipe_assets.split(',') if a.strip()]
+        # Build snipe asset list
+        snipe_assets_str = self._config.snipe_assets.strip()
+        if snipe_assets_str:
+            allowed = [a.strip().upper() for a in snipe_assets_str.split(',') if a.strip()]
         else:
-            allowed = self._config.get_asset_filter()
-        shadow = self._config.get_shadow_assets()
-        if allowed and asset.upper() not in allowed and asset.upper() not in shadow:
-            return
+            allowed = self._config.get_asset_filter() or []
+        shadow = self._config.get_shadow_assets() or []
+        # All assets we check (allowed + shadow that aren't already in allowed)
+        all_assets = list(allowed) + [a for a in shadow if a not in allowed]
 
-        is_shadow = asset.upper() in shadow and asset.upper() not in (allowed or [])
+        precached: Set[str] = set()
+        daily_snipe_count = 0
+        daily_snipe_day = time.strftime("%Y-%m-%d")
 
-        for window in self._config.get_market_windows(asset):
-            current_epoch = (int(now) // window) * window
-            window_end = current_epoch + window
-            secs_to_end = window_end - now
+        self._logger.info(
+            f"Snipe loop started | assets={all_assets} | "
+            f"window=[{self._config.snipe_min_secs_remaining}-"
+            f"{self._config.snipe_max_secs_remaining}s] | "
+            f"price=[{self._config.snipe_min_entry_price}-"
+            f"{self._config.snipe_max_entry_price}] | "
+            f"max_daily={self._config.snipe_max_daily_trades}"
+        )
 
-            # Only fire in the snipe window
-            if secs_to_end > self._config.snipe_max_secs_remaining:
-                continue
-            if secs_to_end < self._config.snipe_min_secs_remaining:
-                continue
+        while True:
+            try:
+                await asyncio.sleep(1)
+                now = time.time()
 
-            # Already fired for this window+asset?
-            snipe_key = f"snipe-{asset.lower()}-{window // 60}m-{current_epoch}"
-            if snipe_key in self._snipe_fired:
-                continue
+                # Reset daily counter at midnight
+                today = time.strftime("%Y-%m-%d")
+                if today != daily_snipe_day:
+                    self._logger.info(f"Snipe daily reset: {daily_snipe_count} trades yesterday")
+                    daily_snipe_count = 0
+                    daily_snipe_day = today
 
-            # Skip if normal momentum already fired on this market
-            slug = f"{asset.lower()}-updown-{window // 60}m-{current_epoch}"
-            if slug in self._signaled_slugs:
-                continue
+                # Daily cap check
+                cap = self._config.snipe_max_daily_trades
+                if cap > 0 and daily_snipe_count >= cap:
+                    continue
 
-            # Mark fired (before async calls to prevent re-entry)
-            self._snipe_fired.add(snipe_key)
+                for asset in all_assets:
+                    is_shadow = asset in shadow and asset not in allowed
 
-            await self._generate_snipe_signal(
-                asset, slug, secs_to_end, window, is_shadow
-            )
+                    for window in self._config.get_market_windows(asset):
+                        if window > 300:
+                            continue  # snipe 5m only — 15m has time_exit losses
+                        current_epoch = (int(now) // window) * window
+                        window_end = current_epoch + window
+                        secs_to_end = window_end - now
+                        slug = f"{asset.lower()}-updown-{window // 60}m-{current_epoch}"
+
+                        # Pre-cache: discover market early (>60s remaining)
+                        cache_key = f"pc-{slug}"
+                        if secs_to_end > 60 and cache_key not in precached:
+                            precached.add(cache_key)
+                            asyncio.create_task(self._discover_market(slug))
+
+                        # Only fire in the snipe window
+                        if secs_to_end > self._config.snipe_max_secs_remaining:
+                            continue
+                        if secs_to_end < self._config.snipe_min_secs_remaining:
+                            continue
+
+                        # Dedup
+                        snipe_key = f"snipe-{asset.lower()}-{window // 60}m-{current_epoch}"
+                        if snipe_key in self._snipe_fired:
+                            continue
+
+                        # Skip if momentum already fired
+                        if slug in self._signaled_slugs:
+                            continue
+
+                        # Try to snipe — only mark fired if signal actually emitted
+                        fired = await self._generate_snipe_signal(
+                            asset, slug, secs_to_end, window, is_shadow
+                        )
+                        if fired:
+                            self._snipe_fired.add(snipe_key)
+                            if not (asset in shadow and asset not in allowed):
+                                daily_snipe_count += 1
+
+                # Prune old precache keys
+                if len(precached) > 200:
+                    precached.clear()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(f"Snipe loop error: {e}")
+                await asyncio.sleep(5)
 
     async def _generate_snipe_signal(self, asset: str, slug: str,
                                       secs_left: float,
-                                      window: int, shadow: bool) -> None:
-        """Check both sides' midpoints and buy whichever is in snipe range."""
+                                      window: int, shadow: bool) -> bool:
+        """Check both sides' midpoints and buy whichever is in snipe range.
+        Returns True if a signal was emitted (or shadow-logged)."""
         market_info = await self._discover_market(slug)
         if not market_info:
-            self._logger.warning(f"Snipe: market not found: {slug}")
-            return
+            return False
 
         # Check BOTH sides - buy whichever the market has priced as the winner
         for outcome, token_key in [("Up", "up_token_id"), ("Down", "down_token_id")]:
@@ -787,7 +831,7 @@ class BinanceMomentumFeed:
                     f"[SHADOW] Snipe: {slug} {outcome} @ {midpoint:.4f} "
                     f"({secs_left:.0f}s left)"
                 )
-                return
+                return True
 
             self._signaled_slugs.add(slug)
             self._state_store.save("signaled_slugs", self._signaled_slugs)
@@ -816,7 +860,9 @@ class BinanceMomentumFeed:
             )
 
             await self._on_signal(signal)
-            return
+            return True
+
+        return False
 
     def prune_stale(self) -> None:
         """Prune old signaled slugs and market cache. Call periodically.

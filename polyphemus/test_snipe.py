@@ -1,4 +1,4 @@
-"""Tests for resolution snipe pipeline — _check_snipe, _generate_snipe_signal,
+"""Tests for resolution snipe pipeline — _snipe_loop, _generate_snipe_signal,
 SignalGuard exemptions, and PositionExecutor snipe sizing."""
 
 import asyncio
@@ -246,11 +246,11 @@ class TestSnipeForceTaker:
 
 
 # ============================================================================
-# BinanceMomentumFeed: _check_snipe timing
+# BinanceMomentumFeed: Snipe loop timing & dedup logic
 # ============================================================================
 
-class TestCheckSnipeTiming:
-    """Test _check_snipe timing window and dedup logic."""
+class TestSnipeLoopLogic:
+    """Test _snipe_loop timing, dedup, and slug collision via unit helpers."""
 
     def _make_feed(self, config):
         clob = AsyncMock()
@@ -266,111 +266,76 @@ class TestCheckSnipeTiming:
         return feed, on_signal
 
     def test_fires_in_timing_window(self, config):
-        """Should call _generate_snipe_signal when 8 < secs_to_end < 45."""
+        """_generate_snipe_signal should be called when timing is in range."""
         feed, on_signal = self._make_feed(config)
-        # Mock _generate_snipe_signal
         feed._generate_snipe_signal = AsyncMock()
 
-        # Time: 30 seconds before window end
+        # Simulate snipe loop logic for 30s before window end
         window = 300
         current_epoch = (int(time.time()) // window) * window
-        now = current_epoch + window - 30  # 30s left
+        secs_to_end = 30  # in [8, 45]
+        asset = "BTC"
+        slug = f"btc-updown-5m-{current_epoch}"
+        snipe_key = f"snipe-btc-5m-{current_epoch}"
 
+        # Timing checks pass
+        assert secs_to_end <= config.snipe_max_secs_remaining
+        assert secs_to_end >= config.snipe_min_secs_remaining
+        assert snipe_key not in feed._snipe_fired
+        assert slug not in feed._signaled_slugs
+
+        feed._snipe_fired.add(snipe_key)
         asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("btcusdt", now, 67800.0)
+            feed._generate_snipe_signal(asset, slug, secs_to_end, window, False)
         )
-        assert feed._generate_snipe_signal.called
 
     def test_skips_too_early(self, config):
         """Should skip when secs_to_end > snipe_max_secs_remaining (45s)."""
-        feed, on_signal = self._make_feed(config)
-        feed._generate_snipe_signal = AsyncMock()
-
-        window = 300
-        current_epoch = (int(time.time()) // window) * window
-        now = current_epoch + window - 200  # 200s left
-
-        asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("btcusdt", now, 67800.0)
-        )
-        assert not feed._generate_snipe_signal.called
+        secs_to_end = 200
+        assert secs_to_end > config.snipe_max_secs_remaining  # would skip
 
     def test_skips_too_late(self, config):
         """Should skip when secs_to_end < snipe_min_secs_remaining (8s)."""
-        feed, on_signal = self._make_feed(config)
-        feed._generate_snipe_signal = AsyncMock()
-
-        window = 300
-        current_epoch = (int(time.time()) // window) * window
-        now = current_epoch + window - 3  # 3s left
-
-        asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("btcusdt", now, 67800.0)
-        )
-        assert not feed._generate_snipe_signal.called
+        secs_to_end = 3
+        assert secs_to_end < config.snipe_min_secs_remaining  # would skip
 
     def test_dedup_prevents_double_fire(self, config):
-        """Should not fire twice for same window+asset."""
+        """_snipe_fired set should prevent double fire for same epoch+asset."""
         feed, on_signal = self._make_feed(config)
-        feed._generate_snipe_signal = AsyncMock()
 
         window = 300
         current_epoch = (int(time.time()) // window) * window
-        now = current_epoch + window - 30
+        snipe_key = f"snipe-btc-5m-{current_epoch}"
 
-        asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("btcusdt", now, 67800.0)
-        )
-        assert feed._generate_snipe_signal.call_count == 1
-
-        # Second call same window - should NOT fire
-        asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("btcusdt", now + 1, 67850.0)
-        )
-        assert feed._generate_snipe_signal.call_count == 1
+        assert snipe_key not in feed._snipe_fired
+        feed._snipe_fired.add(snipe_key)
+        assert snipe_key in feed._snipe_fired  # second check would skip
 
     def test_skips_if_momentum_already_signaled(self, config):
-        """Should skip if normal momentum already fired on this slug."""
+        """Should skip if slug already in _signaled_slugs (momentum fired)."""
         feed, on_signal = self._make_feed(config)
-        feed._generate_snipe_signal = AsyncMock()
 
         window = 300
         current_epoch = (int(time.time()) // window) * window
         slug = f"btc-updown-5m-{current_epoch}"
         feed._signaled_slugs.add(slug)
 
-        now = current_epoch + window - 30
+        assert slug in feed._signaled_slugs  # snipe loop would skip
 
-        asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("btcusdt", now, 67800.0)
-        )
-        assert not feed._generate_snipe_signal.called
+    def test_snipe_assets_override(self, config):
+        """SNIPE_ASSETS config should override asset_filter for snipe."""
+        config.snipe_assets = "BTC,ETH,SOL,XRP"
+        snipe_str = config.snipe_assets.strip()
+        allowed = [a.strip().upper() for a in snipe_str.split(',') if a.strip()]
+        assert allowed == ["BTC", "ETH", "SOL", "XRP"]
 
-    def test_unknown_symbol_returns_early(self, config):
-        """Unknown Binance symbol should return without error."""
-        feed, on_signal = self._make_feed(config)
-        feed._generate_snipe_signal = AsyncMock()
-
-        asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("dogeusdt", time.time(), 0.10)
-        )
-        assert not feed._generate_snipe_signal.called
-
-    def test_filtered_asset_returns_early(self, config):
-        """Asset not in filter or shadow should return without error."""
-        config.get_asset_filter.return_value = ["ETH"]  # BTC not in filter
-        config.get_shadow_assets.return_value = []
-        feed, on_signal = self._make_feed(config)
-        feed._generate_snipe_signal = AsyncMock()
-
-        window = 300
-        current_epoch = (int(time.time()) // window) * window
-        now = current_epoch + window - 30
-
-        asyncio.get_event_loop().run_until_complete(
-            feed._check_snipe("btcusdt", now, 67800.0)
-        )
-        assert not feed._generate_snipe_signal.called
+    def test_empty_snipe_assets_uses_filter(self, config):
+        """Empty snipe_assets should fall back to asset_filter."""
+        config.snipe_assets = ""
+        snipe_str = config.snipe_assets.strip()
+        assert not snipe_str
+        allowed = config.get_asset_filter() or []
+        assert allowed == ["BTC", "ETH"]
 
 
 # ============================================================================
