@@ -70,7 +70,7 @@ def make_signal(**overrides):
         token_id="0xtoken001",
         direction="BUY",
         outcome="down",
-        price=0.70,
+        price=0.80,
         asset="SOL",
         slug="sol-test",
         usdc_size=100.0,
