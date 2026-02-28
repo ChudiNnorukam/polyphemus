@@ -35,10 +35,12 @@ BINANCE_TO_ASSET = {v: k for k, v in ASSET_TO_BINANCE.items()}
 class BinanceMomentumFeed:
     """Real-time Binance price momentum detector → Polymarket signal generator."""
 
-    def __init__(self, config: Settings, clob: ClobWrapper, on_signal: Callable):
+    def __init__(self, config: Settings, clob: ClobWrapper, on_signal: Callable,
+                 signal_logger=None):
         self._config = config
         self._clob = clob
         self._on_signal = on_signal  # async callback
+        self._signal_logger = signal_logger  # for dry-run signal tracking
         self._logger = setup_logger("polyphemus.momentum")
 
         # State persistence (prevents duplicate signals on restart)
@@ -104,6 +106,9 @@ class BinanceMomentumFeed:
         # Pair arb: active concurrent position counter (managed by signal_bot)
         self._active_pair_arb_count: int = 0
 
+        # Snipe dry-run resolution tracking: list of (epoch_end_ts, signal_id, token_id, entry_price)
+        self._snipe_pending: list = []
+
     def set_market_ws(self, ws) -> None:
         """Inject MarketWS reference for real-time midpoints."""
         self._market_ws = ws
@@ -128,6 +133,8 @@ class BinanceMomentumFeed:
         ]
         if self._config.enable_resolution_snipe:
             tasks.append(self._snipe_loop())
+            if self._config.snipe_dry_run and self._signal_logger:
+                tasks.append(self._snipe_resolution_loop())
         await asyncio.gather(*tasks)
 
     async def start_stale_watchdog(self) -> None:
@@ -904,6 +911,26 @@ class BinanceMomentumFeed:
                     f"Snipe DRY: {slug} {outcome} @ {midpoint:.4f} "
                     f"({secs_left:.0f}s left)"
                 )
+                if self._signal_logger:
+                    epoch_val = int(slug.rsplit("-", 1)[-1])
+                    signal_id = self._signal_logger.log_signal({
+                        "slug": slug,
+                        "asset": asset,
+                        "direction": outcome,
+                        "token_id": token_id,
+                        "midpoint": midpoint,
+                        "source": "resolution_snipe",
+                        "outcome": "snipe_dry_run",
+                        "time_remaining_secs": int(secs_left),
+                        "market_window_secs": window,
+                        "entry_price": midpoint,
+                        "dry_run": 1,
+                    })
+                    if signal_id > 0:
+                        epoch_end = epoch_val + window
+                        self._snipe_pending.append(
+                            (epoch_end, signal_id, token_id, midpoint)
+                        )
                 return True
 
             self._signaled_slugs.add(slug)
@@ -936,6 +963,68 @@ class BinanceMomentumFeed:
             return True
 
         return False
+
+    async def _snipe_resolution_loop(self) -> None:
+        """Check resolved outcomes for dry-run snipe signals.
+
+        After each epoch ends (+90s buffer for settlement), check the midpoint
+        of the token we would have bought. If it resolved to ~1.00, we won.
+        """
+        self._logger.info("Snipe resolution checker started")
+        while True:
+            try:
+                await asyncio.sleep(15)
+                now = time.time()
+                still_pending = []
+
+                for epoch_end, signal_id, token_id, entry_price in self._snipe_pending:
+                    # Wait 90s after epoch end for settlement
+                    if now < epoch_end + 90:
+                        still_pending.append((epoch_end, signal_id, token_id, entry_price))
+                        continue
+
+                    # Check resolved price
+                    resolved_price = 0.0
+                    if self._market_ws:
+                        resolved_price = self._market_ws.get_midpoint(token_id)
+                    if resolved_price <= 0:
+                        try:
+                            resolved_price = await self._clob.get_midpoint(token_id)
+                        except Exception:
+                            pass
+
+                    if resolved_price <= 0:
+                        # Can't determine outcome, skip
+                        self._logger.debug(
+                            f"Snipe resolution: no price for signal_id={signal_id}"
+                        )
+                        continue
+
+                    # Win if resolved >= 0.95 (market settled to our side)
+                    is_win = 1 if resolved_price >= 0.95 else 0
+                    sim_pnl = (1.0 - entry_price) if is_win else -entry_price
+
+                    self._signal_logger.update_signal(signal_id, {
+                        "exit_price": resolved_price,
+                        "exit_reason": "market_resolved",
+                        "pnl": round(sim_pnl, 4),
+                        "pnl_pct": round(sim_pnl / entry_price * 100, 2) if entry_price > 0 else 0,
+                        "is_win": is_win,
+                    })
+                    result = "WIN" if is_win else "LOSS"
+                    self._logger.info(
+                        f"Snipe DRY resolved: signal_id={signal_id} "
+                        f"entry={entry_price:.4f} exit={resolved_price:.4f} "
+                        f"pnl={sim_pnl:+.4f} {result}"
+                    )
+
+                self._snipe_pending = still_pending
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(f"Snipe resolution loop error: {e}")
+                await asyncio.sleep(30)
 
     def prune_stale(self) -> None:
         """Prune old signaled slugs and market cache. Call periodically.

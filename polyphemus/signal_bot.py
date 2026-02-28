@@ -321,6 +321,8 @@ class SignalBot:
             self._momentum_feed._regime_detector = self._regime_detector
         if self._momentum_feed:
             self._momentum_feed.set_market_ws(self._market_ws)
+            if self._signal_logger:
+                self._momentum_feed._signal_logger = self._signal_logger
 
         # 14. Dashboard
         self._dashboard = Dashboard(

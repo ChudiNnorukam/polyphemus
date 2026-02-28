@@ -114,6 +114,7 @@ class SignalLogger:
             ("strategy_type", "TEXT"), ("pair_cost", "REAL"), ("source", "TEXT"),
             ("fear_greed", "REAL"), ("market_regime", "TEXT"),
             ("oi_change_pct", "REAL"), ("oi_trend", "TEXT"),
+            ("dry_run", "INTEGER"),
         ]
         for col_name, col_def in _migration_cols:
             try:
