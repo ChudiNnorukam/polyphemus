@@ -899,6 +899,13 @@ class BinanceMomentumFeed:
                 )
                 return True
 
+            if self._config.snipe_dry_run:
+                self._logger.info(
+                    f"Snipe DRY: {slug} {outcome} @ {midpoint:.4f} "
+                    f"({secs_left:.0f}s left)"
+                )
+                return True
+
             self._signaled_slugs.add(slug)
             self._state_store.save("signaled_slugs", self._signaled_slugs)
             self.signals_generated += 1

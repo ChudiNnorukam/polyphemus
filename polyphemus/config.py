@@ -226,6 +226,7 @@ class Settings(BaseSettings):
 
     # Resolution snipe: buy near-certain outcomes in last seconds before resolution
     enable_resolution_snipe: bool = False
+    snipe_dry_run: bool = True            # log only, no real orders
     snipe_max_secs_remaining: int = 45   # enter up to 45s before close
     snipe_min_secs_remaining: int = 8    # need at least 8s for taker fill
     snipe_min_momentum_pct: float = 0.002  # 0.2% Binance move confirms direction
