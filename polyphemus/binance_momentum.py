@@ -814,7 +814,7 @@ class BinanceMomentumFeed:
                     continue
 
                 for asset in all_assets:
-                    is_shadow = asset in shadow and asset not in allowed
+                    is_shadow = asset in shadow
 
                     for window in self._config.get_market_windows(asset):
                         if window > 300:
@@ -851,7 +851,7 @@ class BinanceMomentumFeed:
                         )
                         if fired:
                             self._snipe_fired.add(snipe_key)
-                            if not (asset in shadow and asset not in allowed):
+                            if not (asset in shadow):
                                 daily_snipe_count += 1
 
                 # Prune old precache keys
