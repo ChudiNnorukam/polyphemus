@@ -152,6 +152,44 @@ CREATE TABLE IF NOT EXISTS ceo_decisions (
 );
 """
 
+# Level 2: Self-Reflection (Reflexion framework)
+REFLECTION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_reflections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    reflection TEXT NOT NULL,
+    accuracy_score REAL,
+    lesson TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+# Level 3: Inter-Agent Coordination
+COORDINATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    message TEXT NOT NULL,
+    priority TEXT DEFAULT 'normal',
+    read_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS task_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assigned_to TEXT NOT NULL,
+    task TEXT NOT NULL,
+    priority INTEGER DEFAULT 5,
+    status TEXT DEFAULT 'pending',
+    created_by TEXT NOT NULL,
+    result TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+"""
+
 SEQUENCE_SEEDS = [
     # post-purchase-v1
     ('post-purchase-v1', 1, 0,   'Your purchase is confirmed', 'post_purchase_welcome'),
@@ -194,6 +232,12 @@ def cmd_extend(args):
     conn.executescript(CEO_SCHEMA)
     print("  Created: ceo_decisions")
 
+    conn.executescript(REFLECTION_SCHEMA)
+    print("  Created: agent_reflections")
+
+    conn.executescript(COORDINATION_SCHEMA)
+    print("  Created: agent_messages, task_queue")
+
     # Seed sequence_definitions (idempotent — INSERT OR IGNORE)
     seeded = 0
     for row in SEQUENCE_SEEDS:
@@ -220,10 +264,11 @@ def cmd_status(args):
     wing3 = ['social_posts']
     wing4 = ['funnel_contacts', 'sequence_enrollments', 'sequence_sends', 'sequence_definitions']
     agents = ['cmo_decisions', 'cto_decisions', 'ceo_decisions']
+    evolution = ['agent_reflections', 'agent_messages', 'task_queue']
     original = ['leads', 'daily_caps', 'email_events']
 
     print("\nDB Tables:")
-    for t in original + wing3 + wing4 + agents:
+    for t in original + wing3 + wing4 + agents + evolution:
         status = 'OK' if t in tables else 'MISSING'
         print(f"  {t:<30} {status}")
     print()

@@ -171,6 +171,140 @@ def api_status():
     })
 
 
+@app.route('/api/trends')
+def api_trends():
+    """Level 1: Trend arrows and recurring issues for each agent."""
+    conn = get_db()
+    try:
+        result = {}
+        for agent, table in [('cmo', 'cmo_decisions'), ('cto', 'cto_decisions'), ('ceo', 'ceo_decisions')]:
+            if not table_exists(conn, table):
+                result[agent] = {'trend': 'no_data', 'this_week': 0, 'last_week': 0, 'recurring': [], 'heatmap': []}
+                continue
+
+            # Trend direction
+            this_week = safe_count(conn,
+                f"SELECT COUNT(*) FROM {table} WHERE created_at >= datetime('now', '-7 days') "
+                f"AND lens != 'ai_insight'")
+            last_week = safe_count(conn,
+                f"SELECT COUNT(*) FROM {table} WHERE created_at >= datetime('now', '-14 days') "
+                f"AND created_at < datetime('now', '-7 days') AND lens != 'ai_insight'")
+
+            if this_week > last_week and last_week > 0:
+                trend = 'up'
+            elif this_week < last_week:
+                trend = 'down'
+            else:
+                trend = 'flat'
+
+            # Recurring findings (3+ times in 30 days)
+            recurring_rows = conn.execute(
+                f"SELECT assessment, COUNT(*) as cnt FROM {table} "
+                f"WHERE lens != 'ai_insight' AND created_at >= datetime('now', '-30 days') "
+                f"GROUP BY assessment HAVING COUNT(*) >= 3 ORDER BY cnt DESC LIMIT 5"
+            ).fetchall()
+            recurring = [{'text': r[0][:60], 'count': r[1]} for r in recurring_rows]
+
+            # Check if table has severity column
+            has_severity = True
+            try:
+                conn.execute(f"SELECT severity FROM {table} LIMIT 0")
+            except Exception:
+                has_severity = False
+
+            # Daily heatmap (last 14 days)
+            if has_severity:
+                heatmap_rows = conn.execute(
+                    f"SELECT date(created_at) as day, COUNT(*) as total, "
+                    f"SUM(CASE WHEN severity='critical' THEN 1 ELSE 0 END) as crits, "
+                    f"SUM(CASE WHEN severity IN ('warn','warning','high','medium') THEN 1 ELSE 0 END) as warns "
+                    f"FROM {table} WHERE lens != 'ai_insight' "
+                    f"AND created_at >= datetime('now', '-14 days') "
+                    f"GROUP BY date(created_at) ORDER BY day"
+                ).fetchall()
+            else:
+                heatmap_rows = conn.execute(
+                    f"SELECT date(created_at) as day, COUNT(*) as total, "
+                    f"0 as crits, COUNT(*) as warns "
+                    f"FROM {table} WHERE lens != 'ai_insight' "
+                    f"AND created_at >= datetime('now', '-14 days') "
+                    f"GROUP BY date(created_at) ORDER BY day"
+                ).fetchall()
+            heatmap = []
+            for h in heatmap_rows:
+                if h[2] > 0:
+                    level = 'red'
+                elif h[3] > 0:
+                    level = 'amber'
+                else:
+                    level = 'green'
+                heatmap.append({'day': h[0], 'level': level, 'total': h[1]})
+
+            result[agent] = {
+                'trend': trend,
+                'this_week': this_week,
+                'last_week': last_week,
+                'recurring': recurring,
+                'heatmap': heatmap,
+            }
+    finally:
+        conn.close()
+    return jsonify(result)
+
+
+@app.route('/api/reflections')
+def api_reflections():
+    """Level 2: Recent reflections and accuracy scores."""
+    conn = get_db()
+    try:
+        if not table_exists(conn, 'agent_reflections'):
+            return jsonify({'reflections': [], 'accuracy': {}})
+
+        rows = conn.execute("""
+            SELECT agent, run_id, reflection, accuracy_score, lesson, created_at
+            FROM agent_reflections ORDER BY created_at DESC LIMIT 10
+        """).fetchall()
+        reflections = [dict(r) for r in rows]
+
+        # Average accuracy per agent
+        accuracy = {}
+        for agent in ('cmo', 'cto', 'ceo'):
+            avg_row = conn.execute("""
+                SELECT AVG(accuracy_score) as avg_score, COUNT(*) as cnt
+                FROM agent_reflections WHERE agent=?
+            """, (agent,)).fetchone()
+            if avg_row and avg_row[0] is not None:
+                accuracy[agent] = {'avg': round(avg_row[0], 2), 'count': avg_row[1]}
+    finally:
+        conn.close()
+    return jsonify({'reflections': reflections, 'accuracy': accuracy})
+
+
+@app.route('/api/messages')
+def api_messages():
+    """Level 3: Recent inter-agent messages and task queue."""
+    conn = get_db()
+    try:
+        messages = []
+        if table_exists(conn, 'agent_messages'):
+            rows = conn.execute("""
+                SELECT from_agent, to_agent, message, priority, read_at, created_at
+                FROM agent_messages ORDER BY created_at DESC LIMIT 20
+            """).fetchall()
+            messages = [dict(r) for r in rows]
+
+        tasks = []
+        if table_exists(conn, 'task_queue'):
+            rows = conn.execute("""
+                SELECT assigned_to, task, priority, status, created_by, result, created_at, completed_at
+                FROM task_queue ORDER BY created_at DESC LIMIT 10
+            """).fetchall()
+            tasks = [dict(r) for r in rows]
+    finally:
+        conn.close()
+    return jsonify({'messages': messages, 'tasks': tasks})
+
+
 @app.route('/api/decisions')
 def api_decisions():
     agent = request.args.get('agent', 'cmo')

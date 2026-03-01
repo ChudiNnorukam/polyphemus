@@ -72,8 +72,60 @@
   .card-row .value { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; }
   .card-insight { font-size: 11px; color: #60a5fa; margin-top: 8px; line-height: 1.4; font-style: italic; }
 
+  /* Inter-agent message edges (Level 3) */
+  .msg-edge { stroke-width: 1.5; fill: none; stroke-dasharray: 6 3; }
+  .msg-edge.urgent { stroke: #f87171; }
+  .msg-edge.normal { stroke: #60a5fa; }
+  .msg-edge.fyi    { stroke: #3f3f46; }
+  @keyframes msg-pulse { 0% { opacity: 0.3; } 50% { opacity: 1; } 100% { opacity: 0.3; } }
+  .msg-edge.active { animation: msg-pulse 1.5s ease-in-out infinite; }
+  .msg-dot { r: 4; }
+  .msg-dot.urgent { fill: #f87171; }
+  .msg-dot.normal { fill: #60a5fa; }
+
+  /* Message badge on agent nodes */
+  .msg-badge-bg { fill: #f87171; }
+  .msg-badge-text { font-size: 9px; fill: #fff; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+
+  /* Trend arrow (Level 1) */
+  .trend-arrow { font-size: 12px; font-weight: 700; pointer-events: none; }
+  .trend-up   { fill: #f87171; }
+  .trend-down { fill: #34d399; }
+  .trend-flat { fill: #a1a1aa; }
+
+  /* Heatmap strip (Level 1) */
+  .heatmap-cell { rx: 1; }
+  .hm-green { fill: #065f46; }
+  .hm-amber { fill: #78350f; }
+  .hm-red   { fill: #7f1d1d; }
+  .hm-empty { fill: #18181b; stroke: #27272a; stroke-width: 0.5; }
+
+  /* Accuracy gauge (Level 2) */
+  .acc-track { fill: none; stroke: #27272a; stroke-width: 3; }
+  .acc-fill  { fill: none; stroke-width: 3; stroke-linecap: round; transition: stroke-dashoffset 0.5s; }
+  .acc-text  { font-size: 8px; fill: #a1a1aa; text-anchor: middle; dominant-baseline: central; }
+
+  /* Learning ticker (Level 2) */
+  .ticker-wrap { overflow: hidden; padding: 6px 24px; border-top: 1px solid #1a1a1e; }
+  .ticker { display: flex; gap: 40px; white-space: nowrap; animation: scroll-ticker 30s linear infinite; }
+  .ticker-item { font-size: 11px; color: #60a5fa; font-style: italic; }
+  @keyframes scroll-ticker { 0% { transform: translateX(100%); } 100% { transform: translateX(-100%); } }
+
+  /* Task queue panel (Level 3) */
+  .task-panel { padding: 0 24px 12px; }
+  .task-panel h3 { font-size: 12px; font-weight: 600; color: #a1a1aa; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .task-row { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 4px 8px; background: #18181b; border: 1px solid #27272a; border-radius: 4px; margin-bottom: 4px; }
+  .task-priority { font-size: 9px; padding: 1px 6px; border-radius: 8px; font-weight: 600; background: #27272a; color: #a1a1aa; }
+  .task-priority.p1, .task-priority.p2 { background: #450a0a; color: #f87171; }
+  .task-priority.p3, .task-priority.p4 { background: #451a03; color: #fbbf24; }
+  .task-agent { color: #34d399; font-weight: 600; min-width: 30px; }
+  .task-text { color: #d4d4d8; flex: 1; }
+  .task-status { font-size: 9px; padding: 1px 6px; border-radius: 8px; }
+  .task-status.pending { background: #1e3a5f; color: #60a5fa; }
+  .task-status.done { background: #064e3b; color: #34d399; }
+
   /* Pipeline bar */
-  .pipeline { display: flex; gap: 24px; justify-content: center; padding: 10px 24px 20px; }
+  .pipeline { display: flex; gap: 24px; justify-content: center; padding: 10px 24px 12px; }
   .pipe-stat { font-size: 12px; color: #a1a1aa; }
   .pipe-stat span { color: #fafafa; font-family: 'SF Mono', 'Fira Code', monospace; font-weight: 600; }
 
@@ -100,6 +152,8 @@
   </div>
 
   <div class="cards" id="cards"></div>
+  <div class="task-panel" id="task-panel"></div>
+  <div class="ticker-wrap" id="ticker-wrap"><div class="ticker" id="ticker"></div></div>
   <div class="pipeline" id="pipeline-bar"></div>
   <div id="tooltip"><div id="tip-agent"></div><div id="tip-meta"></div><div id="tip-insight"></div></div>
 
@@ -146,8 +200,18 @@ const EDGES = [
   ['cto', 'git',       'cto'],
 ];
 
+// Level 3: Inter-agent message edges (CEO hub-spoke)
+const MSG_EDGES = [
+  ['ceo', 'cmo'],
+  ['ceo', 'cto'],
+  ['ceo', 'coo'],
+];
+
 const AGENT_NAMES = { cmo: 'CMO Engine', cto: 'CTO Engine', ceo: 'CEO Engine', coo: 'COO Engine' };
 let latestData = null;
+let latestTrends = null;
+let latestReflections = null;
+let latestMessages = null;
 
 // ── SVG helpers ───────────────────────────────────────────────────
 function el(tag, attrs) {
@@ -202,6 +266,171 @@ function renderNodes() {
   }
 }
 
+// ── Level 3: Inter-agent message edges ────────────────────────────
+function renderMsgEdges() {
+  const g = el('g', { id: 'msg-edges-group' });
+  MSG_EDGES.forEach(([srcId, tgtId], i) => {
+    const src = AGENTS[srcId], tgt = AGENTS[tgtId];
+    const d = edgePath(src, tgt);
+    const line = el('path', { d, class: 'msg-edge', 'data-msg-idx': i, opacity: '0' });
+    g.appendChild(line);
+    const dot = el('circle', { r: '4', class: 'msg-dot', 'data-msg-idx': i, opacity: '0' });
+    g.appendChild(dot);
+  });
+  svg.insertBefore(g, svg.querySelector('#edges-group'));
+}
+
+// ── Level 1: Trend arrows + heatmap on agent nodes ───────────────
+function updateTrendOverlays(trends) {
+  // Remove old overlays
+  svg.querySelectorAll('.trend-arrow, .heatmap-cell, .acc-track, .acc-fill, .acc-text, .msg-badge-bg, .msg-badge-text').forEach(e => e.remove());
+
+  for (const [id, n] of Object.entries(AGENTS)) {
+    const t = trends?.[id];
+    if (!t || t.trend === 'no_data') continue;
+
+    // Trend arrow (top-right of node)
+    const arrowChar = t.trend === 'up' ? '\u2191' : t.trend === 'down' ? '\u2193' : '\u2192';
+    const arrowClass = 'trend-' + t.trend;
+    const arrow = Object.assign(
+      el('text', { x: n.x + n.w - 4, y: n.y - 4, class: `trend-arrow ${arrowClass}` }),
+      { textContent: arrowChar }
+    );
+    svg.appendChild(arrow);
+
+    // Heatmap strip (below node)
+    const hm = t.heatmap || [];
+    const cellW = 7, cellH = 5, gap = 1;
+    const totalW = hm.length * (cellW + gap);
+    const startX = cx(n) - totalW / 2;
+    const startY = n.y + n.h + 4;
+    hm.forEach((cell, ci) => {
+      const cls = cell.level === 'red' ? 'hm-red' : cell.level === 'amber' ? 'hm-amber' : 'hm-green';
+      svg.appendChild(el('rect', {
+        x: startX + ci * (cellW + gap), y: startY, width: cellW, height: cellH,
+        class: `heatmap-cell ${cls}`
+      }));
+    });
+    // Fill empty slots to 14
+    for (let ci = hm.length; ci < 14; ci++) {
+      svg.appendChild(el('rect', {
+        x: startX + ci * (cellW + gap), y: startY, width: cellW, height: cellH,
+        class: 'heatmap-cell hm-empty'
+      }));
+    }
+  }
+}
+
+// ── Level 2: Accuracy gauges ─────────────────────────────────────
+function updateAccuracyGauges(reflections) {
+  const accuracy = reflections?.accuracy || {};
+  for (const [id, n] of Object.entries(AGENTS)) {
+    const acc = accuracy[id];
+    if (!acc) continue;
+
+    const gaugeX = n.x - 16, gaugeY = n.y + 10, r = 10;
+    const circumference = 2 * Math.PI * r;
+    const pct = acc.avg;
+    const color = pct >= 0.7 ? '#34d399' : pct >= 0.4 ? '#fbbf24' : '#f87171';
+
+    svg.appendChild(el('circle', { cx: gaugeX, cy: gaugeY, r, class: 'acc-track' }));
+    const fill = el('circle', { cx: gaugeX, cy: gaugeY, r, class: 'acc-fill',
+      stroke: color, 'stroke-dasharray': circumference,
+      'stroke-dashoffset': circumference * (1 - pct),
+      transform: `rotate(-90 ${gaugeX} ${gaugeY})`
+    });
+    svg.appendChild(fill);
+    svg.appendChild(Object.assign(
+      el('text', { x: gaugeX, y: gaugeY, class: 'acc-text' }),
+      { textContent: `${Math.round(pct * 100)}%` }
+    ));
+  }
+}
+
+// ── Level 3: Message badges + edge activation ────────────────────
+function updateMessageOverlays(msgData) {
+  if (!msgData) return;
+  const messages = msgData.messages || [];
+
+  // Count unread per agent
+  const unread = {};
+  messages.forEach(m => {
+    if (!m.read_at) {
+      unread[m.to_agent] = (unread[m.to_agent] || 0) + 1;
+    }
+  });
+
+  // Render badges
+  for (const [id, n] of Object.entries(AGENTS)) {
+    if (!unread[id]) continue;
+    const bx = n.x + n.w - 6, by = n.y - 2;
+    svg.appendChild(el('circle', { cx: bx, cy: by, r: 7, class: 'msg-badge-bg' }));
+    svg.appendChild(Object.assign(
+      el('text', { x: bx, y: by, class: 'msg-badge-text' }),
+      { textContent: unread[id] }
+    ));
+  }
+
+  // Activate message edges if recent messages exist
+  const recentMessages = messages.filter(m => {
+    const age = (Date.now() - new Date(m.created_at + 'Z').getTime()) / 3600000;
+    return age < 24;
+  });
+
+  MSG_EDGES.forEach(([srcId, tgtId], i) => {
+    const line = svg.querySelector(`.msg-edge[data-msg-idx="${i}"]`);
+    const dot = svg.querySelector(`.msg-dot[data-msg-idx="${i}"]`);
+    const hasMsg = recentMessages.some(m =>
+      (m.from_agent === srcId && m.to_agent === tgtId) ||
+      (m.from_agent === tgtId && m.to_agent === srcId)
+    );
+    const priority = recentMessages.find(m =>
+      (m.from_agent === srcId && m.to_agent === tgtId) ||
+      (m.from_agent === tgtId && m.to_agent === srcId)
+    )?.priority || 'normal';
+
+    if (line) {
+      line.setAttribute('opacity', hasMsg ? '1' : '0');
+      line.classList.remove('urgent', 'normal', 'fyi', 'active');
+      if (hasMsg) { line.classList.add(priority, 'active'); }
+    }
+    if (dot) {
+      dot.setAttribute('opacity', hasMsg ? '1' : '0');
+      dot.classList.remove('urgent', 'normal');
+      if (hasMsg) dot.classList.add(priority);
+    }
+  });
+}
+
+// ── Level 2: Learning ticker ─────────────────────────────────────
+function updateLearningTicker(reflections) {
+  const ticker = document.getElementById('ticker');
+  const wrap = document.getElementById('ticker-wrap');
+  const items = (reflections?.reflections || []).filter(r => r.lesson);
+  if (!items.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  ticker.innerHTML = items.map(r =>
+    `<span class="ticker-item">${r.agent.toUpperCase()} learned: ${r.lesson} (accuracy: ${(r.accuracy_score || 0).toFixed(1)})</span>`
+  ).join('');
+}
+
+// ── Level 3: Task queue panel ────────────────────────────────────
+function updateTaskPanel(msgData) {
+  const panel = document.getElementById('task-panel');
+  const tasks = msgData?.tasks || [];
+  if (!tasks.length) { panel.innerHTML = ''; return; }
+  panel.innerHTML = '<h3>Task Queue</h3>' + tasks.map(t => {
+    const pClass = t.priority <= 2 ? 'p1' : t.priority <= 4 ? 'p3' : '';
+    const sClass = t.status === 'done' ? 'done' : 'pending';
+    return `<div class="task-row">
+      <span class="task-priority ${pClass}">P${t.priority}</span>
+      <span class="task-agent">${t.assigned_to.toUpperCase()}</span>
+      <span class="task-text">${t.task.slice(0, 60)}</span>
+      <span class="task-status ${sClass}">${t.status}</span>
+    </div>`;
+  }).join('');
+}
+
 // ── Pulse animation via requestAnimationFrame ─────────────────────
 const pulseState = {};
 
@@ -233,6 +462,30 @@ function animatePulses() {
       const a = 1 - s;
       px = a * a * mx + 2 * a * s * mx + s * s * x2;
       py = a * a * my + 2 * a * s * y2 + s * s * y2;
+    }
+    dot.setAttribute('cx', px);
+    dot.setAttribute('cy', py);
+  });
+  // Animate message edge dots
+  MSG_EDGES.forEach(([srcId, tgtId], i) => {
+    const dot = svg.querySelector(`.msg-dot[data-msg-idx="${i}"]`);
+    if (!dot || dot.getAttribute('opacity') === '0') return;
+    const src = AGENTS[srcId], tgt = AGENTS[tgtId];
+    const duration = 1500;
+    const key = 'msg_' + i;
+    if (!pulseState[key]) pulseState[key] = now;
+    const t = ((now - pulseState[key]) % duration) / duration;
+    const x1 = cx(src), y1 = cy(src), x2 = cx(tgt), y2 = cy(tgt);
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    let px, py;
+    if (t < 0.5) {
+      const s = t * 2, a = 1 - s;
+      px = a*a*x1 + 2*a*s*mx + s*s*mx;
+      py = a*a*y1 + 2*a*s*y1 + s*s*my;
+    } else {
+      const s = (t-0.5)*2, a = 1 - s;
+      px = a*a*mx + 2*a*s*mx + s*s*x2;
+      py = a*a*my + 2*a*s*y2 + s*s*y2;
     }
     dot.setAttribute('cx', px);
     dot.setAttribute('cy', py);
@@ -286,12 +539,23 @@ function renderStatusCards(data) {
                  `${Math.round(a.hours_ago / 24)}d ago`;
     }
 
+    // Level 1: trend info
+    const t = latestTrends?.[id];
+    const trendSymbol = t ? (t.trend === 'up' ? ' \u2191' : t.trend === 'down' ? ' \u2193' : ' \u2192') : '';
+    const recurringCount = t?.recurring?.length || 0;
+
+    // Level 2: accuracy
+    const acc = latestReflections?.accuracy?.[id];
+    const accStr = acc ? `${Math.round(acc.avg * 100)}%` : '-';
+
     const rows = [
       ['Last run', hoursStr],
-      ['Findings', a.finding_count ?? '-'],
+      ['Findings', `${a.finding_count ?? '-'}${trendSymbol}`],
     ];
     if (a.critical_count > 0) rows.push(['Critical', a.critical_count]);
     if (a.warn_count > 0) rows.push(['Warnings', a.warn_count]);
+    if (recurringCount > 0) rows.push(['Recurring', `${recurringCount} issues`]);
+    rows.push(['Accuracy', accStr]);
     if (a.last_action) rows.push(['Action', a.last_action.slice(0, 40)]);
 
     const insight = a.ai_insight ? a.ai_insight.slice(0, 120) + (a.ai_insight.length > 120 ? '...' : '') : '';
@@ -362,13 +626,27 @@ function hideTooltip() { tooltip.style.display = 'none'; }
 // ── Polling ───────────────────────────────────────────────────────
 async function fetchStatus() {
   try {
-    const res = await fetch('/api/status');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const [statusRes, trendsRes, reflRes, msgRes] = await Promise.all([
+      fetch('/api/status'),
+      fetch('/api/trends').catch(() => null),
+      fetch('/api/reflections').catch(() => null),
+      fetch('/api/messages').catch(() => null),
+    ]);
+    if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
+    const data = await statusRes.json();
     latestData = data;
+    latestTrends = trendsRes?.ok ? await trendsRes.json() : null;
+    latestReflections = reflRes?.ok ? await reflRes.json() : null;
+    latestMessages = msgRes?.ok ? await msgRes.json() : null;
+
     updateDiagram(data);
     renderStatusCards(data);
     renderPipelineBar(data);
+    updateTrendOverlays(latestTrends);
+    updateAccuracyGauges(latestReflections);
+    updateMessageOverlays(latestMessages);
+    updateLearningTicker(latestReflections);
+    updateTaskPanel(latestMessages);
     document.getElementById('last-updated').textContent =
       'Updated ' + new Date(data.timestamp).toLocaleTimeString();
   } catch (err) {
@@ -377,6 +655,7 @@ async function fetchStatus() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────
+renderMsgEdges();
 renderEdges();
 renderNodes();
 animatePulses();

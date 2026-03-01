@@ -512,6 +512,48 @@ def execute_action(action_name, params, dry_run=True):
 # DAILY COMMAND
 # ============================================================
 
+def _check_messages(conn):
+    """Check for unread messages from CEO or other agents. Returns list of messages."""
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_messages'"
+        ).fetchone()
+        if not row:
+            return []
+        rows = conn.execute("""
+            SELECT * FROM agent_messages
+            WHERE to_agent='cmo' AND read_at IS NULL
+            ORDER BY created_at DESC
+        """).fetchall()
+        if rows:
+            conn.execute("""
+                UPDATE agent_messages SET read_at=datetime('now')
+                WHERE to_agent='cmo' AND read_at IS NULL
+            """)
+            conn.commit()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _check_tasks(conn):
+    """Check for pending tasks assigned to CMO. Returns list of tasks."""
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='task_queue'"
+        ).fetchone()
+        if not row:
+            return []
+        rows = conn.execute("""
+            SELECT * FROM task_queue
+            WHERE assigned_to='cmo' AND status='pending'
+            ORDER BY priority ASC, created_at ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
 def cmd_daily(args):
     conn = get_db()
     ensure_decisions_table(conn)
@@ -519,6 +561,10 @@ def cmd_daily(args):
 
     is_dry = DRY_RUN or not CMO_LIVE
     mode_label = 'DRY RUN' if is_dry else 'LIVE'
+
+    # Level 3: Check messages and tasks from CEO
+    messages = _check_messages(conn)
+    tasks = _check_tasks(conn)
 
     lenses_to_run = ['pipeline', 'content', 'engagement', 'funnel', 'channel_mix']
     if args.focus:
@@ -539,6 +585,20 @@ def cmd_daily(args):
         f'Run: {run_id} | {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}',
         '',
     ]
+
+    # Display incoming messages
+    if messages:
+        digest_lines.append('## INCOMING MESSAGES')
+        for m in messages:
+            digest_lines.append(f'   [{m["priority"].upper()}] from {m["from_agent"].upper()}: {m["message"][:80]}')
+        digest_lines.append('')
+
+    # Display pending tasks
+    if tasks:
+        digest_lines.append('## PENDING TASKS')
+        for t in tasks:
+            digest_lines.append(f'   [P{t["priority"]}] from {t["created_by"].upper()}: {t["task"][:80]}')
+        digest_lines.append('')
 
     for lens_name in lenses_to_run:
         if lens_name not in assessors:

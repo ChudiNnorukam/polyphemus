@@ -449,12 +449,39 @@ def assess_git_hygiene():
 # DAILY COMMAND
 # ============================================================
 
+def _check_messages(conn):
+    """Check for unread messages from CEO or other agents."""
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_messages'"
+        ).fetchone()
+        if not row:
+            return []
+        rows = conn.execute("""
+            SELECT * FROM agent_messages
+            WHERE to_agent='cto' AND read_at IS NULL
+            ORDER BY created_at DESC
+        """).fetchall()
+        if rows:
+            conn.execute("""
+                UPDATE agent_messages SET read_at=datetime('now')
+                WHERE to_agent='cto' AND read_at IS NULL
+            """)
+            conn.commit()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
 def cmd_daily(args):
     conn = get_db()
     ensure_decisions_table(conn)
     run_id = str(uuid.uuid4())[:8]
 
     mode_label = 'DRY RUN' if DRY_RUN else 'LIVE'
+
+    # Level 3: Check incoming messages
+    messages = _check_messages(conn)
 
     lenses_to_run = ['code', 'deploy', 'deps', 'git']
     if args.focus:
@@ -474,6 +501,13 @@ def cmd_daily(args):
         f'Run: {run_id} | {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}',
         '',
     ]
+
+    # Display incoming messages
+    if messages:
+        digest_lines.append('## INCOMING MESSAGES')
+        for m in messages:
+            digest_lines.append(f'   [{m["priority"].upper()}] from {m["from_agent"].upper()}: {m["message"][:80]}')
+        digest_lines.append('')
 
     for lens_name in lenses_to_run:
         if lens_name not in assessors:

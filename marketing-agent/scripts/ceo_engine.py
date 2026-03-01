@@ -459,6 +459,76 @@ def assess_pipeline_velocity(conn):
 # CROSS-FUNCTIONAL INSIGHTS
 # ============================================================
 
+def ensure_coordination_tables(conn):
+    """Create Level 3 coordination tables if they don't exist."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_agent TEXT NOT NULL,
+            to_agent TEXT NOT NULL,
+            message TEXT NOT NULL,
+            priority TEXT DEFAULT 'normal',
+            read_at TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS task_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assigned_to TEXT NOT NULL,
+            task TEXT NOT NULL,
+            priority INTEGER DEFAULT 5,
+            status TEXT DEFAULT 'pending',
+            created_by TEXT NOT NULL,
+            result TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT
+        )
+    """)
+    conn.commit()
+
+
+def send_message(conn, to_agent, message, priority='normal'):
+    """CEO sends a message to another agent."""
+    conn.execute("""
+        INSERT INTO agent_messages (from_agent, to_agent, message, priority)
+        VALUES ('ceo', ?, ?, ?)
+    """, (to_agent, message, priority))
+    conn.commit()
+
+
+def create_task(conn, assigned_to, task, priority=5):
+    """CEO creates a task for another agent."""
+    conn.execute("""
+        INSERT INTO task_queue (assigned_to, task, priority, created_by)
+        VALUES (?, ?, ?, 'ceo')
+    """, (assigned_to, task, priority))
+    conn.commit()
+
+
+def get_unread_messages(conn, agent='ceo'):
+    """Get unread messages for an agent."""
+    if not table_exists(conn, 'agent_messages'):
+        return []
+    rows = conn.execute("""
+        SELECT * FROM agent_messages
+        WHERE to_agent=? AND read_at IS NULL
+        ORDER BY created_at DESC
+    """, (agent,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_messages_read(conn, agent='ceo'):
+    """Mark all messages to an agent as read."""
+    if not table_exists(conn, 'agent_messages'):
+        return
+    conn.execute("""
+        UPDATE agent_messages SET read_at=datetime('now')
+        WHERE to_agent=? AND read_at IS NULL
+    """, (agent,))
+    conn.commit()
+
+
 def generate_cross_functional(all_findings, lens_results):
     """Generate cross-functional insights by detecting conflicts between lenses."""
     insights = []
@@ -515,6 +585,55 @@ def generate_cross_functional(all_findings, lens_results):
     return insights
 
 
+def orchestrate_messages(conn, all_findings, insights):
+    """CEO orchestrator: send messages to agents based on cross-functional analysis.
+
+    Returns list of messages sent for display in digest.
+    """
+    messages_sent = []
+
+    has_tech_criticals = any(
+        f['severity'] == 'critical' and f.get('lens') in ('tech_debt', 'ops_health')
+        for f in all_findings
+    )
+    has_pipeline_stall = any(
+        'stalling' in f.get('issue', '').lower() or 'zero' in f.get('issue', '').lower()
+        for f in all_findings if f.get('lens') == 'pipeline'
+    )
+    has_revenue_zero = any(
+        'inactive' in f.get('issue', '').lower() or 'zero' in f.get('issue', '').lower()
+        for f in all_findings if f.get('lens') == 'revenue'
+    )
+
+    # Tech critical: pause CMO marketing push, alert CTO
+    if has_tech_criticals:
+        msg = 'CRITICAL tech issues detected. Pause non-essential marketing actions until resolved.'
+        send_message(conn, 'cmo', msg, priority='urgent')
+        messages_sent.append(('cmo', msg, 'urgent'))
+
+        msg = 'CRITICAL findings from cross-functional review. Prioritize fix before next deploy.'
+        send_message(conn, 'cto', msg, priority='urgent')
+        messages_sent.append(('cto', msg, 'urgent'))
+
+    # Pipeline stalled: task CMO to load prospects
+    if has_pipeline_stall and not has_tech_criticals:
+        task = 'Load new prospects to restart pipeline. Pipeline velocity is zero.'
+        create_task(conn, 'cmo', task, priority=2)
+        messages_sent.append(('cmo', f'[TASK] {task}', 'normal'))
+
+    # Revenue zero: coordinate CMO + COO
+    if has_revenue_zero:
+        msg = 'Product revenue channel inactive for 30+ days. Review product pricing and funnel.'
+        send_message(conn, 'cmo', msg, priority='normal')
+        messages_sent.append(('cmo', msg, 'normal'))
+
+        msg = 'Revenue at zero. Check VPS health and trading bot performance.'
+        send_message(conn, 'coo', msg, priority='normal')
+        messages_sent.append(('coo', msg, 'normal'))
+
+    return messages_sent
+
+
 # ============================================================
 # WEEKLY COMMAND
 # ============================================================
@@ -522,7 +641,17 @@ def generate_cross_functional(all_findings, lens_results):
 def cmd_weekly(args):
     conn = get_db()
     ensure_decisions_table(conn)
+    ensure_coordination_tables(conn)
     run_id = str(uuid.uuid4())[:8]
+
+    # Check for incoming messages to CEO
+    incoming = get_unread_messages(conn, 'ceo')
+    if incoming:
+        print(f'CEO has {len(incoming)} unread messages:')
+        for m in incoming:
+            print(f'  [{m["priority"].upper()}] from {m["from_agent"].upper()}: {m["message"][:80]}')
+        print()
+        mark_messages_read(conn, 'ceo')
 
     lenses_to_run = ['revenue', 'ops_health', 'tech_debt', 'pipeline']
     if args.focus:
@@ -567,6 +696,14 @@ def cmd_weekly(args):
         digest_lines.append('## CROSS-FUNCTIONAL INSIGHTS')
         for i, insight in enumerate(insights, 1):
             digest_lines.append(f'   {i}. {insight}')
+        digest_lines.append('')
+
+    # Level 3: Orchestrator message dispatch
+    messages_sent = orchestrate_messages(conn, all_findings, insights)
+    if messages_sent:
+        digest_lines.append('## ORCHESTRATOR MESSAGES')
+        for to_agent, msg, priority in messages_sent:
+            digest_lines.append(f'   -> {to_agent.upper()} [{priority}]: {msg[:70]}')
         digest_lines.append('')
 
     # LLM Synthesis
