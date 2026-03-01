@@ -793,15 +793,24 @@ class BinanceMomentumFeed:
         precached: Set[str] = set()
         daily_snipe_count = 0
         daily_snipe_day = time.strftime("%Y-%m-%d")
+        epoch_live_counts: dict = {}  # per-epoch live fire count (prevents correlated losses)
 
         self._logger.info(
             f"Snipe loop started | assets={all_assets} | "
-            f"window=[{self._config.snipe_min_secs_remaining}-"
+            f"5m window=[{self._config.snipe_min_secs_remaining}-"
             f"{self._config.snipe_max_secs_remaining}s] | "
-            f"price=[{self._config.snipe_min_entry_price}-"
+            f"5m price=[{self._config.snipe_min_entry_price}-"
             f"{self._config.snipe_max_entry_price}] | "
             f"max_daily={self._config.snipe_max_daily_trades}"
         )
+        if self._config.snipe_15m_enabled:
+            self._logger.info(
+                f"15m snipe ENABLED (dry_run={self._config.snipe_15m_dry_run}) | "
+                f"window=[{self._config.snipe_15m_min_secs_remaining}-"
+                f"{self._config.snipe_15m_max_secs_remaining}s] | "
+                f"price=[{self._config.snipe_15m_min_entry_price}-"
+                f"{self._config.snipe_15m_max_entry_price}]"
+            )
 
         while True:
             try:
@@ -823,9 +832,14 @@ class BinanceMomentumFeed:
                 for asset in all_assets:
                     is_shadow = asset in shadow
 
-                    for window in self._config.get_market_windows(asset):
-                        if window > 300:
-                            continue  # snipe 5m only — 15m has time_exit losses
+                    windows = self._config.get_market_windows(asset)
+                    # Ensure 15m window is checked when 15m snipe is on
+                    if self._config.snipe_15m_enabled and 900 not in windows:
+                        windows = windows + [900]
+                    for window in windows:
+                        is_15m = window > 300
+                        if is_15m and not self._config.snipe_15m_enabled:
+                            continue
                         current_epoch = (int(now) // window) * window
                         window_end = current_epoch + window
                         secs_to_end = window_end - now
@@ -837,10 +851,16 @@ class BinanceMomentumFeed:
                             precached.add(cache_key)
                             asyncio.create_task(self._discover_market(slug))
 
-                        # Only fire in the snipe window
-                        if secs_to_end > self._config.snipe_max_secs_remaining:
+                        # Only fire in the snipe window (15m has separate timing)
+                        if is_15m:
+                            max_secs = self._config.snipe_15m_max_secs_remaining
+                            min_secs = self._config.snipe_15m_min_secs_remaining
+                        else:
+                            max_secs = self._config.snipe_max_secs_remaining
+                            min_secs = self._config.snipe_min_secs_remaining
+                        if secs_to_end > max_secs:
                             continue
-                        if secs_to_end < self._config.snipe_min_secs_remaining:
+                        if secs_to_end < min_secs:
                             continue
 
                         # Dedup
@@ -852,14 +872,31 @@ class BinanceMomentumFeed:
                         if slug in self._signaled_slugs:
                             continue
 
+                        # Per-epoch cap: prevent correlated multi-asset losses
+                        effective_shadow = is_shadow
+                        would_be_live = not is_shadow and not (
+                            self._config.snipe_dry_run if not is_15m
+                            else self._config.snipe_15m_dry_run)
+                        epoch_cap = self._config.snipe_max_per_epoch
+                        if (would_be_live and epoch_cap > 0
+                                and epoch_live_counts.get(current_epoch, 0) >= epoch_cap):
+                            effective_shadow = True
+
                         # Try to snipe — only mark fired if signal actually emitted
                         fired = await self._generate_snipe_signal(
-                            asset, slug, secs_to_end, window, is_shadow
+                            asset, slug, secs_to_end, window, effective_shadow
                         )
                         if fired:
                             self._snipe_fired.add(snipe_key)
-                            if not (asset in shadow):
+                            if would_be_live and not effective_shadow:
+                                epoch_live_counts[current_epoch] = epoch_live_counts.get(current_epoch, 0) + 1
+                            if not effective_shadow and not (asset in shadow):
                                 daily_snipe_count += 1
+                            elif effective_shadow and would_be_live:
+                                self._logger.info(
+                                    f"Snipe CAPPED ({epoch_cap}/epoch): {slug} "
+                                    f"downgraded to shadow"
+                                )
 
                 # Prune old precache keys
                 if len(precached) > 200:
@@ -880,6 +917,19 @@ class BinanceMomentumFeed:
         if not market_info:
             return False
 
+        is_15m = window > 300
+        if is_15m:
+            min_price = self._config.snipe_15m_min_entry_price
+            max_price = self._config.snipe_15m_max_entry_price
+            force_dry = self._config.snipe_15m_dry_run
+        else:
+            min_price = self._config.snipe_min_entry_price
+            max_price = self._config.snipe_max_entry_price
+            force_dry = False
+
+        source_tag = "resolution_snipe_15m" if is_15m else "resolution_snipe"
+        label = "15m " if is_15m else ""
+
         # Check BOTH sides - buy whichever the market has priced as the winner
         for outcome, token_key in [("Up", "up_token_id"), ("Down", "down_token_id")]:
             token_id = market_info[token_key]
@@ -892,23 +942,23 @@ class BinanceMomentumFeed:
             if midpoint <= 0:
                 continue
 
-            # Check snipe price range — the midpoint IS the signal
-            if midpoint < self._config.snipe_min_entry_price:
+            if midpoint < min_price:
                 continue
-            if midpoint > self._config.snipe_max_entry_price:
+            if midpoint > max_price:
                 continue
 
             # Found a side in snipe range
-            if shadow:
+            # 15m dry_run forces DB logging path even for shadow assets
+            if shadow and not force_dry:
                 self._logger.info(
-                    f"[SHADOW] Snipe: {slug} {outcome} @ {midpoint:.4f} "
+                    f"[SHADOW] {label}Snipe: {slug} {outcome} @ {midpoint:.4f} "
                     f"({secs_left:.0f}s left)"
                 )
                 return True
 
-            if self._config.snipe_dry_run:
+            if self._config.snipe_dry_run or force_dry:
                 self._logger.info(
-                    f"Snipe DRY: {slug} {outcome} @ {midpoint:.4f} "
+                    f"{label}Snipe DRY: {slug} {outcome} @ {midpoint:.4f} "
                     f"({secs_left:.0f}s left)"
                 )
                 if self._signal_logger:
@@ -919,7 +969,7 @@ class BinanceMomentumFeed:
                         "direction": outcome,
                         "token_id": token_id,
                         "midpoint": midpoint,
-                        "source": "resolution_snipe",
+                        "source": source_tag,
                         "outcome": "snipe_dry_run",
                         "time_remaining_secs": int(secs_left),
                         "market_window_secs": window,
@@ -948,14 +998,14 @@ class BinanceMomentumFeed:
                 "asset": asset,
                 "tx_hash": f"snipe-{slug}-{int(time.time())}",
                 "timestamp": time.time(),
-                "source": "resolution_snipe",
+                "source": source_tag,
                 "time_remaining_secs": int(secs_left),
                 "market_window_secs": window,
                 "condition_id": market_info.get("condition_id", ""),
             }
 
             self._logger.info(
-                f"Snipe signal: {slug} {outcome} @ {midpoint:.4f} "
+                f"{label}Snipe signal: {slug} {outcome} @ {midpoint:.4f} "
                 f"({secs_left:.0f}s left)"
             )
 

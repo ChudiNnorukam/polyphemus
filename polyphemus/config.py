@@ -236,6 +236,15 @@ class Settings(BaseSettings):
     snipe_max_bet: float = 50.0          # hard $ cap per snipe trade
     snipe_assets: str = ""               # comma-separated, empty = use asset_filter
     snipe_max_daily_trades: int = 100    # hard cap on snipe trades per day (0=unlimited)
+    snipe_max_per_epoch: int = 0         # max live snipes per epoch, 0=unlimited (prevents correlated losses)
+
+    # 15m Resolution snipe (shadow testing — same strategy, longer window)
+    snipe_15m_enabled: bool = False       # enable 15m snipe scanning
+    snipe_15m_dry_run: bool = True        # force dry_run for 15m (shadow data collection)
+    snipe_15m_min_entry_price: float = 0.93
+    snipe_15m_max_entry_price: float = 0.985
+    snipe_15m_min_secs_remaining: int = 8
+    snipe_15m_max_secs_remaining: int = 45
 
     # Order entry/exit mode
     entry_mode: str = "taker"  # "taker" (cross spread) or "maker" (post-only)
