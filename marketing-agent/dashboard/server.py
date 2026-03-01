@@ -268,7 +268,7 @@ def api_reflections():
 
         # Average accuracy per agent
         accuracy = {}
-        for agent in ('cmo', 'cto', 'ceo'):
+        for agent in ('cmo', 'cto', 'ceo', 'coo'):
             avg_row = conn.execute("""
                 SELECT AVG(accuracy_score) as avg_score, COUNT(*) as cnt
                 FROM agent_reflections WHERE agent=?
@@ -303,6 +303,67 @@ def api_messages():
     finally:
         conn.close()
     return jsonify({'messages': messages, 'tasks': tasks})
+
+
+@app.route('/api/briefing')
+def api_briefing():
+    """Executive briefing: plain-English summary for layman dashboard."""
+    conn = get_db()
+    try:
+        agents = {
+            'cmo': get_agent_status(conn, 'cmo_decisions'),
+            'cto': get_agent_status(conn, 'cto_decisions'),
+            'ceo': get_agent_status(conn, 'ceo_decisions'),
+            'coo': get_agent_status(conn, 'coo_decisions'),
+        }
+
+        statuses = [a['status'] for a in agents.values()]
+        healthy = statuses.count('healthy')
+        stale = statuses.count('stale')
+        critical = statuses.count('critical')
+
+        if healthy == 4:
+            overall = 'ALL HEALTHY'
+        elif critical > 0:
+            overall = f'{critical} AGENT{"S" if critical > 1 else ""} CRITICAL'
+        elif stale > 0:
+            overall = f'{stale} AGENT{"S" if stale > 1 else ""} STALE'
+        else:
+            overall = 'NO DATA'
+
+        hours_list = [a['hours_ago'] for a in agents.values() if a.get('hours_ago')]
+        if hours_list:
+            min_h = min(hours_list)
+            if min_h < 1:
+                last_run = f'{int(min_h * 60)}m ago'
+            elif min_h < 24:
+                last_run = f'{min_h:.1f}h ago'
+            else:
+                last_run = f'{int(min_h / 24)}d ago'
+        else:
+            last_run = 'never'
+
+        labels = {'cmo': 'Marketing', 'cto': 'Tech', 'ceo': 'Strategy', 'coo': 'Operations'}
+        briefs = []
+        for aid, a in agents.items():
+            briefs.append({
+                'agent': aid,
+                'label': labels[aid],
+                'insight': a.get('ai_insight') or 'No assessment yet.',
+                'action': a.get('last_action'),
+            })
+
+        top_action = agents['ceo'].get('last_action') or agents['cmo'].get('last_action')
+
+    finally:
+        conn.close()
+
+    return jsonify({
+        'overall_status': overall,
+        'last_run_ago': last_run,
+        'briefs': briefs,
+        'top_action': top_action,
+    })
 
 
 @app.route('/api/decisions')

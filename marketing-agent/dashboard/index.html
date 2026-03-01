@@ -105,11 +105,28 @@
   .acc-fill  { fill: none; stroke-width: 3; stroke-linecap: round; transition: stroke-dashoffset 0.5s; }
   .acc-text  { font-size: 8px; fill: #a1a1aa; text-anchor: middle; dominant-baseline: central; }
 
-  /* Learning ticker (Level 2) */
-  .ticker-wrap { overflow: hidden; padding: 6px 24px; border-top: 1px solid #1a1a1e; }
-  .ticker { display: flex; gap: 40px; white-space: nowrap; animation: scroll-ticker 30s linear infinite; }
-  .ticker-item { font-size: 11px; color: #60a5fa; font-style: italic; }
-  @keyframes scroll-ticker { 0% { transform: translateX(100%); } 100% { transform: translateX(-100%); } }
+  /* Overall status pill in header */
+  #overall-pill { font-size: 11px; padding: 3px 10px; border-radius: 10px; font-weight: 600; }
+  #overall-pill.healthy  { background: #064e3b; color: #34d399; }
+  #overall-pill.stale    { background: #451a03; color: #fbbf24; }
+  #overall-pill.critical { background: #450a0a; color: #f87171; }
+  #overall-pill.unknown  { background: #27272a; color: #71717a; }
+
+  /* Executive Briefing panel */
+  #briefing { background: #141820; border-left: 3px solid #60a5fa; border-radius: 6px; margin: 0 24px 12px; padding: 14px 18px; }
+  #briefing h2 { font-size: 14px; font-weight: 700; color: #fff; margin-bottom: 10px; }
+  .brief-item { font-size: 12px; line-height: 1.6; margin-bottom: 4px; }
+  .brief-agent { color: #34d399; font-weight: 600; }
+  .brief-text  { color: #d4d4d8; }
+  .brief-action { font-size: 12px; margin-top: 10px; color: #60a5fa; }
+
+  /* Lessons panel (replaces ticker) */
+  .lessons-panel { padding: 8px 24px 10px; border-top: 1px solid #1a1a1e; }
+  .lessons-panel h3 { font-size: 12px; font-weight: 600; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .lesson-item { font-size: 12px; line-height: 1.5; margin-bottom: 4px;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .lesson-agent { color: #34d399; font-weight: 600; }
+  .lesson-text  { color: #9ca3af; }
 
   /* Task queue panel (Level 3) */
   .task-panel { padding: 0 24px 12px; }
@@ -144,16 +161,19 @@
 <body>
   <header>
     <h1>OpenClaw Agent Dashboard</h1>
+    <span id="overall-pill" class="unknown">LOADING</span>
     <span id="last-updated">Loading...</span>
   </header>
 
+  <div id="briefing"><h2>Today's Briefing</h2><div id="briefing-body"></div></div>
+
   <div class="diagram-wrap">
-    <svg id="diagram" viewBox="0 0 900 440" width="900" height="440"></svg>
+    <svg id="diagram" viewBox="0 0 900 380" width="900" height="380"></svg>
   </div>
 
   <div class="cards" id="cards"></div>
   <div class="task-panel" id="task-panel"></div>
-  <div class="ticker-wrap" id="ticker-wrap"><div class="ticker" id="ticker"></div></div>
+  <div class="lessons-panel" id="lessons-panel"></div>
   <div class="pipeline" id="pipeline-bar"></div>
   <div id="tooltip"><div id="tip-agent"></div><div id="tip-meta"></div><div id="tip-insight"></div></div>
 
@@ -171,12 +191,10 @@ const AGENTS = {
 
 const SYSTEMS = {
   db:       { x: 395, y: 200, w: 110, h: 44, label: 'SQLite DB', icon: 'DB' },
-  vps:      { x: 395, y: 340, w: 100, h: 40, label: 'VPS (SSH)', icon: 'VPS' },
+  vps:      { x: 395, y: 340, w: 100, h: 40, label: 'Server', icon: 'VPS' },
   slack:    { x: 60,  y: 210, w: 90,  h: 36, label: 'Slack', icon: 'Slack' },
   anthropic:{ x: 395, y: 60,  w: 110, h: 36, label: 'Anthropic', icon: 'AI' },
   apis:     { x: 750, y: 210, w: 90,  h: 36, label: 'Ext APIs', icon: 'API' },
-  blog:     { x: 60,  y: 100, w: 80,  h: 36, label: 'Blog FS', icon: 'FS' },
-  git:      { x: 750, y: 340, w: 80,  h: 36, label: 'Git', icon: 'Git' },
 };
 
 // ── Edges: [sourceId, targetId, agentId (for activation)] ─────────
@@ -184,7 +202,6 @@ const EDGES = [
   ['cmo', 'db',        'cmo'],
   ['cmo', 'slack',     'cmo'],
   ['cmo', 'anthropic', 'cmo'],
-  ['cmo', 'blog',      'cmo'],
   ['cmo', 'apis',      'cmo'],
   ['ceo', 'db',        'ceo'],
   ['ceo', 'slack',     'ceo'],
@@ -197,7 +214,6 @@ const EDGES = [
   ['cto', 'slack',     'cto'],
   ['cto', 'anthropic', 'cto'],
   ['cto', 'vps',       'cto'],
-  ['cto', 'git',       'cto'],
 ];
 
 // Level 3: Inter-agent message edges (CEO hub-spoke)
@@ -212,6 +228,7 @@ let latestData = null;
 let latestTrends = null;
 let latestReflections = null;
 let latestMessages = null;
+let latestBriefing = null;
 
 // ── SVG helpers ───────────────────────────────────────────────────
 function el(tag, attrs) {
@@ -402,16 +419,42 @@ function updateMessageOverlays(msgData) {
   });
 }
 
-// ── Level 2: Learning ticker ─────────────────────────────────────
-function updateLearningTicker(reflections) {
-  const ticker = document.getElementById('ticker');
-  const wrap = document.getElementById('ticker-wrap');
-  const items = (reflections?.reflections || []).filter(r => r.lesson);
-  if (!items.length) { wrap.style.display = 'none'; return; }
-  wrap.style.display = 'block';
-  ticker.innerHTML = items.map(r =>
-    `<span class="ticker-item">${r.agent.toUpperCase()} learned: ${r.lesson} (accuracy: ${(r.accuracy_score || 0).toFixed(1)})</span>`
-  ).join('');
+// ── Executive Briefing panel ──────────────────────────────────────
+function renderBriefing(briefing) {
+  const pill = document.getElementById('overall-pill');
+  const body = document.getElementById('briefing-body');
+  if (!briefing) {
+    pill.textContent = 'NO DATA';
+    pill.className = 'unknown';
+    body.innerHTML = '<span class="brief-text">Briefing unavailable.</span>';
+    return;
+  }
+  const raw = (briefing.overall_status || 'unknown').toLowerCase();
+  const pillClass = raw.includes('healthy') ? 'healthy' : raw.includes('critical') ? 'critical' : raw.includes('stale') ? 'stale' : 'unknown';
+  pill.textContent = (briefing.overall_status || 'UNKNOWN').toUpperCase();
+  pill.className = pillClass;
+
+  const items = (briefing.briefs || []).slice(0, 4);
+  body.innerHTML = items.map(b => {
+    const lines = (b.insight || '').split('\n').filter(l => l.trim());
+    let raw = lines[0] || '';
+    if (raw.length < 40 && lines.length > 1) raw = lines.slice(0, 2).join(' ');
+    if (raw.length > 180) raw = raw.slice(0, 180).replace(/\s+\S*$/, '') + '...';
+    const text = raw.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    return `<div class="brief-item"><span class="brief-agent">${b.label}: </span><span class="brief-text">${text}</span></div>`;
+  }).join('') + (briefing.top_action
+    ? `<div class="brief-action">Recommended next step: ${briefing.top_action}</div>` : '');
+}
+
+// ── Level 2: Lessons panel (replaces ticker) ──────────────────────
+function updateLessonsPanel(reflections) {
+  const panel = document.getElementById('lessons-panel');
+  const items = (reflections?.reflections || []).filter(r => r.lesson).slice(-4);
+  if (!items.length) { panel.innerHTML = ''; return; }
+  panel.innerHTML = '<h3>What Your Agents Learned</h3>' + items.map(r => {
+    const lesson = (r.lesson || '').replace(/\*(.+?)\*/g, '<em>$1</em>');
+    return `<div class="lesson-item"><span class="lesson-agent">${r.agent.toUpperCase()}</span><span class="lesson-text"> learned: ${lesson}</span></div>`;
+  }).join('');
 }
 
 // ── Level 3: Task queue panel ────────────────────────────────────
@@ -550,22 +593,28 @@ function renderStatusCards(data) {
 
     const rows = [
       ['Last run', hoursStr],
-      ['Findings', `${a.finding_count ?? '-'}${trendSymbol}`],
+      ['Issues found', `${a.finding_count ?? '-'}${trendSymbol}`],
     ];
     if (a.critical_count > 0) rows.push(['Critical', a.critical_count]);
     if (a.warn_count > 0) rows.push(['Warnings', a.warn_count]);
-    if (recurringCount > 0) rows.push(['Recurring', `${recurringCount} issues`]);
-    rows.push(['Accuracy', accStr]);
+    if (recurringCount > 0) rows.push(['Repeat issues', `${recurringCount}`]);
+    rows.push(['Self-score', accStr]);
     if (a.last_action) rows.push(['Action', a.last_action.slice(0, 40)]);
 
-    const insight = a.ai_insight ? a.ai_insight.slice(0, 120) + (a.ai_insight.length > 120 ? '...' : '') : '';
+    let insight = a.ai_insight ? a.ai_insight.slice(0, 200) + (a.ai_insight.length > 200 ? '...' : '') : '';
+    insight = insight.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    const rowsHtml = rows.map(([l, v]) => {
+      const titleAttr = l === 'Self-score' ? ' title="How accurately the agent rates its own assessments"' : '';
+      return `<div class="card-row"><span class="label"${titleAttr}>${l}</span><span class="value">${v}</span></div>`;
+    }).join('');
 
     card.innerHTML = `
       <div class="card-head">
         <span class="card-title">${label}</span>
         <span class="card-badge badge-${a.status}">${a.status.toUpperCase()}</span>
       </div>
-      ${rows.map(([l, v]) => `<div class="card-row"><span class="label">${l}</span><span class="value">${v}</span></div>`).join('')}
+      ${rowsHtml}
       ${insight ? `<div class="card-insight">"${insight}"</div>` : ''}
     `;
     container.appendChild(card);
@@ -576,11 +625,10 @@ function renderStatusCards(data) {
 function renderPipelineBar(data) {
   const p = data.pipeline;
   document.getElementById('pipeline-bar').innerHTML = [
-    `<span class="pipe-stat">Leads: <span>${p.leads_total}</span></span>`,
-    `<span class="pipe-stat">Enriched: <span>${p.leads_enriched}</span></span>`,
-    `<span class="pipe-stat">Social queued: <span>${p.social_pending}</span></span>`,
-    `<span class="pipe-stat">Posted 7d: <span>${p.social_posted_7d}</span></span>`,
-    `<span class="pipe-stat">Purchases 7d: <span>${p.funnel_purchases_7d || 0}</span></span>`,
+    `<span class="pipe-stat">Leads in CRM: <span>${p.leads_total}</span></span>`,
+    `<span class="pipe-stat">Posts ready: <span>${p.social_pending}</span></span>`,
+    `<span class="pipe-stat">Published this week: <span>${p.social_posted_7d}</span></span>`,
+    `<span class="pipe-stat">Sales this week: <span>${p.funnel_purchases_7d || 0}</span></span>`,
   ].join('');
 }
 
@@ -606,9 +654,13 @@ function showTooltip(e, agentId) {
   document.getElementById('tip-meta').innerHTML = lines.join('<br>');
 
   const insight = a.ai_insight || '';
-  document.getElementById('tip-insight').textContent = insight
-    ? `"${insight.length > 180 ? insight.slice(0, 180) + '...' : insight}"`
-    : '';
+  const tipInsight = document.getElementById('tip-insight');
+  if (insight) {
+    const trimmed = insight.length > 180 ? insight.slice(0, 180) + '...' : insight;
+    tipInsight.innerHTML = `"${trimmed.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}"`;
+  } else {
+    tipInsight.textContent = '';
+  }
 
   tooltip.style.display = 'block';
   moveTooltip(e);
@@ -626,11 +678,12 @@ function hideTooltip() { tooltip.style.display = 'none'; }
 // ── Polling ───────────────────────────────────────────────────────
 async function fetchStatus() {
   try {
-    const [statusRes, trendsRes, reflRes, msgRes] = await Promise.all([
+    const [statusRes, trendsRes, reflRes, msgRes, briefRes] = await Promise.all([
       fetch('/api/status'),
       fetch('/api/trends').catch(() => null),
       fetch('/api/reflections').catch(() => null),
       fetch('/api/messages').catch(() => null),
+      fetch('/api/briefing').catch(() => null),
     ]);
     if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
     const data = await statusRes.json();
@@ -638,14 +691,16 @@ async function fetchStatus() {
     latestTrends = trendsRes?.ok ? await trendsRes.json() : null;
     latestReflections = reflRes?.ok ? await reflRes.json() : null;
     latestMessages = msgRes?.ok ? await msgRes.json() : null;
+    latestBriefing = briefRes?.ok ? await briefRes.json() : null;
 
     updateDiagram(data);
     renderStatusCards(data);
     renderPipelineBar(data);
+    renderBriefing(latestBriefing);
     updateTrendOverlays(latestTrends);
     updateAccuracyGauges(latestReflections);
     updateMessageOverlays(latestMessages);
-    updateLearningTicker(latestReflections);
+    updateLessonsPanel(latestReflections);
     updateTaskPanel(latestMessages);
     document.getElementById('last-updated').textContent =
       'Updated ' + new Date(data.timestamp).toLocaleTimeString();
