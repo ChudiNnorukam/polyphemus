@@ -263,6 +263,8 @@ class SignalBot:
                     data_dir=config.lagbot_data_dir,
                 )
                 self._redeemer.set_position_store(self._store)
+                self._redeemer.set_slack(self._slack)
+                self._redeemer.set_db(self._tracker.db)
                 if self._accumulator:
                     self._accumulator.set_redeemer(self._redeemer)
                 self._health.redeemer = self._redeemer
@@ -873,6 +875,8 @@ class SignalBot:
                     size_usd=exec_result.fill_price * exec_result.fill_size,
                     shares=exec_result.fill_size,
                     momentum_pct=signal.get("momentum_pct", 0.0),
+                    source=signal.get("source", ""),
+                    secs_left=signal.get("time_remaining_secs", 0),
                 )
             except Exception:
                 pass
@@ -1078,12 +1082,15 @@ class SignalBot:
                 if exec_result.error == "insufficient_shares":
                     self._logger.warning(
                         f"0 shares on CLOB for {pos.slug} — "
-                        f"treating as resolved (cleaning up)"
+                        f"treating as resolved (outcome unknown until redemption)"
                     )
+                    # Record with exit_price=0.0 (unknown outcome).
+                    # Redeemer will update pnl if it successfully redeems (= win).
+                    # If no redemption happens, pnl stays 0.0 (= loss, close enough).
                     try:
                         self._tracker.db.force_close_trade(
                             slug=pos.slug,
-                            exit_reason='market_resolved',
+                            exit_reason='insufficient_shares',
                             exit_price=0.0,
                         )
                     except Exception as db_err:

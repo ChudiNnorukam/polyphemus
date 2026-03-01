@@ -281,22 +281,32 @@ class PerformanceDB:
             import time as _time
             now = _time.time()
             cursor = conn.cursor()
+            # Compute real P&L from entry data when exit_price is meaningful
             cursor.execute(
                 """UPDATE trades SET
                     exit_time = ?,
                     exit_price = ?,
                     exit_reason = ?,
                     exit_tx_hash = 'force_closed',
-                    pnl = 0.0,
-                    pnl_pct = 0.0,
+                    pnl = CASE
+                        WHEN ? > 0 THEN (? - entry_price) * entry_size
+                        ELSE 0.0
+                    END,
+                    pnl_pct = CASE
+                        WHEN ? > 0 AND entry_price > 0 THEN (? - entry_price) / entry_price
+                        ELSE 0.0
+                    END,
                     hold_seconds = CAST(? - entry_time AS INTEGER)
                 WHERE slug = ? AND exit_time IS NULL""",
-                (now, exit_price, exit_reason, now, slug)
+                (now, exit_price, exit_reason,
+                 exit_price, exit_price,
+                 exit_price, exit_price,
+                 now, slug)
             )
             updated = cursor.rowcount > 0
             conn.commit()
             if updated:
-                self.logger.info(f'Force-closed trade: {slug} | reason={exit_reason}')
+                self.logger.info(f'Force-closed trade: {slug} | reason={exit_reason} exit_price={exit_price:.4f}')
             else:
                 self.logger.debug(f'No open trade found for slug: {slug}')
             return updated

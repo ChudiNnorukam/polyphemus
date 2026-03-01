@@ -201,6 +201,8 @@ class Redeemer:
         self._gasless_count = 0
         self._onchain_count = 0
         self.sweep_count = 0  # F4 fix: track sweeps for health invariant check
+        self._slack = None  # Optional SlackNotifier for redemption alerts
+        self._db = None     # Optional PerformanceDB for P&L updates on redemption
 
         # Initialize relayer based on signature type
         self._relayer = None
@@ -211,6 +213,51 @@ class Redeemer:
 
     def set_position_store(self, store):
         self._store = store
+
+    def set_slack(self, slack):
+        self._slack = slack
+
+    def set_db(self, db):
+        """Set PerformanceDB for updating P&L after redemption confirms a win."""
+        self._db = db
+
+    def _record_redemption_pnl(self, event: RedemptionEvent):
+        """Update DB trade P&L after successful redemption (confirms WIN).
+
+        Redemption success means the trade won. Update the force-closed
+        trade record with exit_price=1.0 and computed pnl.
+        """
+        if not self._db:
+            return
+        try:
+            conn = self._db._get_conn()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """UPDATE trades SET
+                        exit_price = 1.0,
+                        exit_reason = 'redeemed',
+                        pnl = (1.0 - entry_price) * entry_size,
+                        pnl_pct = CASE WHEN entry_price > 0
+                            THEN (1.0 - entry_price) / entry_price ELSE 0.0 END
+                    WHERE slug = ? AND exit_time IS NOT NULL
+                        AND (exit_reason = 'insufficient_shares'
+                             OR exit_reason = 'ghost_cleanup'
+                             OR exit_reason = 'market_resolved')
+                        AND (pnl IS NULL OR pnl = 0.0)""",
+                    (event.slug,)
+                )
+                if cursor.rowcount > 0:
+                    conn.commit()
+                    self._logger.info(
+                        f"Updated P&L for redeemed trade: {event.slug}"
+                    )
+                else:
+                    conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            self._logger.warning(f"Failed to update P&L for {event.slug}: {e}")
 
     def _load_swept_conditions(self):
         """Load swept condition IDs from disk."""
@@ -474,6 +521,12 @@ class Redeemer:
             f"Redeemed (PROXY relay): {event.slug} | {event.shares:.0f} shares | "
             f"txn_id={str(tx_id)[:16]}..."
         )
+        if self._slack:
+            try:
+                self._slack.notify_redemption(slug=event.slug, shares=event.shares)
+            except Exception:
+                pass
+        self._record_redemption_pnl(event)
         return "redeemed"
 
     async def _redeem_gasless(self, event: RedemptionEvent, cid_bytes: bytes) -> str:
@@ -513,6 +566,12 @@ class Redeemer:
                 f"Redeemed (gasless): {event.slug} | {event.shares:.0f} shares | "
                 f"id={tx_id} | tx={str(tx_hash)[:16]}..."
             )
+            if self._slack:
+                try:
+                    self._slack.notify_redemption(slug=event.slug, shares=event.shares)
+                except Exception:
+                    pass
+            self._record_redemption_pnl(event)
             return "redeemed"
 
         self._logger.warning(f"Gasless redeem timed out for {event.slug}")
@@ -578,6 +637,12 @@ class Redeemer:
                     f"Redeemed (on-chain): {event.slug} | {event.shares:.0f} shares | "
                     f"tx={result['tx_hash'][:16]}... | gas={result['gas_cost_pol']:.6f} POL"
                 )
+                if self._slack:
+                    try:
+                        self._slack.notify_redemption(slug=event.slug, shares=event.shares)
+                    except Exception:
+                        pass
+                self._record_redemption_pnl(event)
                 return "redeemed"
             else:
                 self._logger.error(
