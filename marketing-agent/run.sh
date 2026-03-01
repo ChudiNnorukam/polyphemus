@@ -45,6 +45,12 @@ if [ -z "$SCRIPT" ]; then
     echo "  funnel_sequence    -- Fire due funnel emails (send|status)"
     echo "  upsell_trigger     -- Enroll engaged buyers in upsell sequence"
     echo "  funnel_resolve     -- Print funnel stats"
+    echo ""
+    echo "Autonomous C-Suite (CMO + COO + CTO + CEO):"
+    echo "  cmo_engine         -- CMO: 5-lens marketing assessment (daily|history|undo)"
+    echo "  coo_engine         -- COO: 4-lens ops assessment (daily|trading|infra)"
+    echo "  cto_engine         -- CTO: 4-lens tech health (daily|history|--focus code|deploy|deps|git)"
+    echo "  ceo_engine         -- CEO: 4-lens strategic brief (weekly|history|--focus revenue|ops_health|tech_debt|pipeline)"
     exit 1
 fi
 

@@ -108,6 +108,50 @@ CREATE TABLE IF NOT EXISTS sequence_definitions (
 """
 
 # Seed data for post-purchase-v1 (5 steps) and upsell-v1 (3 steps)
+CMO_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cmo_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    lens TEXT NOT NULL,
+    assessment TEXT NOT NULL,
+    action TEXT,
+    script_invoked TEXT,
+    params TEXT,
+    outcome TEXT,
+    undo_cmd TEXT,
+    dry_run BOOLEAN DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+CTO_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cto_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    lens TEXT NOT NULL,
+    assessment TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    file_path TEXT,
+    action TEXT,
+    outcome TEXT,
+    dry_run BOOLEAN DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+CEO_SCHEMA = """
+CREATE TABLE IF NOT EXISTS ceo_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    lens TEXT NOT NULL,
+    assessment TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    insight TEXT,
+    recommendation TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
 SEQUENCE_SEEDS = [
     # post-purchase-v1
     ('post-purchase-v1', 1, 0,   'Your purchase is confirmed', 'post_purchase_welcome'),
@@ -141,6 +185,15 @@ def cmd_extend(args):
     conn.executescript(WING4_SCHEMA)
     print("  Created: funnel_contacts, sequence_enrollments, sequence_sends, sequence_definitions")
 
+    conn.executescript(CMO_SCHEMA)
+    print("  Created: cmo_decisions")
+
+    conn.executescript(CTO_SCHEMA)
+    print("  Created: cto_decisions")
+
+    conn.executescript(CEO_SCHEMA)
+    print("  Created: ceo_decisions")
+
     # Seed sequence_definitions (idempotent — INSERT OR IGNORE)
     seeded = 0
     for row in SEQUENCE_SEEDS:
@@ -166,10 +219,11 @@ def cmd_status(args):
 
     wing3 = ['social_posts']
     wing4 = ['funnel_contacts', 'sequence_enrollments', 'sequence_sends', 'sequence_definitions']
+    agents = ['cmo_decisions', 'cto_decisions', 'ceo_decisions']
     original = ['leads', 'daily_caps', 'email_events']
 
     print("\nDB Tables:")
-    for t in original + wing3 + wing4:
+    for t in original + wing3 + wing4 + agents:
         status = 'OK' if t in tables else 'MISSING'
         print(f"  {t:<30} {status}")
     print()
