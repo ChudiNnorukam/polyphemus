@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClaw Agent Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; color: #fafafa; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+  header { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; border-bottom: 1px solid #27272a; }
+  header h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+  #last-updated { font-size: 12px; color: #a1a1aa; font-family: 'SF Mono', 'Fira Code', monospace; }
+
+  .diagram-wrap { display: flex; justify-content: center; padding: 24px 16px 8px; }
+  svg text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+  /* Agent node rects */
+  .agent-rect { fill: #18181b; stroke-width: 2; rx: 8; cursor: pointer; transition: fill 0.3s; }
+  .agent-rect:hover { fill: #27272a; }
+  .agent-rect.healthy { stroke: #34d399; }
+  .agent-rect.stale   { stroke: #fbbf24; }
+  .agent-rect.critical { stroke: #f87171; }
+  .agent-rect.never, .agent-rect.no_data { stroke: #3f3f46; }
+
+  /* Glow filter */
+  .glow-green  { filter: drop-shadow(0 0 6px rgba(52,211,153,0.5)); }
+  .glow-amber  { filter: drop-shadow(0 0 6px rgba(251,191,36,0.4)); }
+  .glow-red    { filter: drop-shadow(0 0 6px rgba(248,113,113,0.5)); }
+
+  /* System node rects */
+  .sys-rect { fill: #18181b; stroke: #3f3f46; stroke-width: 1.5; rx: 6; }
+
+  /* Labels */
+  .agent-label { font-size: 13px; font-weight: 600; fill: #fafafa; text-anchor: middle; pointer-events: none; }
+  .agent-sub   { font-size: 9px; fill: #a1a1aa; text-anchor: middle; pointer-events: none; }
+  .sys-label   { font-size: 10px; fill: #a1a1aa; text-anchor: middle; pointer-events: none; }
+  .sys-icon    { font-size: 14px; text-anchor: middle; pointer-events: none; }
+
+  /* Edge lines */
+  .edge-line { stroke: #27272a; stroke-width: 1.2; fill: none; }
+  .edge-line.active { stroke: #3f3f46; }
+
+  /* Animated pulse dots */
+  .pulse-dot { r: 3; opacity: 0; }
+  .pulse-dot.active { opacity: 1; }
+  .pulse-dot.healthy { fill: #34d399; }
+  .pulse-dot.stale   { fill: #fbbf24; }
+  .pulse-dot.critical { fill: #f87171; }
+
+  @keyframes dash-flow {
+    0%   { stroke-dashoffset: 16; }
+    100% { stroke-dashoffset: 0; }
+  }
+  .edge-line.active {
+    stroke-dasharray: 4 4;
+    animation: dash-flow 1s linear infinite;
+  }
+
+  /* Status cards */
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 8px 24px 12px; }
+  .card { background: #18181b; border: 1px solid #27272a; border-radius: 8px; padding: 14px 16px; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .card-title { font-size: 13px; font-weight: 600; }
+  .card-badge { font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 500; }
+  .badge-healthy  { background: #064e3b; color: #34d399; }
+  .badge-stale    { background: #451a03; color: #fbbf24; }
+  .badge-critical { background: #450a0a; color: #f87171; }
+  .badge-never, .badge-no_data { background: #27272a; color: #71717a; }
+  .card-row { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0; }
+  .card-row .label { color: #a1a1aa; }
+  .card-row .value { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; }
+  .card-insight { font-size: 11px; color: #60a5fa; margin-top: 8px; line-height: 1.4; font-style: italic; }
+
+  /* Pipeline bar */
+  .pipeline { display: flex; gap: 24px; justify-content: center; padding: 10px 24px 20px; }
+  .pipe-stat { font-size: 12px; color: #a1a1aa; }
+  .pipe-stat span { color: #fafafa; font-family: 'SF Mono', 'Fira Code', monospace; font-weight: 600; }
+
+  /* Tooltip */
+  #tooltip { display: none; position: fixed; background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; padding: 12px 14px; max-width: 300px; z-index: 100; pointer-events: none; }
+  #tip-agent { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  #tip-meta { font-size: 11px; color: #a1a1aa; line-height: 1.5; }
+  #tip-insight { font-size: 11px; color: #60a5fa; margin-top: 6px; font-style: italic; line-height: 1.4; }
+
+  @media (max-width: 800px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .pipeline { flex-wrap: wrap; gap: 12px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>OpenClaw Agent Dashboard</h1>
+    <span id="last-updated">Loading...</span>
+  </header>
+
+  <div class="diagram-wrap">
+    <svg id="diagram" viewBox="0 0 900 440" width="900" height="440"></svg>
+  </div>
+
+  <div class="cards" id="cards"></div>
+  <div class="pipeline" id="pipeline-bar"></div>
+  <div id="tooltip"><div id="tip-agent"></div><div id="tip-meta"></div><div id="tip-insight"></div></div>
+
+<script>
+const svg = document.getElementById('diagram');
+const NS = 'http://www.w3.org/2000/svg';
+
+// ── Node definitions ──────────────────────────────────────────────
+const AGENTS = {
+  cmo: { x: 200, y: 100, w: 110, h: 50, label: 'CMO', sub: '5-lens marketing' },
+  ceo: { x: 590, y: 100, w: 110, h: 50, label: 'CEO', sub: '4-lens strategy' },
+  coo: { x: 200, y: 320, w: 110, h: 50, label: 'COO', sub: '4-lens ops' },
+  cto: { x: 590, y: 320, w: 110, h: 50, label: 'CTO', sub: '4-lens tech' },
+};
+
+const SYSTEMS = {
+  db:       { x: 395, y: 200, w: 110, h: 44, label: 'SQLite DB', icon: 'DB' },
+  vps:      { x: 395, y: 340, w: 100, h: 40, label: 'VPS (SSH)', icon: 'VPS' },
+  slack:    { x: 60,  y: 210, w: 90,  h: 36, label: 'Slack', icon: 'Slack' },
+  anthropic:{ x: 395, y: 60,  w: 110, h: 36, label: 'Anthropic', icon: 'AI' },
+  apis:     { x: 750, y: 210, w: 90,  h: 36, label: 'Ext APIs', icon: 'API' },
+  blog:     { x: 60,  y: 100, w: 80,  h: 36, label: 'Blog FS', icon: 'FS' },
+  git:      { x: 750, y: 340, w: 80,  h: 36, label: 'Git', icon: 'Git' },
+};
+
+// ── Edges: [sourceId, targetId, agentId (for activation)] ─────────
+const EDGES = [
+  ['cmo', 'db',        'cmo'],
+  ['cmo', 'slack',     'cmo'],
+  ['cmo', 'anthropic', 'cmo'],
+  ['cmo', 'blog',      'cmo'],
+  ['cmo', 'apis',      'cmo'],
+  ['ceo', 'db',        'ceo'],
+  ['ceo', 'slack',     'ceo'],
+  ['ceo', 'anthropic', 'ceo'],
+  ['ceo', 'vps',       'ceo'],
+  ['coo', 'db',        'coo'],
+  ['coo', 'slack',     'coo'],
+  ['coo', 'vps',       'coo'],
+  ['cto', 'db',        'cto'],
+  ['cto', 'slack',     'cto'],
+  ['cto', 'anthropic', 'cto'],
+  ['cto', 'vps',       'cto'],
+  ['cto', 'git',       'cto'],
+];
+
+const AGENT_NAMES = { cmo: 'CMO Engine', cto: 'CTO Engine', ceo: 'CEO Engine', coo: 'COO Engine' };
+let latestData = null;
+
+// ── SVG helpers ───────────────────────────────────────────────────
+function el(tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+  return e;
+}
+
+function cx(n) { return n.x + n.w / 2; }
+function cy(n) { return n.y + n.h / 2; }
+
+function edgePath(src, tgt) {
+  const x1 = cx(src), y1 = cy(src), x2 = cx(tgt), y2 = cy(tgt);
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+  return `M${x1},${y1} Q${mx},${y1} ${mx},${my} Q${mx},${y2} ${x2},${y2}`;
+}
+
+// ── Render static elements ────────────────────────────────────────
+function renderEdges() {
+  const g = el('g', { id: 'edges-group' });
+  EDGES.forEach(([srcId, tgtId, agentId], i) => {
+    const src = AGENTS[srcId] || SYSTEMS[srcId];
+    const tgt = AGENTS[tgtId] || SYSTEMS[tgtId];
+    const d = edgePath(src, tgt);
+    const line = el('path', { d, class: 'edge-line', 'data-agent': agentId, 'data-idx': i });
+    g.appendChild(line);
+    const dot = el('circle', { r: '3', class: 'pulse-dot', 'data-agent': agentId, 'data-idx': i });
+    g.appendChild(dot);
+  });
+  svg.appendChild(g);
+}
+
+function renderNodes() {
+  // System nodes first (behind agents)
+  for (const [id, n] of Object.entries(SYSTEMS)) {
+    const g = el('g', { 'data-sys': id });
+    g.appendChild(el('rect', { x: n.x, y: n.y, width: n.w, height: n.h, class: 'sys-rect' }));
+    g.appendChild(Object.assign(el('text', { x: cx(n), y: n.y + n.h / 2 - 3, class: 'sys-icon' }), { textContent: n.icon }));
+    g.appendChild(Object.assign(el('text', { x: cx(n), y: n.y + n.h / 2 + 10, class: 'sys-label' }), { textContent: n.label }));
+    svg.appendChild(g);
+  }
+  // Agent nodes
+  for (const [id, n] of Object.entries(AGENTS)) {
+    const g = el('g', { 'data-agent': id, class: 'agent-group' });
+    g.appendChild(el('rect', { x: n.x, y: n.y, width: n.w, height: n.h, class: 'agent-rect never', 'data-agent': id }));
+    g.appendChild(Object.assign(el('text', { x: cx(n), y: n.y + n.h / 2 - 4, class: 'agent-label' }), { textContent: n.label }));
+    g.appendChild(Object.assign(el('text', { x: cx(n), y: n.y + n.h / 2 + 10, class: 'agent-sub' }), { textContent: n.sub }));
+    g.addEventListener('mouseenter', (e) => showTooltip(e, id));
+    g.addEventListener('mousemove', moveTooltip);
+    g.addEventListener('mouseleave', hideTooltip);
+    svg.appendChild(g);
+  }
+}
+
+// ── Pulse animation via requestAnimationFrame ─────────────────────
+const pulseState = {};
+
+function animatePulses() {
+  const now = performance.now();
+  EDGES.forEach(([srcId, tgtId, agentId], i) => {
+    const dot = svg.querySelector(`.pulse-dot[data-idx="${i}"]`);
+    if (!dot || !dot.classList.contains('active')) return;
+
+    const src = AGENTS[srcId] || SYSTEMS[srcId];
+    const tgt = AGENTS[tgtId] || SYSTEMS[tgtId];
+    const duration = 2000;
+    if (!pulseState[i]) pulseState[i] = now;
+    const t = ((now - pulseState[i]) % duration) / duration;
+
+    const x1 = cx(src), y1 = cy(src), x2 = cx(tgt), y2 = cy(tgt);
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+
+    // Quadratic bezier interpolation (two segments)
+    let px, py;
+    if (t < 0.5) {
+      const s = t * 2;
+      const a = 1 - s;
+      px = a * a * x1 + 2 * a * s * mx + s * s * mx;
+      py = a * a * y1 + 2 * a * s * y1 + s * s * my;
+    } else {
+      const s = (t - 0.5) * 2;
+      const a = 1 - s;
+      px = a * a * mx + 2 * a * s * mx + s * s * x2;
+      py = a * a * my + 2 * a * s * y2 + s * s * y2;
+    }
+    dot.setAttribute('cx', px);
+    dot.setAttribute('cy', py);
+  });
+  requestAnimationFrame(animatePulses);
+}
+
+// ── Update diagram from data ──────────────────────────────────────
+function updateDiagram(data) {
+  for (const [id, agent] of Object.entries(data.agents)) {
+    const rect = svg.querySelector(`.agent-rect[data-agent="${id}"]`);
+    if (!rect) continue;
+    rect.classList.remove('healthy', 'stale', 'critical', 'never', 'no_data');
+    rect.classList.add(agent.status);
+
+    const group = rect.parentElement;
+    group.classList.remove('glow-green', 'glow-amber', 'glow-red');
+    if (agent.status === 'healthy') group.classList.add('glow-green');
+    else if (agent.status === 'stale') group.classList.add('glow-amber');
+    else if (agent.status === 'critical') group.classList.add('glow-red');
+  }
+
+  // Activate/deactivate edges
+  EDGES.forEach(([, , agentId], i) => {
+    const status = data.agents[agentId]?.status || 'never';
+    const active = status === 'healthy';
+    const line = svg.querySelector(`.edge-line[data-idx="${i}"]`);
+    const dot = svg.querySelector(`.pulse-dot[data-idx="${i}"]`);
+    if (line) { line.classList.toggle('active', active); }
+    if (dot) {
+      dot.classList.remove('healthy', 'stale', 'critical');
+      dot.classList.toggle('active', active);
+      if (active) dot.classList.add(status);
+    }
+  });
+}
+
+// ── Status cards ──────────────────────────────────────────────────
+function renderStatusCards(data) {
+  const container = document.getElementById('cards');
+  container.innerHTML = '';
+  for (const [id, label] of Object.entries(AGENT_NAMES)) {
+    const a = data.agents[id] || { status: 'no_data' };
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    let hoursStr = '-';
+    if (a.hours_ago != null) {
+      hoursStr = a.hours_ago < 1 ? `${Math.round(a.hours_ago * 60)}m ago` :
+                 a.hours_ago < 24 ? `${a.hours_ago.toFixed(1)}h ago` :
+                 `${Math.round(a.hours_ago / 24)}d ago`;
+    }
+
+    const rows = [
+      ['Last run', hoursStr],
+      ['Findings', a.finding_count ?? '-'],
+    ];
+    if (a.critical_count > 0) rows.push(['Critical', a.critical_count]);
+    if (a.warn_count > 0) rows.push(['Warnings', a.warn_count]);
+    if (a.last_action) rows.push(['Action', a.last_action.slice(0, 40)]);
+
+    const insight = a.ai_insight ? a.ai_insight.slice(0, 120) + (a.ai_insight.length > 120 ? '...' : '') : '';
+
+    card.innerHTML = `
+      <div class="card-head">
+        <span class="card-title">${label}</span>
+        <span class="card-badge badge-${a.status}">${a.status.toUpperCase()}</span>
+      </div>
+      ${rows.map(([l, v]) => `<div class="card-row"><span class="label">${l}</span><span class="value">${v}</span></div>`).join('')}
+      ${insight ? `<div class="card-insight">"${insight}"</div>` : ''}
+    `;
+    container.appendChild(card);
+  }
+}
+
+// ── Pipeline bar ──────────────────────────────────────────────────
+function renderPipelineBar(data) {
+  const p = data.pipeline;
+  document.getElementById('pipeline-bar').innerHTML = [
+    `<span class="pipe-stat">Leads: <span>${p.leads_total}</span></span>`,
+    `<span class="pipe-stat">Enriched: <span>${p.leads_enriched}</span></span>`,
+    `<span class="pipe-stat">Social queued: <span>${p.social_pending}</span></span>`,
+    `<span class="pipe-stat">Posted 7d: <span>${p.social_posted_7d}</span></span>`,
+    `<span class="pipe-stat">Purchases 7d: <span>${p.funnel_purchases_7d || 0}</span></span>`,
+  ].join('');
+}
+
+// ── Tooltip ───────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+
+function showTooltip(e, agentId) {
+  if (!latestData) return;
+  const a = latestData.agents[agentId];
+  if (!a) return;
+  document.getElementById('tip-agent').textContent = AGENT_NAMES[agentId];
+
+  const hoursStr = a.hours_ago != null
+    ? (a.hours_ago < 1 ? `${Math.round(a.hours_ago * 60)} minutes ago` : `${a.hours_ago.toFixed(1)} hours ago`)
+    : 'never';
+
+  const lines = [`Status: ${a.status}`, `Last run: ${hoursStr}`];
+  if (a.finding_count != null) lines.push(`Findings: ${a.finding_count}`);
+  if (a.critical_count > 0) lines.push(`Critical: ${a.critical_count}`);
+  if (a.warn_count > 0) lines.push(`Warnings: ${a.warn_count}`);
+  if (a.last_action) lines.push(`Last action: ${a.last_action}`);
+  if (a.note) lines.push(a.note);
+  document.getElementById('tip-meta').innerHTML = lines.join('<br>');
+
+  const insight = a.ai_insight || '';
+  document.getElementById('tip-insight').textContent = insight
+    ? `"${insight.length > 180 ? insight.slice(0, 180) + '...' : insight}"`
+    : '';
+
+  tooltip.style.display = 'block';
+  moveTooltip(e);
+}
+
+function moveTooltip(e) {
+  const x = e.clientX + 14;
+  tooltip.style.left = (x + tooltip.offsetWidth > window.innerWidth - 20)
+    ? `${e.clientX - tooltip.offsetWidth - 14}px` : `${x}px`;
+  tooltip.style.top = `${e.clientY - 10}px`;
+}
+
+function hideTooltip() { tooltip.style.display = 'none'; }
+
+// ── Polling ───────────────────────────────────────────────────────
+async function fetchStatus() {
+  try {
+    const res = await fetch('/api/status');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    latestData = data;
+    updateDiagram(data);
+    renderStatusCards(data);
+    renderPipelineBar(data);
+    document.getElementById('last-updated').textContent =
+      'Updated ' + new Date(data.timestamp).toLocaleTimeString();
+  } catch (err) {
+    document.getElementById('last-updated').textContent = 'Poll failed - retrying...';
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+renderEdges();
+renderNodes();
+animatePulses();
+fetchStatus();
+setInterval(fetchStatus, 10000);
+</script>
+</body>
+</html>

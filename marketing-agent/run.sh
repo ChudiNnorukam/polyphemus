@@ -51,12 +51,20 @@ if [ -z "$SCRIPT" ]; then
     echo "  coo_engine         -- COO: 4-lens ops assessment (daily|trading|infra)"
     echo "  cto_engine         -- CTO: 4-lens tech health (daily|history|--focus code|deploy|deps|git)"
     echo "  ceo_engine         -- CEO: 4-lens strategic brief (weekly|history|--focus revenue|ops_health|tech_debt|pipeline)"
+    echo ""
+    echo "Dashboard:"
+    echo "  dashboard          -- Live agent architecture dashboard (--port 8086)"
     exit 1
 fi
 
 PYTHON="${VENV_PYTHON:-python3}"
 if [ -f "/opt/lagbot/venv/bin/python3" ]; then
     PYTHON="/opt/lagbot/venv/bin/python3"
+fi
+
+if [ "$SCRIPT" = "dashboard" ]; then
+    echo "Starting OpenClaw Agent Dashboard on http://localhost:8086"
+    exec "$PYTHON" "$(dirname "$0")/dashboard/server.py" "$@"
 fi
 
 exec "$PYTHON" "$SCRIPT_DIR/${SCRIPT}.py" "$@"
