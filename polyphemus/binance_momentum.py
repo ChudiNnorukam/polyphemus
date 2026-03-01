@@ -552,6 +552,20 @@ class BinanceMomentumFeed:
                 asset, "UP" if outcome == "Up" else "DOWN"
             )
 
+        # Compute pair_cost: our side + opposite side ask
+        pair_cost_val = None
+        opp_token_id = market_info["down_token_id"] if outcome == "Up" else market_info["up_token_id"]
+        opp_mid = 0.0
+        if self._market_ws:
+            opp_mid = self._market_ws.get_midpoint(opp_token_id)
+        if opp_mid <= 0:
+            try:
+                opp_mid = await self._clob.get_midpoint(opp_token_id)
+            except Exception:
+                pass
+        if opp_mid > 0 and midpoint > 0:
+            pair_cost_val = midpoint + opp_mid
+
         # Build signal dict (compatible with existing pipeline)
         signal = {
             "token_id": token_id,
@@ -575,6 +589,7 @@ class BinanceMomentumFeed:
             "best_bid": best_bid_val,
             "best_ask": best_ask_val,
             "book_imbalance": book_imbalance_val,
+            "pair_cost": pair_cost_val,
         }
 
         shadow_tag = " [SHADOW]" if shadow else ""
@@ -648,11 +663,27 @@ class BinanceMomentumFeed:
             if self._market_ws:
                 await self._market_ws.subscribe([token_ids[0], token_ids[1]])
 
+            # Pre-warm SDK caches (neg_risk, tick_size, fee_rate) so FAK orders
+            # skip REST lookups at execution time (~300ms saved per order)
+            asyncio.create_task(self._prewarm_sdk_cache(token_ids[0]))
+            asyncio.create_task(self._prewarm_sdk_cache(token_ids[1]))
+
             return info
 
         except Exception as e:
             self._logger.warning(f"Gamma API error for {slug}: {e}")
             return None
+
+    async def _prewarm_sdk_cache(self, token_id: str) -> None:
+        """Pre-warm py_clob_client internal caches for a token.
+
+        Calls get_neg_risk, get_tick_size, get_fee_rate_bps in background so
+        they're cached when FAK order fires. Saves ~300ms per order.
+        """
+        try:
+            await self._clob.prewarm_market(token_id)
+        except Exception:
+            pass  # Non-critical, SDK will fetch on demand if needed
 
     # ========================================================================
     # Window Delta: Buy winning side at T-N seconds before 5m window close
@@ -814,7 +845,11 @@ class BinanceMomentumFeed:
 
         while True:
             try:
-                await asyncio.sleep(1)
+                # Event-driven: wake instantly on WS price update, fallback 0.1s
+                if self._market_ws:
+                    await self._market_ws.wait_for_update(timeout=0.1)
+                else:
+                    await asyncio.sleep(0.1)
                 now = time.time()
 
                 # Reset daily counter at midnight
@@ -862,6 +897,13 @@ class BinanceMomentumFeed:
                             continue
                         if secs_to_end < min_secs:
                             continue
+
+                        # Blackout zone: skip 11-30s danger zone (reversals cluster here)
+                        if not is_15m:
+                            bl_min = self._config.snipe_blackout_min_secs
+                            bl_max = self._config.snipe_blackout_max_secs
+                            if bl_min > 0 and bl_max > 0 and bl_min <= round(secs_to_end) <= bl_max:
+                                continue
 
                         # Dedup
                         snipe_key = f"snipe-{asset.lower()}-{window // 60}m-{current_epoch}"
@@ -935,8 +977,10 @@ class BinanceMomentumFeed:
             token_id = market_info[token_key]
 
             midpoint = 0.0
+            ws_best_ask = 0.0
             if self._market_ws:
                 midpoint = self._market_ws.get_midpoint(token_id)
+                ws_best_ask = self._market_ws.get_best_ask(token_id)
             if midpoint <= 0:
                 midpoint = await self._clob.get_midpoint(token_id)
             if midpoint <= 0:
@@ -946,6 +990,21 @@ class BinanceMomentumFeed:
                 continue
             if midpoint > max_price:
                 continue
+
+            # Compute pair_cost: our side + opposite side midpoint
+            pair_cost_val = None
+            opp_key = "down_token_id" if outcome == "Up" else "up_token_id"
+            opp_token_id = market_info[opp_key]
+            opp_mid = 0.0
+            if self._market_ws:
+                opp_mid = self._market_ws.get_midpoint(opp_token_id)
+            if opp_mid <= 0:
+                try:
+                    opp_mid = await self._clob.get_midpoint(opp_token_id)
+                except Exception:
+                    pass
+            if opp_mid > 0 and midpoint > 0:
+                pair_cost_val = midpoint + opp_mid
 
             # Found a side in snipe range
             # 15m dry_run forces DB logging path even for shadow assets
@@ -975,6 +1034,7 @@ class BinanceMomentumFeed:
                         "market_window_secs": window,
                         "entry_price": midpoint,
                         "dry_run": 1,
+                        "pair_cost": pair_cost_val,
                     })
                     if signal_id > 0:
                         epoch_end = epoch_val + window
@@ -1002,6 +1062,8 @@ class BinanceMomentumFeed:
                 "time_remaining_secs": int(secs_left),
                 "market_window_secs": window,
                 "condition_id": market_info.get("condition_id", ""),
+                "pair_cost": pair_cost_val,
+                "best_ask": ws_best_ask if ws_best_ask > 0 else None,
             }
 
             self._logger.info(

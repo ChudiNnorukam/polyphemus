@@ -56,6 +56,12 @@ class SlackNotifier:
     def enabled(self) -> bool:
         return self._enabled
 
+    def _session_line(self) -> str:
+        total = self._wins + self._losses
+        wr = (self._wins / total * 100) if total > 0 else 0
+        sign = "+" if self._total_pnl >= 0 else ""
+        return f"{self._wins}W {self._losses}L ({wr:.0f}%) | {sign}${self._total_pnl:.2f}"
+
     def notify_entry(
         self,
         slug: str,
@@ -65,15 +71,23 @@ class SlackNotifier:
         size_usd: float,
         shares: float,
         momentum_pct: float = 0.0,
+        source: str = "",
+        secs_left: int = 0,
     ):
         if not self._enabled:
             return
         payout = shares * (1.0 - entry_price)
+        source_tag = ""
+        if source and "snipe" in source:
+            source_tag = f" | SNIPE {secs_left}s"
+        elif momentum_pct:
+            source_tag = f" | {momentum_pct:+.2%}"
+
         msg = (
-            f":chart_with_upwards_trend: *ENTRY* [{self._instance}]\n"
-            f"*{asset} {direction}* @ ${entry_price:.3f}  |  ${size_usd:.2f} ({shares:.0f} shares)\n"
-            f"Momentum: {momentum_pct:+.2%}  |  Max payout: +${payout:.2f}\n"
-            f"`{slug}`"
+            f":zap: *BUY* [{self._instance}]\n"
+            f"*{asset} {direction}* @ {entry_price:.3f}"
+            f"  |  ${size_usd:.2f} ({shares:.0f} sh){source_tag}\n"
+            f"Payout if win: +${payout:.2f}"
         )
         self._post(msg)
 
@@ -98,19 +112,39 @@ class SlackNotifier:
             self._losses += 1
         self._total_pnl += pnl
 
-        total = self._wins + self._losses
-        wr = (self._wins / total * 100) if total > 0 else 0
-
         icon = ":white_check_mark:" if is_win else ":x:"
         sign = "+" if pnl >= 0 else ""
-        hold_str = f"{hold_secs:.0f}s" if hold_secs > 0 else "n/a"
 
         msg = (
             f"{icon} *{'WIN' if is_win else 'LOSS'}* [{self._instance}]\n"
-            f"*{asset} {direction}*  |  ${entry_price:.3f} -> ${exit_price:.3f}  |  {sign}${pnl:.2f}\n"
-            f"Exit: {exit_reason}  |  Hold: {hold_str}\n"
-            f"Session: {self._wins}W/{self._losses}L ({wr:.0f}% WR)  |  PnL: {sign if self._total_pnl >= 0 else ''}${self._total_pnl:.2f}\n"
-            f"`{slug}`"
+            f"*{asset} {direction}*  {entry_price:.3f} -> {exit_price:.3f}"
+            f"  |  {sign}${pnl:.2f}  ({exit_reason})\n"
+            f"_{self._session_line()}_"
+        )
+        self._post(msg)
+
+    def notify_redemption(
+        self,
+        slug: str,
+        shares: float,
+        entry_price: float = 0.0,
+    ):
+        """Notify when orphan tokens are redeemed (winning snipe trades)."""
+        if not self._enabled:
+            return
+        pnl = shares * (1.0 - entry_price) if entry_price > 0 else 0.0
+        if pnl > 0:
+            self._wins += 1
+            self._total_pnl += pnl
+
+        # Extract asset from slug if possible (e.g. "sol-updown-5m-..." or "orphan:...")
+        display = slug[:50] if len(slug) > 50 else slug
+        pnl_str = f"  |  +${pnl:.2f}" if pnl > 0 else ""
+
+        msg = (
+            f":moneybag: *REDEEMED* [{self._instance}]\n"
+            f"{display}  |  {shares:.0f} shares{pnl_str}\n"
+            f"_{self._session_line()}_"
         )
         self._post(msg)
 

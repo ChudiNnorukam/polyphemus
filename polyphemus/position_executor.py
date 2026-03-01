@@ -124,10 +124,15 @@ class PositionExecutor:
                 f"slug={slug}"
             )
 
-        # Resolution snipe: always taker (no time for maker fill in last 8-45s)
+        # Resolution snipe: taker entry (no time for maker fill in last 8-45s)
         is_snipe = signal.get('source') == 'resolution_snipe' if signal else False
+        use_fak = False
         if is_snipe:
-            use_maker = False
+            if self._config.snipe_entry_mode == "fak":
+                use_fak = True
+                use_maker = False
+            else:
+                use_maker = False
 
         # Sharp move at 0.90+: taker entry (fee <0.20% at 0.90, near-zero above)
         is_sharp = signal.get('source') == 'sharp_move' if signal else False
@@ -144,10 +149,42 @@ class PositionExecutor:
             use_maker = False
 
         maker_offset_used = None  # Track for fill optimizer
+        entry_mode_label = "fak" if use_fak else ("maker" if use_maker else "taker")
         self._logger.info(
-            f"Entry mode: {'maker' if use_maker else 'taker'} | "
+            f"Entry mode: {entry_mode_label} | "
             f"window={window}s | slug={slug}"
         )
+
+        # FAK path: instant fill of available liquidity, no polling needed
+        if use_fak:
+            dollar_amount = round(size * price, 2)
+            # Use WS best_ask as price hint to skip SDK's calculate_market_price REST call
+            ws_best_ask = signal.get('best_ask', 0.0) if signal else 0.0
+            self._logger.info(
+                f"FAK snipe: {slug} | ${dollar_amount:.2f} @ ~{price:.4f} "
+                f"(ask={ws_best_ask or '?'}, {signal.get('time_remaining_secs', '?')}s left)"
+            )
+            placement_result = await self._clob.place_fak_order(
+                token_id=token_id,
+                amount=dollar_amount,
+                side=BUY,
+                price_hint=ws_best_ask or 0.0,
+            )
+            if not placement_result.success:
+                self._logger.warning(f"FAK snipe failed for {slug}: {placement_result.error}")
+                return placement_result
+            order_id = placement_result.order_id
+            self._logger.info(f"FAK order accepted: {order_id} | {slug}")
+            # FAK fills instantly — poll once to confirm shares settled
+            fill_result = await self._poll_for_fill(
+                order_id, token_id, price, size, max_polls=3
+            )
+            if not fill_result.success:
+                self._logger.warning(f"FAK fill not confirmed for {slug} (may be partial)")
+                # Still return the placement — shares may have settled
+                return placement_result
+            return fill_result
+
         if use_maker:
             # Maker mode: place below midpoint to sit on the book (post-only)
             live_midpoint = await self._clob.get_midpoint(token_id)

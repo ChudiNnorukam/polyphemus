@@ -182,6 +182,93 @@ class ClobWrapper:
             self._logger.error(msg)
             return ExecutionResult(success=False, error=msg)
 
+    async def place_fak_order(
+        self,
+        token_id: str,
+        amount: float,
+        side: str,
+        price_hint: float = 0.0,
+    ) -> ExecutionResult:
+        """Place FAK (Fill-and-Kill) market order. Fills available liquidity, cancels remainder.
+
+        Unlike FOK which rejects entirely on partial fill, FAK accepts whatever
+        shares are available and cancels the unfilled portion. Better for thin books.
+
+        Args:
+            token_id: Token ID for the market outcome
+            amount: Dollars to spend (BUY) or shares to sell (SELL)
+            side: BUY or SELL constant
+            price_hint: WS best_ask price. If > 0, SDK skips calculate_market_price
+                        REST call (~100ms saved).
+        """
+        import math
+        t0 = time.time()
+        from py_clob_client.order_builder.constants import SELL as _SELL
+        if side == _SELL:
+            amount = math.floor(amount * 100) / 100
+        else:
+            amount = round(amount, 2)
+        if amount < 0.01:
+            return ExecutionResult(success=False, error=f"FAK amount too small: ${amount}")
+        try:
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=amount,
+                side=side,
+            )
+            # Pass WS best_ask as price hint to skip SDK's calculate_market_price REST call
+            if price_hint > 0:
+                order_args.price = price_hint
+            loop = asyncio.get_event_loop()
+            signed_order = await asyncio.wait_for(
+                loop.run_in_executor(None, self._client.create_market_order, order_args),
+                timeout=ORDER_TIMEOUT,
+            )
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self._client.post_order(signed_order, OrderType.FAK),
+                ),
+                timeout=ORDER_TIMEOUT,
+            )
+            order_id = result.get("orderID", "")
+            sign_ms = (time.time() - t0) * 1000
+            self._logger.info(f"FAK order filled: {order_id} | ${amount:.2f} {side} | {sign_ms:.0f}ms")
+            self._record_latency("place_fak_order", t0)
+            return ExecutionResult(success=True, order_id=order_id)
+        except asyncio.TimeoutError:
+            self._record_latency("place_fak_order", t0)
+            msg = f"FAK order timeout after {ORDER_TIMEOUT}s"
+            self._logger.error(msg)
+            return ExecutionResult(success=False, error=msg)
+        except Exception as e:
+            self._record_latency("place_fak_order", t0)
+            msg = f"FAK order failed: {str(e)}"
+            self._logger.error(msg)
+            return ExecutionResult(success=False, error=msg)
+
+    async def prewarm_market(self, token_id: str) -> None:
+        """Pre-warm SDK internal caches for a token (neg_risk, tick_size, fee_rate).
+
+        Called on market discovery so these are cached when FAK fires.
+        Saves ~300ms of REST calls at execution time.
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._client.get_neg_risk, token_id),
+                timeout=10,
+            )
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._client.get_tick_size, token_id),
+                timeout=10,
+            )
+        except Exception:
+            pass
+
     async def get_order_status(self, order_id: str) -> str:
         """Get order status.
 

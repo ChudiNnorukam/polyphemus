@@ -40,6 +40,7 @@ class MarketWS:
         self._session: Optional[aiohttp.ClientSession] = None
         self._connected = False
         self._update_count = 0
+        self._price_event: Optional[asyncio.Event] = None  # Set on every price update
 
     async def start(self) -> None:
         """Connect and run the message loop with auto-reconnect."""
@@ -235,6 +236,21 @@ class MarketWS:
             if best_bid > 0 and best_ask > 0:
                 self._update_prices(asset_id, best_bid, best_ask)
 
+    async def wait_for_update(self, timeout: float = 0.1) -> bool:
+        """Wait for next price update. Returns True if update received, False on timeout.
+
+        Used by snipe loop for event-driven wake instead of fixed sleep.
+        Falls back to timeout if WS is disconnected or no updates arrive.
+        """
+        if self._price_event is None:
+            self._price_event = asyncio.Event()
+        self._price_event.clear()
+        try:
+            await asyncio.wait_for(self._price_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     def _update_prices(self, token_id: str, best_bid: float, best_ask: float) -> None:
         if best_bid <= 0 or best_ask <= 0:
             return
@@ -244,6 +260,8 @@ class MarketWS:
         self._midpoints[token_id] = (best_bid + best_ask) / 2
         self._last_update[token_id] = time.time()
         self._update_count += 1
+        if self._price_event is not None:
+            self._price_event.set()
         if is_first:
             self._logger.info(
                 f"MarketWS first price: {token_id[:16]}... "

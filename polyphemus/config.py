@@ -237,6 +237,9 @@ class Settings(BaseSettings):
     snipe_assets: str = ""               # comma-separated, empty = use asset_filter
     snipe_max_daily_trades: int = 100    # hard cap on snipe trades per day (0=unlimited)
     snipe_max_per_epoch: int = 0         # max live snipes per epoch, 0=unlimited (prevents correlated losses)
+    snipe_entry_mode: str = "maker"      # "maker" (GTC post_only, 0% fee) or "fak" (instant fill, ~0.1% fee)
+    snipe_blackout_min_secs: int = 0     # skip signals in this range (0=disabled). E.g. 11 = skip 11-30s
+    snipe_blackout_max_secs: int = 0     # upper bound of blackout. E.g. 30 = skip 11-30s danger zone
 
     # 15m Resolution snipe (shadow testing — same strategy, longer window)
     snipe_15m_enabled: bool = False       # enable 15m snipe scanning
