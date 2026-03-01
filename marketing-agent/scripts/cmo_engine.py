@@ -116,6 +116,21 @@ def slack_post(text):
         pass
 
 
+def _get_lessons(agent='cmo'):
+    """Fetch recent self-critique lessons from agent_reflections."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT lesson FROM agent_reflections WHERE agent=? "
+            "ORDER BY created_at DESC LIMIT 3", (agent,)
+        ).fetchall()
+        conn.close()
+        return [r['lesson'] for r in rows if r['lesson']]
+    except Exception:
+        return []
+
+
 def _llm_synthesize(findings):
     """Call Claude Haiku to synthesize findings into strategic marketing insight.
 
@@ -136,21 +151,24 @@ def _llm_synthesize(findings):
         if not findings_text:
             return ''
 
+        prompt = (
+            "You are the CMO of a solo-founder tech startup running "
+            "a Polymarket trading bot and selling digital products.\n"
+            "Given these findings from today's automated marketing assessment, "
+            "provide 2-3 sentences of strategic insight. Focus on: what is the "
+            "single most important marketing action this week, and why. "
+            "Be direct, no filler.\n\n"
+        )
+        lessons = _get_lessons('cmo')
+        if lessons:
+            prompt += "LESSONS FROM YOUR PAST SELF-CRITIQUE:\n"
+            prompt += '\n'.join(f"- {l}" for l in lessons) + "\n\n"
+        prompt += f"FINDINGS:\n{findings_text}"
+
         response = client.messages.create(
             model='claude-haiku-4-5-20251001',
             max_tokens=500,
-            messages=[{
-                'role': 'user',
-                'content': (
-                    "You are the CMO of a solo-founder tech startup running "
-                    "a Polymarket trading bot and selling digital products.\n"
-                    "Given these findings from today's automated marketing assessment, "
-                    "provide 2-3 sentences of strategic insight. Focus on: what is the "
-                    "single most important marketing action this week, and why. "
-                    "Be direct, no filler.\n\n"
-                    f"FINDINGS:\n{findings_text}"
-                ),
-            }]
+            messages=[{'role': 'user', 'content': prompt}]
         )
         return response.content[0].text
     except Exception:
@@ -684,6 +702,14 @@ def cmd_daily(args):
 
     # Post to Slack
     slack_post(digest)
+
+    # Auto-reflect (Level 2)
+    try:
+        from reflection_engine import reflect_on_agent, ensure_reflections_table
+        ensure_reflections_table(conn)
+        reflect_on_agent(conn, 'cmo')
+    except Exception as e:
+        print(f'\nAuto-reflect skipped: {e}')
 
     conn.close()
 

@@ -31,6 +31,7 @@ AGENT_TABLES = {
     'cmo': 'cmo_decisions',
     'cto': 'cto_decisions',
     'ceo': 'ceo_decisions',
+    'coo': 'coo_decisions',
 }
 
 
@@ -82,7 +83,7 @@ def ensure_reflections_table(conn):
     conn.commit()
 
 
-def _llm_reflect(agent, current_findings, historical_context):
+def _llm_reflect(agent, current_findings, historical_context, prior_reflections=None):
     """Call Claude Haiku to produce a self-reflection on the agent's performance.
 
     Returns (reflection, accuracy_score, lesson) or empty tuple on failure.
@@ -104,9 +105,21 @@ def _llm_reflect(agent, current_findings, historical_context):
             for h in historical_context[:10]
         )
 
+        lessons_text = ''
+        if prior_reflections:
+            lessons_text = '\n'.join(
+                f"- {pr['lesson']}" for pr in prior_reflections if pr.get('lesson')
+            )
+
         prompt = (
             f"You are the {agent.upper()} of a solo-founder tech startup. "
             f"You just completed an assessment run. Now do a SELF-CRITIQUE.\n\n"
+        )
+        if lessons_text:
+            prompt += (
+                f"YOUR PAST SELF-CRITIQUE LESSONS (apply these):\n{lessons_text}\n\n"
+            )
+        prompt += (
             f"YOUR CURRENT FINDINGS:\n{current_text}\n\n"
             f"YOUR PAST FINDINGS (last 10):\n{history_text or 'No history yet.'}\n\n"
             f"Evaluate yourself honestly:\n"
@@ -207,8 +220,9 @@ def reflect_on_agent(conn, agent):
             print(f'  Previous lesson: {pr["lesson"][:80]}')
     print()
 
-    # LLM self-critique
-    result = _llm_reflect(agent, current_findings, historical_context)
+    # LLM self-critique (with prior lessons injected)
+    result = _llm_reflect(agent, current_findings, historical_context,
+                          prior_reflections=[dict(r) for r in prior_reflections])
     if result:
         reflection, accuracy, lesson = result
         print(f'Reflection: {reflection}')

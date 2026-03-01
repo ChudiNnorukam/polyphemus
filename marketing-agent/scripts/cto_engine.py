@@ -126,6 +126,21 @@ def ssh_cmd(cmd, timeout=15):
         return False, str(e)
 
 
+def _get_lessons(agent='cto'):
+    """Fetch recent self-critique lessons from agent_reflections."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT lesson FROM agent_reflections WHERE agent=? "
+            "ORDER BY created_at DESC LIMIT 3", (agent,)
+        ).fetchall()
+        conn.close()
+        return [r['lesson'] for r in rows if r['lesson']]
+    except Exception:
+        return []
+
+
 def _llm_synthesize(findings, engine='CTO'):
     """Call Claude Haiku to synthesize findings into strategic insight.
 
@@ -146,20 +161,23 @@ def _llm_synthesize(findings, engine='CTO'):
         if not findings_text:
             return ''
 
+        prompt = (
+            f"You are the {engine} of a solo-founder tech startup running "
+            f"a Polymarket trading bot and marketing system.\n"
+            f"Given these findings from today's automated assessment, provide "
+            f"2-3 sentences of strategic insight. Focus on: what is the single "
+            f"most important thing to act on, and why. Be direct, no filler.\n\n"
+        )
+        lessons = _get_lessons(engine.lower())
+        if lessons:
+            prompt += "LESSONS FROM YOUR PAST SELF-CRITIQUE:\n"
+            prompt += '\n'.join(f"- {l}" for l in lessons) + "\n\n"
+        prompt += f"FINDINGS:\n{findings_text}"
+
         response = client.messages.create(
             model='claude-haiku-4-5-20251001',
             max_tokens=500,
-            messages=[{
-                'role': 'user',
-                'content': (
-                    f"You are the {engine} of a solo-founder tech startup running "
-                    f"a Polymarket trading bot and marketing system.\n"
-                    f"Given these findings from today's automated assessment, provide "
-                    f"2-3 sentences of strategic insight. Focus on: what is the single "
-                    f"most important thing to act on, and why. Be direct, no filler.\n\n"
-                    f"FINDINGS:\n{findings_text}"
-                ),
-            }]
+            messages=[{'role': 'user', 'content': prompt}]
         )
         return response.content[0].text
     except Exception:
@@ -578,6 +596,14 @@ def cmd_daily(args):
     if criticals > 0:
         critical_msgs = [f['issue'] for f in all_findings if f['severity'] == 'critical']
         slack_post(f'CTO ALERT: {criticals} CRITICAL issues\n' + '\n'.join(f'- {m}' for m in critical_msgs))
+
+    # Auto-reflect (Level 2)
+    try:
+        from reflection_engine import reflect_on_agent, ensure_reflections_table
+        ensure_reflections_table(conn)
+        reflect_on_agent(conn, 'cto')
+    except Exception as e:
+        print(f'\nAuto-reflect skipped: {e}')
 
     conn.close()
 

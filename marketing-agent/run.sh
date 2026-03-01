@@ -53,6 +53,7 @@ if [ -z "$SCRIPT" ]; then
     echo "  ceo_engine         -- CEO: 4-lens strategic brief (weekly|history|--focus revenue|ops_health|tech_debt|pipeline)"
     echo ""
     echo "Evolution (Memory + Reflection + Coordination):"
+    echo "  run_all            -- Full orchestrator loop: CMO->CTO->COO->Memory->CEO (--skip-ceo|--only)"
     echo "  memory_engine      -- Level 1: pattern detection, trends (scan|trends|recurring)"
     echo "  reflection_engine  -- Level 2: self-critique, accuracy tracking (reflect|history|accuracy)"
     echo ""

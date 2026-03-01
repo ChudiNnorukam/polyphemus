@@ -158,7 +158,7 @@ def api_status():
             'cmo': get_agent_status(conn, 'cmo_decisions'),
             'cto': get_agent_status(conn, 'cto_decisions'),
             'ceo': get_agent_status(conn, 'ceo_decisions'),
-            'coo': {'status': 'no_data', 'note': 'COO writes to stdout/Slack only, no DB table'},
+            'coo': get_agent_status(conn, 'coo_decisions'),
         }
         pipeline = get_pipeline_metrics(conn)
     finally:
@@ -177,7 +177,7 @@ def api_trends():
     conn = get_db()
     try:
         result = {}
-        for agent, table in [('cmo', 'cmo_decisions'), ('cto', 'cto_decisions'), ('ceo', 'ceo_decisions')]:
+        for agent, table in [('cmo', 'cmo_decisions'), ('cto', 'cto_decisions'), ('ceo', 'ceo_decisions'), ('coo', 'coo_decisions')]:
             if not table_exists(conn, table):
                 result[agent] = {'trend': 'no_data', 'this_week': 0, 'last_week': 0, 'recurring': [], 'heatmap': []}
                 continue

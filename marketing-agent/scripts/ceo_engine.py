@@ -124,6 +124,21 @@ def ssh_cmd(cmd, timeout=15):
         return False, str(e)
 
 
+def _get_lessons(agent='ceo'):
+    """Fetch recent self-critique lessons from agent_reflections."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT lesson FROM agent_reflections WHERE agent=? "
+            "ORDER BY created_at DESC LIMIT 3", (agent,)
+        ).fetchall()
+        conn.close()
+        return [r['lesson'] for r in rows if r['lesson']]
+    except Exception:
+        return []
+
+
 def _llm_synthesize(findings, context=''):
     """Call Claude Haiku to synthesize cross-functional findings into strategic insight.
 
@@ -153,6 +168,10 @@ def _llm_synthesize(findings, context=''):
             "(2) any conflicts between departments, (3) resource allocation.\n"
             "Be direct, no filler.\n"
         )
+        lessons = _get_lessons('ceo')
+        if lessons:
+            prompt += "\nLESSONS FROM YOUR PAST SELF-CRITIQUE:\n"
+            prompt += '\n'.join(f"- {l}" for l in lessons) + "\n"
         if context:
             prompt += f"\nCONTEXT:\n{context}\n"
         prompt += f"\nFINDINGS:\n{findings_text}"
@@ -698,6 +717,37 @@ def cmd_weekly(args):
             digest_lines.append(f'   {i}. {insight}')
         digest_lines.append('')
 
+    # Memory trends (Level 1 pattern detection)
+    memory_context = ''
+    try:
+        from memory_engine import get_trend, get_recurring_findings, get_db as mem_get_db
+        mem_conn = mem_get_db()
+        trend_lines = []
+        for agent_label, table in [('CMO', 'cmo_decisions'), ('CTO', 'cto_decisions'),
+                                    ('COO', 'coo_decisions')]:
+            direction, this_w, last_w = get_trend(mem_conn, table)
+            if direction == 'up':
+                trend_lines.append(f'{agent_label} findings INCREASING ({this_w} this week vs {last_w} last)')
+                all_findings.append({
+                    'issue': f'{agent_label} findings trending up: {this_w} this week vs {last_w} last week',
+                    'severity': 'info',
+                    'lens': 'memory_trends',
+                })
+            recurring = get_recurring_findings(mem_conn, table)
+            for r in recurring[:2]:
+                trend_lines.append(f'{agent_label} recurring (x{r["occurrences"]}): {r["assessment"][:60]}')
+
+        if trend_lines:
+            digest_lines.append('## MEMORY PATTERNS')
+            for line in trend_lines:
+                digest_lines.append(f'   {line}')
+            digest_lines.append('')
+            memory_context = '\n'.join(trend_lines)
+
+        mem_conn.close()
+    except Exception:
+        pass
+
     # Level 3: Orchestrator message dispatch
     messages_sent = orchestrate_messages(conn, all_findings, insights)
     if messages_sent:
@@ -708,8 +758,10 @@ def cmd_weekly(args):
 
     # LLM Synthesis
     if all_findings:
-        # Build context from lens summaries
+        # Build context from lens summaries + memory patterns
         context = '\n'.join(f'{r["lens"]}: {r["summary"]}' for r in lens_results)
+        if memory_context:
+            context += f'\n\nRECURRING PATTERNS:\n{memory_context}'
         ai_insight = _llm_synthesize(all_findings, context=context)
         if ai_insight:
             digest_lines.append('## AI STRATEGIC INSIGHT')
@@ -753,6 +805,15 @@ def cmd_weekly(args):
     print(digest)
 
     slack_post(digest)
+
+    # Auto-reflect (Level 2)
+    try:
+        from reflection_engine import reflect_on_agent, ensure_reflections_table
+        ensure_reflections_table(conn)
+        reflect_on_agent(conn, 'ceo')
+    except Exception as e:
+        print(f'\nAuto-reflect skipped: {e}')
+
     conn.close()
 
 
