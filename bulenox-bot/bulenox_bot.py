@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 _EASTERN = ZoneInfo("America/New_York")
 _MARKET_OPEN = dt_time(9, 30)
-_MARKET_CLOSE = dt_time(14, 50)  # 2:50pm ET = 3:50pm CST — 9-min buffer before Bulenox 3:59pm CST deadline
+_MARKET_CLOSE = dt_time(16, 50)  # 4:50pm ET = 3:50pm CT — 9-min buffer before Bulenox 3:59pm CT flat deadline
 
 from config import BulenoxConfig
 from binance_feed import BinanceFeed
@@ -242,10 +242,29 @@ class BulenoxBot:
         while True:
             await asyncio.sleep(5)
             now = time.monotonic()
+            current_price = self._feed.last_price
             for pos in list(self._positions.values()):
                 if pos.closed:
                     continue
                 held = now - pos.entry_time
+                # TP check (uses Kraken price as proxy for MBT futures)
+                if (
+                    current_price > 0
+                    and pos.entry_price is not None
+                    and pos.tp_price is not None
+                ):
+                    tp_hit = (
+                        (pos.direction == "UP" and current_price >= pos.tp_price)
+                        or (pos.direction == "DOWN" and current_price <= pos.tp_price)
+                    )
+                    if tp_hit:
+                        logger.info(
+                            f"TP hit: basket_id={pos.basket_id} direction={pos.direction} "
+                            f"price={current_price:.2f} tp={pos.tp_price:.2f}"
+                        )
+                        await self._close_position(pos)
+                        continue
+                # Max hold timeout
                 if held >= self._cfg.max_hold_secs:
                     logger.info(
                         f"Max hold reached ({held:.0f}s): closing position basket_id={pos.basket_id} "
