@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-tests       Skip pytest"
             echo "  --files FILES      Deploy only specific files (space-separated)"
             echo ""
-            echo "Without --deploy: runs checks only (compile, test, checksum diff)"
+            echo "Without --deploy: runs checks only (drift, compile, test, anti-patterns, checksum diff)"
             exit 0
             ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -47,11 +47,53 @@ while [[ $# -gt 0 ]]; do
 done
 
 FAIL=0
+TOTAL_STEPS=7
+
+# ============================================================
+# STEP 0: Config drift check (MEMORY live-config.md vs VPS .env)
+# ============================================================
+echo -e "${CYAN}[1/$TOTAL_STEPS] Config drift check${NC}"
+
+DRIFT_KEYS="ASSET_FILTER SHADOW_ASSETS DRY_RUN SNIPE_DRY_RUN SNIPE_15M_DRY_RUN SNIPE_MAX_SECS_REMAINING SNIPE_MIN_ENTRY_PRICE SNIPE_MAX_ENTRY_PRICE MIN_ENTRY_PRICE MAX_ENTRY_PRICE BASE_BET_PCT MAX_BET MAX_DAILY_LOSS MAX_TRADE_AMOUNT ENABLE_MARKET_MAKER MM_DRY_RUN SNIPE_ASSETS ENABLE_15M_MOMENTUM SNIPE_15M_ENABLED"
+LIVE_CONFIG="$HOME/.claude/projects/-Users-chudinnorukam-Projects-business/memory/live-config.md"
+
+if [[ -n "$DEPLOY_INSTANCE" && -f "$LIVE_CONFIG" ]]; then
+    DRIFT_COUNT=0
+    INSTANCE_ENV="$VPS_INSTANCES/$DEPLOY_INSTANCE/.env"
+    VPS_ENV=$(ssh root@$VPS "cat $INSTANCE_ENV 2>/dev/null" 2>/dev/null || echo "")
+
+    if [[ -n "$VPS_ENV" ]]; then
+        for key in $DRIFT_KEYS; do
+            vps_val=$(echo "$VPS_ENV" | grep -E "^${key}=" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+            mem_val=$(grep -oP "\\*\\*${key}\\*\\*:\\s*\\K[^|*]+" "$LIVE_CONFIG" 2>/dev/null | head -1 | xargs)
+
+            if [[ -n "$vps_val" && -n "$mem_val" && "$vps_val" != "$mem_val" ]]; then
+                echo -e "  ${RED}DRIFT${NC} $key: VPS=${vps_val} MEMORY=${mem_val}"
+                DRIFT_COUNT=$((DRIFT_COUNT + 1))
+            fi
+        done
+
+        if [[ $DRIFT_COUNT -gt 0 ]]; then
+            echo -e "  ${RED}$DRIFT_COUNT config drift(s) detected!${NC} Update live-config.md or fix .env before deploying."
+            echo -e "  ${YELLOW}Continuing with warnings (not a hard block)${NC}"
+        else
+            echo -e "  ${GREEN}PASS${NC} No config drift detected"
+        fi
+    else
+        echo -e "  ${YELLOW}SKIP${NC} Could not read VPS .env for $DEPLOY_INSTANCE"
+    fi
+else
+    if [[ -z "$DEPLOY_INSTANCE" ]]; then
+        echo -e "  ${YELLOW}SKIP${NC} No --deploy flag (drift check runs on deploy only)"
+    else
+        echo -e "  ${YELLOW}SKIP${NC} live-config.md not found"
+    fi
+fi
 
 # ============================================================
 # STEP 1: py_compile all .py files (excluding tests)
 # ============================================================
-echo -e "${CYAN}[1/5] py_compile all source files${NC}"
+echo -e "${CYAN}[2/$TOTAL_STEPS] py_compile all source files${NC}"
 COMPILE_FAIL=0
 for f in "$LOCAL_DIR"/*.py; do
     fname="$(basename "$f")"
@@ -74,9 +116,9 @@ fi
 # STEP 2: Run pytest
 # ============================================================
 if [[ "$SKIP_TESTS" == true ]]; then
-    echo -e "${CYAN}[2/5] pytest ${YELLOW}SKIPPED${NC}"
+    echo -e "${CYAN}[3/$TOTAL_STEPS] pytest ${YELLOW}SKIPPED${NC}"
 else
-    echo -e "${CYAN}[2/5] pytest${NC}"
+    echo -e "${CYAN}[3/$TOTAL_STEPS] pytest${NC}"
     cd "$PROJECT_DIR"
     TEST_OUTPUT=$(python -m pytest polyphemus/test_smoke.py polyphemus/test_modules.py -q 2>&1) || true
     PASSED=$(echo "$TEST_OUTPUT" | grep -oE '[0-9]+ passed' | head -1 || echo "0 passed")
@@ -91,9 +133,71 @@ else
 fi
 
 # ============================================================
-# STEP 3: Checksum diff (local vs VPS)
+# STEP 4: Anti-pattern scan on changed files
 # ============================================================
-echo -e "${CYAN}[3/5] Checksum diff (local vs VPS)${NC}"
+echo -e "${CYAN}[4/$TOTAL_STEPS] Anti-pattern scan${NC}"
+
+# Build list of locally changed .py files (git diff against HEAD)
+CHANGED_PY=$(cd "$PROJECT_DIR" && git diff --name-only HEAD -- 'polyphemus/*.py' 2>/dev/null | grep -v test_ || echo "")
+if [[ -z "$CHANGED_PY" ]]; then
+    # Also check unstaged
+    CHANGED_PY=$(cd "$PROJECT_DIR" && git diff --name-only -- 'polyphemus/*.py' 2>/dev/null | grep -v test_ || echo "")
+fi
+
+PATTERN_HITS=0
+if [[ -n "$CHANGED_PY" ]]; then
+    for pyfile in $CHANGED_PY; do
+        full_path="$PROJECT_DIR/$pyfile"
+        [[ ! -f "$full_path" ]] && continue
+        fname=$(basename "$pyfile")
+
+        # Bug #2: create_order without _and_post (must use create_and_post_order)
+        if grep -n 'create_order(' "$full_path" | grep -v 'create_and_post_order' | grep -v '#' | grep -qv 'def '; then
+            echo -e "  ${RED}HIT${NC} $fname: create_order() without _and_post (Bug #2)"
+            PATTERN_HITS=$((PATTERN_HITS + 1))
+        fi
+
+        # Bug #6: datetime.now() without timezone
+        if grep -n 'datetime\.now()' "$full_path" | grep -qv 'timezone\|utc\|#'; then
+            echo -e "  ${YELLOW}WARN${NC} $fname: datetime.now() without timezone (Bug #6)"
+        fi
+
+        # Bare except:pass (silent failures)
+        if grep -En 'except\s*:' "$full_path" | grep -qv '#'; then
+            echo -e "  ${YELLOW}WARN${NC} $fname: bare except clause (silent failure risk)"
+        fi
+
+        # Bug #46: ensure_sell_allowance before FOK SELL
+        if grep -n 'ensure_sell_allowance' "$full_path" | grep -qv '#'; then
+            echo -e "  ${RED}HIT${NC} $fname: ensure_sell_allowance() call (Bug #46, $150+ loss)"
+            PATTERN_HITS=$((PATTERN_HITS + 1))
+        fi
+
+        # Sentinel return values in data functions
+        if grep -En 'return\s+(0\.0|1\.0)\s*$' "$full_path" | grep -qv '#\|test'; then
+            echo -e "  ${YELLOW}WARN${NC} $fname: sentinel return value 0.0/1.0"
+        fi
+
+        # Ephemeral state without DB seeding (in-memory sets/dicts in __init__)
+        if grep -En 'self\._[a-z_]+\s*=\s*(set\(\)|\{\})' "$full_path" | grep -qv '#'; then
+            echo -e "  ${YELLOW}WARN${NC} $fname: ephemeral state (set()/dict) - verify DB seeding"
+        fi
+    done
+
+    if [[ $PATTERN_HITS -gt 0 ]]; then
+        echo -e "  ${RED}$PATTERN_HITS critical anti-pattern(s)!${NC} Fix before deploying."
+        FAIL=1
+    elif [[ -n "$CHANGED_PY" ]]; then
+        echo -e "  ${GREEN}PASS${NC} No critical anti-patterns in changed files"
+    fi
+else
+    echo -e "  ${YELLOW}SKIP${NC} No changed .py files to scan"
+fi
+
+# ============================================================
+# STEP 5: Checksum diff (local vs VPS)
+# ============================================================
+echo -e "${CYAN}[5/$TOTAL_STEPS] Checksum diff (local vs VPS)${NC}"
 
 # Get list of files to check
 if [[ -n "$SPECIFIC_FILES" ]]; then
@@ -131,11 +235,11 @@ else
 fi
 
 # ============================================================
-# STEP 4: Deploy (if --deploy)
+# STEP 6: Deploy (if --deploy)
 # ============================================================
 if [[ -z "$DEPLOY_INSTANCE" ]]; then
-    echo -e "${CYAN}[4/5] Deploy ${YELLOW}SKIPPED${NC} (no --deploy flag)"
-    echo -e "${CYAN}[5/5] Post-deploy ${YELLOW}SKIPPED${NC}"
+    echo -e "${CYAN}[6/$TOTAL_STEPS] Deploy ${YELLOW}SKIPPED${NC} (no --deploy flag)"
+    echo -e "${CYAN}[7/$TOTAL_STEPS] Post-deploy ${YELLOW}SKIPPED${NC}"
 
     if [[ $FAIL -eq 1 ]]; then
         echo -e "\n${RED}PRE-CHECK FAILED - do not deploy${NC}"
@@ -161,7 +265,7 @@ if [[ $TOTAL_CHANGED -eq 0 ]]; then
     exit 0
 fi
 
-echo -e "${CYAN}[4/5] Deploying to ${DEPLOY_INSTANCE}${NC}"
+echo -e "${CYAN}[6/$TOTAL_STEPS] Deploying to ${DEPLOY_INSTANCE}${NC}"
 
 # 4a: Stop service
 echo -e "  Stopping lagbot@${DEPLOY_INSTANCE}..."
@@ -220,9 +324,9 @@ ssh root@$VPS "systemctl start lagbot@${DEPLOY_INSTANCE}"
 sleep 2
 
 # ============================================================
-# STEP 5: Post-deploy verification
+# STEP 7: Post-deploy verification
 # ============================================================
-echo -e "${CYAN}[5/5] Post-deploy verification${NC}"
+echo -e "${CYAN}[7/$TOTAL_STEPS] Post-deploy verification${NC}"
 
 # Service status
 STATUS=$(ssh root@$VPS "systemctl is-active lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || echo "unknown")
@@ -247,5 +351,5 @@ else
     echo -e "  ${GREEN}No errors in first 10s${NC}"
 fi
 
-echo -e "\n${GREEN}DEPLOY COMPLETE${NC}: $TOTAL_CHANGED file(s) to lagbot@${DEPLOY_INSTANCE}"
+echo -e "\n${GREEN}DEPLOY COMPLETE${NC} [7/$TOTAL_STEPS]: $TOTAL_CHANGED file(s) to lagbot@${DEPLOY_INSTANCE}"
 echo -e "Monitor: ${CYAN}ssh root@$VPS 'journalctl -u lagbot@${DEPLOY_INSTANCE} -f'${NC}"
