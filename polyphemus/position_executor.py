@@ -16,6 +16,7 @@ from .types import (
     ExecutionResult,
     OrderStatus,
     ORDER_POLL_INTERVAL,
+    FAK_POLL_INTERVAL,
     ORDER_POLL_MAX,
     MAKER_POLL_MAX,
     TAKER_POLL_MAX,
@@ -53,6 +54,7 @@ class PositionExecutor:
         self._logger = setup_logger("polyphemus.executor")
         self._fill_optimizer = None  # Set by signal_bot after init
         self._performance_db = None  # Set by signal_bot after init (Kelly sizing)
+        self._tracker = None         # Set by signal_bot (flip escalation)
         self._kelly_cache: dict = {}  # (asset, bucket) -> (wr, n, fetched_at)
 
     async def execute_buy(
@@ -134,6 +136,12 @@ class PositionExecutor:
             else:
                 use_maker = False
 
+        # Oracle flip: FAK entry (cheap tokens, <44s remaining, speed is everything)
+        is_oracle_flip = signal.get('source') == 'oracle_flip' if signal else False
+        if is_oracle_flip:
+            use_fak = True
+            use_maker = False
+
         # Sharp move at 0.90+: taker entry (fee <0.20% at 0.90, near-zero above)
         is_sharp = signal.get('source') == 'sharp_move' if signal else False
         if is_sharp and price > 0.90:
@@ -175,10 +183,14 @@ class PositionExecutor:
                 return placement_result
             order_id = placement_result.order_id
             self._logger.info(f"FAK order accepted: {order_id} | {slug}")
-            # FAK fills instantly — poll once to confirm shares settled
+
+            # FAK fills instantly — fast poll to confirm shares settled
+            _fill_start = time.time()
             fill_result = await self._poll_for_fill(
-                order_id, token_id, price, size, max_polls=3
+                order_id, token_id, price, size, max_polls=3,
+                poll_interval=FAK_POLL_INTERVAL,
             )
+            fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
             if not fill_result.success:
                 self._logger.warning(f"FAK fill not confirmed for {slug} (may be partial)")
                 # Still return the placement — shares may have settled
@@ -257,7 +269,9 @@ class PositionExecutor:
             snipe_polls = max(1, int(secs_left) - 3)  # 3s safety buffer
             poll_max = min(poll_max, snipe_polls)
             self._logger.info(f"Snipe fill timeout: {poll_max}s ({secs_left}s remaining, 3s buffer)")
+        _fill_start = time.time()
         fill_result = await self._poll_for_fill(order_id, token_id, price, size, max_polls=poll_max)
+        fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
 
         # Record maker fill outcome to optimizer (before fallback)
         if self._fill_optimizer and maker_offset_used is not None:
@@ -319,9 +333,11 @@ class PositionExecutor:
                 self._logger.info(
                     f"Taker fallback placed: {order_id} | {slug} @ {taker_price}"
                 )
+                _fill_start = time.time()
                 fill_result = await self._poll_for_fill(
                     order_id, token_id, taker_price, size, max_polls=TAKER_POLL_MAX
                 )
+                fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
                 if not fill_result.success:
                     await self._clob.cancel_order(order_id)
                     self._logger.warning(
@@ -461,6 +477,68 @@ class PositionExecutor:
             )
             return max(0, size)
 
+        # Oracle flip: dedicated max bet with auto-escalation
+        is_oracle_flip = signal.get('source') == 'oracle_flip' if signal else False
+        if is_oracle_flip:
+            max_bet = self._config.oracle_flip_max_bet
+            # Auto-escalation: raise bet after proven track record
+            if (self._tracker
+                    and self._config.oracle_flip_escalation_min_trades > 0):
+                try:
+                    stats = self._tracker.get_source_stats("oracle_flip")
+                    if (stats["total"] >= self._config.oracle_flip_escalation_min_trades
+                            and stats["wr"] >= self._config.oracle_flip_escalation_min_wr):
+                        max_bet = self._config.oracle_flip_escalated_max_bet
+                        self._logger.info(
+                            f"Oracle flip ESCALATED: {stats['total']} trades, "
+                            f"{stats['wr']:.0f}% WR -> max_bet=${max_bet:.0f}"
+                        )
+                except Exception:
+                    pass  # fallback to default max_bet
+            base_spend = min(available_capital, max_bet)
+            if self._config.max_trade_amount > 0:
+                base_spend = min(base_spend, self._config.max_trade_amount)
+            if base_spend < self._config.min_bet:
+                self._logger.warning(f"Oracle flip: insufficient capital ${base_spend:.2f} < min ${self._config.min_bet:.2f}")
+                return 0.0
+            size = base_spend / price
+            multiplier = round((1.0 - price) / price, 1) if price > 0 else 0
+            self._logger.info(
+                f"Oracle flip sizing: ${base_spend:.2f} / "
+                f"{price:.4f} = {size:.0f} shares | "
+                f"multiplier={multiplier}x | potential=${size * (1.0 - price):.2f}"
+            )
+            return max(0, size)
+
+        # Streak contrarian: dedicated sizing, skip all layers
+        is_streak = signal.get('source') == 'streak_contrarian' if signal else False
+        if is_streak:
+            base_spend = available_capital * self._config.streak_contrarian_bet_pct
+            base_spend = min(base_spend, self._config.streak_contrarian_max_bet)
+            if self._config.max_trade_amount > 0:
+                base_spend = min(base_spend, self._config.max_trade_amount)
+            base_spend = max(base_spend, self._config.min_bet)
+            size = base_spend / price
+            self._logger.info(
+                f"Streak contrarian sizing: ${base_spend:.2f} / "
+                f"{price:.4f} = {size:.0f} shares"
+            )
+            return max(0, size)
+
+        # Reversal short: dedicated sizing, skip all layers
+        is_reversal_short = signal.get('source') == 'reversal_short' if signal else False
+        if is_reversal_short:
+            base_spend = min(available_capital, self._config.reversal_short_max_bet)
+            if self._config.max_trade_amount > 0:
+                base_spend = min(base_spend, self._config.max_trade_amount)
+            base_spend = max(base_spend, self._config.min_bet)
+            size = base_spend / price
+            self._logger.info(
+                f"Reversal short sizing: ${base_spend:.2f} / "
+                f"{price:.4f} = {size:.0f} shares"
+            )
+            return max(0, size)
+
         # Near-resolution pair arb: flat sizing with hard $ cap per leg
         is_near_res = signal.get('near_resolution', False) if signal else False
         if is_near_res:
@@ -521,14 +599,29 @@ class PositionExecutor:
                 f"after_asset={base_spend:.2f}"
             )
 
-        # Layer 1c: Liquidation conviction boost (up to 50% extra)
+        # Layer 1c: Liquidation conviction boost
+        # Defensive: up to 1.5x when cascade aligns (existing behavior)
+        # Offensive: up to config multiplier when cascade volume exceeds threshold
         if liq_conviction > 0:
-            liq_boost = 1.0 + (liq_conviction * 0.5)  # max 1.5x
+            liq_vol = signal.get("liq_volume_60s", 0.0) if signal else 0.0
+            if (self._config.liq_cascade_boost_enabled
+                    and liq_vol >= self._config.liq_cascade_boost_volume):
+                # Offensive mode: large cascade aligned with our direction
+                liq_boost = min(
+                    1.0 + (liq_conviction * (self._config.liq_cascade_boost_multiplier - 1.0)),
+                    self._config.liq_cascade_boost_multiplier,
+                )
+                self._logger.info(
+                    f"Layer 1c (liq CASCADE BOOST): conviction={liq_conviction:.2f}, "
+                    f"vol_60s=${liq_vol:,.0f}, boost={liq_boost:.2f}x, after_liq={base_spend * liq_boost:.2f}"
+                )
+            else:
+                liq_boost = 1.0 + (liq_conviction * 0.5)  # max 1.5x (defensive default)
+                self._logger.info(
+                    f"Layer 1c (liq boost): conviction={liq_conviction:.2f}, "
+                    f"boost={liq_boost:.2f}x, after_liq={base_spend * liq_boost:.2f}"
+                )
             base_spend *= liq_boost
-            self._logger.info(
-                f"Layer 1c (liq boost): conviction={liq_conviction:.2f}, "
-                f"boost={liq_boost:.2f}x, after_liq={base_spend:.2f}"
-            )
 
         # Layer 1d: Hour-of-day sizing multiplier (requires 200+ trades to calibrate)
         if self._config.hour_size_weights.strip():
@@ -600,6 +693,38 @@ class PositionExecutor:
                 self._logger.info(
                     f"Layer 1h (up direction): mult={up_mult:.0%}, "
                     f"after_up={base_spend:.2f}"
+                )
+
+        # Layer 1i: Volatility regime sizing (S1)
+        # T0: calm (<0.5% vol) = 44% WR, moderate (0.5-1.0%) = 80% WR, elevated (>1.0%) = mixed
+        if self._config.regime_sizing_enabled and signal:
+            vol_1h = signal.get('volatility_1h')
+            if vol_1h is not None and vol_1h > 0:
+                if vol_1h < self._config.regime_cautious_max_vol:
+                    regime_mult = self._config.regime_cautious_mult
+                    regime_label = "cautious"
+                elif vol_1h < self._config.regime_optimal_max_vol:
+                    regime_mult = 1.0
+                    regime_label = "optimal"
+                else:
+                    regime_mult = self._config.regime_elevated_mult
+                    regime_label = "elevated"
+                if regime_mult != 1.0:
+                    base_spend *= regime_mult
+                    self._logger.info(
+                        f"Layer 1i (vol regime): vol_1h={vol_1h:.4f}, "
+                        f"regime={regime_label}, mult={regime_mult:.0%}, "
+                        f"after_regime={base_spend:.2f}"
+                    )
+
+        # Layer 1j: Sharp move bet multiplier (half-size during initial live phase)
+        if signal and signal.get('source') == 'sharp_move':
+            sm_mult = self._config.sharp_move_bet_multiplier
+            if sm_mult != 1.0:
+                base_spend *= sm_mult
+                self._logger.info(
+                    f"Layer 1j (sharp_move): mult={sm_mult:.2f}x, "
+                    f"after_sm={base_spend:.2f}"
                 )
 
         # Layer 2: Tuner multiplier
@@ -697,6 +822,26 @@ class PositionExecutor:
         )
         return kelly_f
 
+    async def _async_confirm_fak(
+        self, order_id: str, token_id: str, price: float, size: float, slug: str,
+    ) -> None:
+        """Background FAK fill confirmation for oracle flips (fire-and-forget)."""
+        try:
+            result = await self._poll_for_fill(
+                order_id, token_id, price, size, max_polls=3,
+                poll_interval=FAK_POLL_INTERVAL,
+            )
+            if result.success:
+                self._logger.info(
+                    f"FAK async confirm OK: {slug} | {result.fill_size:.1f} shares"
+                )
+            else:
+                self._logger.warning(
+                    f"FAK async confirm: {slug} not fully confirmed (may be partial)"
+                )
+        except Exception as e:
+            self._logger.warning(f"FAK async confirm error for {slug}: {e}")
+
     async def _poll_for_fill(
         self,
         order_id: str,
@@ -704,6 +849,7 @@ class PositionExecutor:
         price: float,
         size: float,
         max_polls: int = TAKER_POLL_MAX,
+        poll_interval: float = ORDER_POLL_INTERVAL,
     ) -> ExecutionResult:
         """Poll for order fill status, capturing partial fills on timeout.
 
@@ -713,13 +859,14 @@ class PositionExecutor:
             price: Entry price
             size: Entry size
             max_polls: Maximum number of polls (default TAKER_POLL_MAX=10)
+            poll_interval: Seconds between polls (default ORDER_POLL_INTERVAL=1s)
 
         Returns:
             ExecutionResult with success or timeout reason.
             On timeout, checks size_matched to capture partial fills.
         """
         for poll_num in range(1, max_polls + 1):
-            await asyncio.sleep(ORDER_POLL_INTERVAL)
+            await asyncio.sleep(poll_interval)
 
             details = await self._clob.get_order_details(order_id)
             if details is None:
@@ -774,7 +921,7 @@ class PositionExecutor:
                 )
 
         # Timeout — check for partial fill before giving up
-        total_wait = max_polls * ORDER_POLL_INTERVAL
+        total_wait = max_polls * poll_interval
         details = await self._clob.get_order_details(order_id)
         size_matched = details.get("size_matched", 0) if details else 0
 

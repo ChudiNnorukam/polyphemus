@@ -56,6 +56,10 @@ SAFE_CONFIG_KEYS = {
     "SIGNATURE_TYPE", "MAX_DAILY_LOSS", "MAX_CONSECUTIVE_LOSSES",
     "ENABLE_WINDOW_DELTA", "DUAL_WINDOW_ASSETS", "MARKET_WINDOW_15M_ASSETS",
     "DIRECTION_FILTER", "ASSET_MULTIPLIER_XRP",
+    "ORACLE_ENABLED", "ORACLE_FLIP_ENABLED", "ORACLE_FLIP_DRY_RUN",
+    "ORACLE_STALE_THRESHOLD_SECS", "ORACLE_ALCHEMY_API_KEY",
+    "MM_DRY_RUN", "MM_ENABLED",
+    "SNIPE_ASSETS", "SHADOW_ASSETS", "SNIPE_15M_DRY_RUN",
 }
 
 # ---------------------------------------------------------------------------
@@ -568,6 +572,181 @@ async def inference(token: str = Depends(verify_token)):
             "pending_signals": pending_n,
         }
     return results
+
+
+@app.get("/api/pipeline")
+async def pipeline(token: str = Depends(verify_token)):
+    """Pipeline feed status for all bots (Chainlink, Binance, Guard)."""
+    result = {}
+    for bot_name, bot_cfg in BOTS.items():
+        health = get_latest_health(bot_cfg["health_dir"])
+        svc = get_service_status(bot_cfg["service"])
+        pipeline_data = health.get("pipeline", {})
+
+        # Compute health file freshness
+        health_age = None
+        if health.get("timestamp"):
+            try:
+                ht = datetime.fromisoformat(health["timestamp"].rstrip("Z")).replace(tzinfo=timezone.utc)
+                health_age = round((datetime.now(timezone.utc) - ht).total_seconds(), 1)
+            except Exception:
+                pass
+
+        result[bot_name] = {
+            "service": svc,
+            "health_age_secs": health_age,
+            "chainlink": pipeline_data.get("chainlink", {}),
+            "binance": pipeline_data.get("binance", {}),
+            "guard": pipeline_data.get("guard", {}),
+            "uptime_hours": health.get("uptime_hours"),
+            "balance": health.get("balance"),
+        }
+    return {"bots": result, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/api/strategy-pnl")
+async def strategy_pnl(
+    bot: Optional[str] = Query(None),
+    days: int = Query(30, le=90),
+    token: str = Depends(verify_token),
+):
+    """Per-strategy P&L breakdown from trades metadata."""
+    cutoff = time.time() - (days * 86400)
+    targets = {bot: BOTS[bot]} if bot and bot in BOTS else BOTS
+
+    # Aggregate by strategy source
+    strategy_totals = {}  # source -> {trades, wins, pnl}
+    daily_by_strategy = {}  # (date, source) -> {pnl, trades}
+
+    for bot_name, bot_cfg in targets.items():
+        db_path = bot_cfg["db"]
+        pnl_col = "pnl" if has_column(db_path, "trades", "pnl") else "profit_loss"
+        has_meta = has_column(db_path, "trades", "metadata")
+
+        if has_meta:
+            rows = await query_db(db_path, f"""
+                SELECT exit_time, {pnl_col} as pnl, strategy, metadata
+                FROM trades
+                WHERE exit_time IS NOT NULL AND exit_time > ?
+                ORDER BY exit_time ASC
+            """, (cutoff,))
+        else:
+            rows = await query_db(db_path, f"""
+                SELECT exit_time, {pnl_col} as pnl, strategy, NULL as metadata
+                FROM trades
+                WHERE exit_time IS NOT NULL AND exit_time > ?
+                ORDER BY exit_time ASC
+            """, (cutoff,))
+
+        for row in rows:
+            # Extract source from metadata JSON, fall back to strategy column
+            source = row.get("strategy") or "unknown"
+            if row.get("metadata"):
+                try:
+                    meta = json.loads(row["metadata"])
+                    source = meta.get("source", source)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            pnl_val = row["pnl"] or 0
+
+            if source not in strategy_totals:
+                strategy_totals[source] = {"trades": 0, "wins": 0, "pnl": 0}
+            strategy_totals[source]["trades"] += 1
+            strategy_totals[source]["pnl"] += pnl_val
+            if pnl_val > 0:
+                strategy_totals[source]["wins"] += 1
+
+            # Daily breakdown for trend charts
+            dt = datetime.fromtimestamp(row["exit_time"], tz=timezone.utc)
+            date_str = dt.strftime("%Y-%m-%d")
+            key = (date_str, source)
+            if key not in daily_by_strategy:
+                daily_by_strategy[key] = {"date": date_str, "source": source, "pnl": 0, "trades": 0}
+            daily_by_strategy[key]["pnl"] += pnl_val
+            daily_by_strategy[key]["trades"] += 1
+
+    strategies = []
+    for source, totals in sorted(strategy_totals.items(), key=lambda x: x[1]["pnl"], reverse=True):
+        n = totals["trades"]
+        strategies.append({
+            "source": source,
+            "trades": n,
+            "wins": totals["wins"],
+            "win_rate": round(totals["wins"] / n * 100, 1) if n else 0,
+            "total_pnl": round(totals["pnl"], 2),
+            "avg_pnl": round(totals["pnl"] / n, 2) if n else 0,
+            "confidence": confidence_label(n),
+        })
+
+    # Build daily series per strategy
+    daily_series = sorted(daily_by_strategy.values(), key=lambda x: (x["date"], x["source"]))
+    for d in daily_series:
+        d["pnl"] = round(d["pnl"], 2)
+
+    return {"strategies": strategies, "daily": daily_series}
+
+
+@app.get("/api/oracle")
+async def oracle_stats(
+    bot: Optional[str] = Query(None),
+    token: str = Depends(verify_token),
+):
+    """Oracle flip statistics from signals.db."""
+    targets = {bot: BOTS[bot]} if bot and bot in BOTS else BOTS
+    all_flips = []
+    totals = {"attempted": 0, "passed": 0, "wins": 0, "total_pnl": 0}
+
+    for bot_name, bot_cfg in targets.items():
+        sig_db = bot_cfg.get("signals_db", "")
+        if not Path(sig_db).exists():
+            continue
+
+        # Check if source column exists
+        if not has_column(sig_db, "signals", "source"):
+            continue
+
+        # Oracle flip summary
+        summary = await query_signals_db(sig_db, """
+            SELECT
+                COUNT(*) as attempted,
+                SUM(CASE WHEN guard_passed = 1 THEN 1 ELSE 0 END) as passed,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl IS NOT NULL THEN 1 ELSE 0 END) as resolved,
+                COALESCE(SUM(pnl), 0) as total_pnl
+            FROM signals
+            WHERE source = 'oracle_flip'
+        """)
+        s = summary[0] if summary else {}
+        totals["attempted"] += s.get("attempted", 0) or 0
+        totals["passed"] += s.get("passed", 0) or 0
+        totals["wins"] += s.get("wins", 0) or 0
+        totals["total_pnl"] += s.get("total_pnl", 0) or 0
+
+        # Recent flips
+        recent = await query_signals_db(sig_db, """
+            SELECT timestamp, asset, direction, midpoint, entry_price,
+                   pnl, outcome, time_remaining_secs
+            FROM signals
+            WHERE source = 'oracle_flip'
+            ORDER BY epoch DESC LIMIT 10
+        """)
+        for r in recent:
+            r["bot"] = bot_name
+        all_flips.extend(recent)
+
+    resolved = totals["passed"]
+    win_rate = round(totals["wins"] / resolved * 100, 1) if resolved else 0
+
+    return {
+        "attempted": totals["attempted"],
+        "passed": totals["passed"],
+        "wins": totals["wins"],
+        "win_rate": win_rate,
+        "total_pnl": round(totals["total_pnl"], 2),
+        "confidence": confidence_label(totals["passed"]),
+        "recent": sorted(all_flips, key=lambda x: x.get("timestamp", ""), reverse=True)[:10],
+    }
 
 
 @app.post("/api/config")

@@ -59,6 +59,7 @@ class SignalGuard:
             reasons list contains human-readable rejection reasons.
         """
         reasons: List[str] = []
+        context: dict = {}
 
         # Increment received counter
         self.signals_received += 1
@@ -70,11 +71,13 @@ class SignalGuard:
         is_weather = signal.get('source') == 'noaa_weather'
         is_snipe = signal.get('source') == 'resolution_snipe'
         is_sharp = signal.get('source') == 'sharp_move'
+        is_oracle_flip = signal.get('source') == 'oracle_flip'
+        is_streak_contrarian = signal.get('source') == 'streak_contrarian'
 
         # ====================================================================
         # FILTER 1: Direction Check (only BUY signals from DB)
         # ====================================================================
-        if not is_momentum and not is_window_delta and not is_snipe:
+        if not is_momentum and not is_window_delta and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
             direction = signal.get('direction', '').upper()
             if direction != 'BUY':
                 reasons.append('not_buy_signal')
@@ -150,6 +153,8 @@ class SignalGuard:
         elif is_snipe:
             if price < self._config.snipe_min_entry_price or price > self._config.snipe_max_entry_price:
                 reasons.append('price_out_of_range')
+        elif is_oracle_flip or is_streak_contrarian:
+            pass  # oracle_flip/streak_contrarian use their own price gates
         elif is_pair_arb:
             pass  # pair_arb uses pair_cost filter in scan loop, not entry price range
         elif is_weather:
@@ -162,11 +167,18 @@ class SignalGuard:
         elif price < min_price or price > max_price:
             reasons.append('price_out_of_range')
 
+        # Decision trace context: price range diagnostics
+        if price > 0:
+            context['price'] = round(price, 4)
+            context['min_price'] = round(min_price, 2)
+            context['max_price'] = round(max_price, 2)
+
         # Trap zone filter: reject midpoints in the 0.60-0.80 range
         # These entries have 33% WR vs 75-100% outside the zone
+        # Skip for oracle_flip/streak_contrarian — they intentionally target 0.45-0.55
         trap_lo = self._config.entry_trap_low
         trap_hi = self._config.entry_trap_high
-        if trap_lo > 0 and trap_hi > 0 and trap_lo < price < trap_hi:
+        if trap_lo > 0 and trap_hi > 0 and trap_lo < price < trap_hi and not is_oracle_flip and not is_streak_contrarian:
             reasons.append('entry_trap_zone')
 
         # ====================================================================
@@ -226,6 +238,134 @@ class SignalGuard:
                       and self._config.eth_block_on_whipsaw_caution
                       and asset == 'ETH'):
                     reasons.append('eth_whipsaw_caution')
+                # Decision trace context: whipsaw diagnostics
+                context['directionality'] = round(directionality, 3)
+                context['vol_1h'] = round(vol_1h, 4)
+                context['trend_1h'] = round(trend_1h, 4)
+
+        # ====================================================================
+        # FILTER 6c: Flat Regime Block
+        # When volatility is too low, directionality ratio is noisy/meaningless.
+        # Data: flat regime = -$2.83/signal (worst per-signal P&L on both instances)
+        # ====================================================================
+        if self._config.flat_regime_block and not is_weather:
+            vol_1h = signal.get('volatility_1h')
+            if vol_1h is not None and vol_1h < self._config.flat_regime_max_vol:
+                reasons.append('flat_regime')
+                context['flat_vol_1h'] = round(vol_1h, 5)
+
+        # ====================================================================
+        # FILTER 6d: Liquidation Cascade Block
+        # Block entries when large cascade aligns AGAINST our signal direction.
+        # Massive long liquidations on an UP signal = crowd already flushed out.
+        # ====================================================================
+        if self._config.liq_cascade_block_enabled and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+            liq_vol = signal.get('liq_volume_60s', 0.0)
+            liq_bias = signal.get('liq_bias', '')
+            if liq_vol >= self._config.liq_cascade_min_volume:
+                outcome = signal.get('outcome', '')
+                # "long" bias = longs liquidated = bearish pressure = block UP
+                if (liq_bias == 'long' and outcome == 'Up') or (liq_bias == 'short' and outcome == 'Down'):
+                    reasons.append('liq_cascade_against')
+                context['liq_volume_60s'] = round(liq_vol, 0)
+                context['liq_bias'] = liq_bias
+
+        # ====================================================================
+        # FILTER 6f: Early-Epoch Entry Filter (S2)
+        # Momentum entries are only net-positive in the first ~60s of epoch
+        # (T0: 4-5m remaining = +$70.92, later buckets all negative)
+        # ====================================================================
+        if is_momentum and self._config.momentum_max_epoch_elapsed_secs > 0:
+            slug_check_epoch = signal.get('slug', '')
+            parts_epoch = slug_check_epoch.rsplit('-', 1)
+            if len(parts_epoch) == 2 and parts_epoch[1].isdigit():
+                market_epoch_s2 = int(parts_epoch[1])
+                elapsed_s2 = time.time() - market_epoch_s2
+                if elapsed_s2 > self._config.momentum_max_epoch_elapsed_secs:
+                    reasons.append('epoch_too_late')
+                    context['epoch_elapsed_secs'] = round(elapsed_s2)
+
+        # ====================================================================
+        # FILTER 6e: Extreme Funding Rate Gate
+        # Block entries when funding rate is overheated (crowded positioning).
+        # Extreme positive funding = overleveraged longs = higher reversal probability.
+        # ====================================================================
+        if self._config.funding_extreme_block_enabled and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+            fr = signal.get('funding_rate', 0.0)
+            outcome = signal.get('outcome', '')
+            # Positive funding = longs pay shorts = crowded long; block UP entries
+            # Negative funding = shorts pay longs = crowded short; block DOWN entries
+            if abs(fr) > self._config.funding_extreme_threshold:
+                if (fr > 0 and outcome == 'Up') or (fr < 0 and outcome == 'Down'):
+                    reasons.append('funding_extreme')
+                context['funding_rate'] = round(fr, 6)
+
+        # ====================================================================
+        # FILTER 7: Taker CVD Confirmation
+        # Block momentum when taker buy/sell delta disagrees with direction.
+        # A price move UP with net taker selling = thin liquidity artifact, not real demand.
+        # ====================================================================
+        if self._config.cvd_confirmation_enabled and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+            taker_delta = signal.get('taker_delta')
+            if taker_delta is not None:
+                outcome = signal.get('outcome', '')
+                cvd_agrees = (
+                    (outcome == 'Up' and taker_delta > 0) or
+                    (outcome == 'Down' and taker_delta < 0)
+                )
+                context['taker_delta'] = round(taker_delta, 4)
+                context['cvd_agrees'] = cvd_agrees
+                if not cvd_agrees:
+                    if self._config.cvd_confirmation_dry_run:
+                        context['cvd_blocked_dry_run'] = True
+                    else:
+                        reasons.append('cvd_disagrees')
+
+        # ====================================================================
+        # FILTER 7b: VPIN Adverse Selection Filter
+        # High VPIN = informed traders dominating flow. If their direction
+        # opposes our signal, we're likely getting picked off (adverse selection).
+        # ====================================================================
+        if self._config.vpin_block_enabled and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+            vpin = signal.get('vpin_5m')
+            if vpin is not None and vpin >= self._config.vpin_block_threshold:
+                # VPIN is high - check if taker flow opposes our direction
+                taker_delta_vpin = signal.get('taker_delta')
+                outcome_vpin = signal.get('outcome', '')
+                if taker_delta_vpin is not None:
+                    flow_opposes = (
+                        (outcome_vpin == 'Up' and taker_delta_vpin < 0) or
+                        (outcome_vpin == 'Down' and taker_delta_vpin > 0)
+                    )
+                    context['vpin_5m'] = round(vpin, 3)
+                    context['vpin_flow_opposes'] = flow_opposes
+                    if flow_opposes:
+                        if self._config.vpin_block_dry_run:
+                            context['vpin_blocked_dry_run'] = True
+                        else:
+                            reasons.append('vpin_adverse_selection')
+
+        # ====================================================================
+        # FILTER 7c: Coinbase Premium Confirmation
+        # Block entries when Coinbase Premium strongly disagrees with direction.
+        # Positive premium = US institutional buying = bullish signal.
+        # Negative premium = US institutional selling = bearish signal.
+        # ====================================================================
+        if self._config.coinbase_premium_block_enabled and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+            cb_premium_bps = signal.get('coinbase_premium_bps')
+            if cb_premium_bps is not None and abs(cb_premium_bps) >= self._config.coinbase_premium_min_bps:
+                outcome_cb = signal.get('outcome', '')
+                premium_opposes = (
+                    (outcome_cb == 'Up' and cb_premium_bps < -self._config.coinbase_premium_min_bps) or
+                    (outcome_cb == 'Down' and cb_premium_bps > self._config.coinbase_premium_min_bps)
+                )
+                context['coinbase_premium_bps'] = round(cb_premium_bps, 1)
+                context['cb_premium_opposes'] = premium_opposes
+                if premium_opposes:
+                    if self._config.coinbase_premium_block_dry_run:
+                        context['cb_premium_blocked_dry_run'] = True
+                    else:
+                        reasons.append('coinbase_premium_opposes')
 
         # ====================================================================
         # VALIDATOR 1: Market Expiry Check (configurable window)
@@ -238,7 +378,7 @@ class SignalGuard:
         from .types import parse_window_from_slug
         window = parse_window_from_slug(slug)
         min_secs = 0
-        if not is_window_delta and not is_weather and not is_15m_momentum and not is_snipe:
+        if not is_window_delta and not is_weather and not is_15m_momentum and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
             # Cap min_secs at 40% of window so 5m markets (300s) aren't blocked
             # 5m: min(360, 120) = 120s → 3min entry window
             # 15m momentum: skipped here — timing validated in FILTER 2b
@@ -298,7 +438,7 @@ class SignalGuard:
         # VALIDATOR 4: Minimum Conviction Check
         # ====================================================================
         usdc_size = signal.get('usdc_size', 0)
-        if not is_momentum and not is_window_delta and not is_weather and not is_snipe:
+        if not is_momentum and not is_window_delta and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
             if usdc_size < self._config.min_db_signal_size:
                 reasons.append('low_conviction')
 
@@ -330,7 +470,7 @@ class SignalGuard:
                 )
                 self.rejection_reasons['near_miss'] = self.rejection_reasons.get('near_miss', 0) + 1
 
-        return FilterResult(passed=passed, reasons=reasons)
+        return FilterResult(passed=passed, reasons=reasons, context=context)
 
     def get_metrics(self) -> dict:
         """Return metrics snapshot.

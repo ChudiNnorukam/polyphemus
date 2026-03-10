@@ -127,8 +127,8 @@ else
     if [[ -z "$FAILED" ]]; then
         echo -e "  ${GREEN}PASS${NC} $PASSED"
     else
-        echo -e "  ${YELLOW}WARN${NC} $PASSED, $FAILED (check if pre-existing)"
-        # Don't set FAIL=1 for known pre-existing failures
+        echo -e "  ${RED}FAIL${NC} $PASSED, $FAILED"
+        FAIL=1
     fi
 fi
 
@@ -267,10 +267,41 @@ fi
 
 echo -e "${CYAN}[6/$TOTAL_STEPS] Deploying to ${DEPLOY_INSTANCE}${NC}"
 
-# 4a: Stop service
-echo -e "  Stopping lagbot@${DEPLOY_INSTANCE}..."
-ssh root@$VPS "systemctl stop lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || true
-sleep 1
+# 4a: Graceful stop (drain open positions before killing)
+OPEN_POS=$(ssh root@$VPS "sqlite3 $VPS_INSTANCES/${DEPLOY_INSTANCE}/data/performance.db 'SELECT COUNT(*) FROM trades WHERE exit_time IS NULL' 2>/dev/null" 2>/dev/null || echo "0")
+OPEN_POS=$(echo "$OPEN_POS" | tr -d '[:space:]')
+
+if [[ "$OPEN_POS" -gt 0 ]] 2>/dev/null; then
+    echo -e "  ${YELLOW}$OPEN_POS open position(s) detected — sending SIGTERM for graceful drain${NC}"
+    ssh root@$VPS "systemctl kill -s SIGTERM lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || true
+    # Poll until positions drain or 330s timeout
+    DRAIN_WAIT=0
+    DRAIN_MAX=330
+    while [[ $DRAIN_WAIT -lt $DRAIN_MAX ]]; do
+        sleep 10
+        DRAIN_WAIT=$((DRAIN_WAIT + 10))
+        # Check if process already exited
+        SVC_STATE=$(ssh root@$VPS "systemctl is-active lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || echo "inactive")
+        if [[ "$SVC_STATE" != "active" ]]; then
+            echo -e "  ${GREEN}Service exited after ${DRAIN_WAIT}s (positions drained)${NC}"
+            break
+        fi
+        REMAINING=$(ssh root@$VPS "sqlite3 $VPS_INSTANCES/${DEPLOY_INSTANCE}/data/performance.db 'SELECT COUNT(*) FROM trades WHERE exit_time IS NULL' 2>/dev/null" 2>/dev/null || echo "?")
+        REMAINING=$(echo "$REMAINING" | tr -d '[:space:]')
+        echo -e "  Draining: ${REMAINING} positions open, ${DRAIN_WAIT}s/${DRAIN_MAX}s"
+    done
+    # If still running after timeout, force stop
+    SVC_STATE=$(ssh root@$VPS "systemctl is-active lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || echo "inactive")
+    if [[ "$SVC_STATE" == "active" ]]; then
+        echo -e "  ${RED}Drain timeout — force stopping${NC}"
+        ssh root@$VPS "systemctl stop lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || true
+        sleep 1
+    fi
+else
+    echo -e "  ${GREEN}0 open positions — stopping immediately${NC}"
+    ssh root@$VPS "systemctl stop lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || true
+    sleep 1
+fi
 
 # 4b: scp changed files
 echo -e "  Uploading $TOTAL_CHANGED file(s)..."

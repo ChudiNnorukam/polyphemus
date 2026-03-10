@@ -46,6 +46,8 @@ class ExitManager:
         self._exit_failures: Dict[str, Tuple[int, float]] = {}
         # Optional momentum feed for reversal exit (set via set_momentum_feed)
         self._momentum_feed = None
+        # Optional Chainlink oracle feed for oracle-based reversal (set via set_chainlink_feed)
+        self._chainlink = None
 
     def check_all(self, current_time: datetime) -> list[ExitSignal]:
         """
@@ -118,26 +120,36 @@ class ExitManager:
         if pos.metadata and pos.metadata.get("is_weather"):
             return self._evaluate_weather(pos, now)
 
+        # === Hold-to-resolution positions: oracle flips and snipes ===
+        # These enter near market end with cheap tokens ($0.01-$0.25) that
+        # resolve to $1 if correct. ONLY exit via market_resolved.
+        # stop_loss/profit_target/max_hold would all misfire on cheap tokens.
+        source = (pos.metadata or {}).get("source", "")
+        hold_to_resolution = source in (
+            "oracle_flip", "resolution_snipe", "resolution_snipe_15m",
+            "reversal_short",
+        )
+
         # === TIME CHECK #1: max_hold (TIME, independent of price) ===
-        if self._check_max_hold(pos, now):
+        if not hold_to_resolution and self._check_max_hold(pos, now):
             return ExitSignal(
                 token_id=pos.token_id,
                 reason=ExitReason.MAX_HOLD.value,
                 exit_price=pos.current_price or pos.entry_price,
             )
 
-        # === CHECK 1b: 5-min market past end → market_resolved (skip SELL) ===
-        # For 5-min markets, the orderbook is REMOVED after resolution.
+        # === CHECK 1b: market past end → market_resolved (skip SELL) ===
+        # After resolution, the orderbook is REMOVED.
         # Attempting a SELL on a resolved market = "orderbook does not exist" error
         # → records exit_price=$0.00 → catastrophic P&L. (Bug #35)
         # Instead, treat as market_resolved: skip SELL, let redeemer handle.
         from .types import parse_window_from_slug
         window_secs = parse_window_from_slug(pos.slug)
-        if window_secs <= 300 and pos.market_end_time:
+        if pos.market_end_time:
             secs_past_end = (now - pos.market_end_time).total_seconds()
             if secs_past_end > 30:
                 self._logger.info(
-                    f"5-min market ended {secs_past_end:.0f}s ago → market_resolved | "
+                    f"Market ended {secs_past_end:.0f}s ago → market_resolved | "
                     f"slug={pos.slug} (skipping SELL, orderbook likely gone)"
                 )
                 return ExitSignal(
@@ -162,42 +174,204 @@ class ExitManager:
                 exit_price=None,  # Redeemer handles, no SELL needed
             )
 
-        # === CHECK #3b: momentum reversal exit ===
-        # If Binance momentum has reversed since entry, exit early rather than
-        # riding to a loss. Only fires within momentum_reversal_window_secs of entry.
-        # Default off (MOMENTUM_REVERSAL_EXIT=false). No-op if momentum feed not wired.
+        # === CHECK #3b: direction reversal exit ===
+        # Detects underlying asset (Binance) reversing against entry direction.
+        # NOT gated by hold_to_resolution: that flag blocks price-level exits
+        # (stop_loss/profit_target) which misfire on binary tokens. This check
+        # is direction-based -- if Binance reversed, selling at $0.50 is better
+        # than resolution at $0.005.
+        # Priority: (A) Binance entry-relative (~100ms), (B) Chainlink oracle (27s),
+        #           (C) Binance rolling pct (fallback)
+        # Default off (MOMENTUM_REVERSAL_EXIT=false).
+        # Reversal exit is direction-based (not price-level), so snipes can use it
+        # (selling at $0.50 beats resolving to $0.00). But oracle_flip/reversal_short
+        # enter at cheap prices where mid-price sells destroy EV - they hold to resolution.
+        cheap_hold = source in ("oracle_flip", "reversal_short")
         if (self._config.momentum_reversal_exit
-                and self._momentum_feed
+                and not cheap_hold
                 and pos.metadata
-                and pos.metadata.get("entry_momentum_ts")):
-            ts = pos.metadata["entry_momentum_ts"]
-            secs_since = time.time() - ts
-            if 0 < secs_since < self._config.momentum_reversal_window_secs:
-                asset = pos.slug.split("-")[0].upper()
-                current_pct = self._momentum_feed.get_current_momentum_pct(asset)
-                if current_pct is not None:
-                    entry_dir = pos.metadata.get("entry_momentum_direction", "")
+                and pos.metadata.get("entry_momentum_direction")):
+            entry_dir = pos.metadata["entry_momentum_direction"]
+            reversed_ = False
+            source_used = "none"
+            asset = pos.slug.split("-")[0].upper()
+            window = 300 if '5m' in pos.slug else 900
+            pos_age = (time.time() - pos.entry_time.timestamp()) if pos.entry_time else 0
+
+            # Path A: Binance entry-relative reversal (~100ms detection)
+            # Compares current Binance price to price at signal time
+            entry_binance = pos.metadata.get("entry_binance_price", 0.0)
+            if (entry_binance > 0
+                    and self._momentum_feed
+                    and pos_age >= self._config.binance_reversal_min_hold_secs):
+                current_binance = self._momentum_feed.get_latest_price(asset)
+                if current_binance and current_binance > 0:
+                    change_pct = (current_binance - entry_binance) / entry_binance
                     threshold = self._config.momentum_reversal_pct
+                    source_used = "binance"
                     reversed_ = (
-                        entry_dir == "up" and current_pct < -threshold
-                        or entry_dir == "down" and current_pct > threshold
+                        (entry_dir == "up" and change_pct < -threshold)
+                        or (entry_dir == "down" and change_pct > threshold)
                     )
-                    if reversed_:
+
+            # Path B: Chainlink oracle (backup, 27s heartbeat)
+            if (source_used == "none"
+                    and self._config.oracle_reversal_exit
+                    and self._chainlink
+                    and self._chainlink.is_healthy(asset)
+                    and (not self._config.oracle_exit_5m_only or window <= 300)):
+                secs_remaining = (pos.market_end_time.timestamp() - time.time()) if pos.market_end_time else 999
+
+                # Use wider ceiling for momentum entries (>120s before market end)
+                effective_ceiling = self._config.oracle_exit_secs_remaining
+                if pos.market_end_time and pos.entry_time:
+                    time_at_entry = pos.market_end_time.timestamp() - pos.entry_time.timestamp()
+                    if time_at_entry > 120:
+                        effective_ceiling = self._config.oracle_exit_secs_remaining_momentum
+
+                if (pos_age >= self._config.oracle_exit_min_hold_secs
+                        and secs_remaining <= effective_ceiling):
+                    parts = pos.slug.rsplit('-', 1)
+                    if len(parts) == 2 and parts[1].isdigit():
+                        epoch = int(parts[1])
+                        oracle_verdict = self._chainlink.is_above_window_open(
+                            epoch, window, asset
+                        )
+                        if oracle_verdict is not None:
+                            source_used = "chainlink"
+                            reversed_ = (
+                                (entry_dir == "up" and not oracle_verdict)
+                                or (entry_dir == "down" and oracle_verdict)
+                            )
+
+            # Path C: Binance rolling pct (fallback for when A and B miss)
+            if source_used == "none" and self._momentum_feed:
+                ts = pos.metadata.get("entry_momentum_ts")
+                if ts:
+                    secs_since = time.time() - ts
+                    if 0 < secs_since < self._config.momentum_reversal_window_secs:
+                        current_pct = self._momentum_feed.get_current_momentum_pct(asset)
+                        if current_pct is not None:
+                            source_used = "binance_rolling"
+                            threshold = self._config.momentum_reversal_pct
+                            reversed_ = (
+                                (entry_dir == "up" and current_pct < -threshold)
+                                or (entry_dir == "down" and current_pct > threshold)
+                            )
+
+            if reversed_:
+                reason = "oracle_reversal" if source_used == "chainlink" else "binance_reversal"
+                extra_info = ""
+                if source_used == "chainlink" and self._chainlink:
+                    cp = self._chainlink.get_current_price(asset)
+                    extra_info = f" | oracle_price={cp:,.2f}" if cp else ""
+                elif source_used == "binance" and entry_binance > 0:
+                    current_b = self._momentum_feed.get_latest_price(asset) if self._momentum_feed else 0
+                    change = ((current_b - entry_binance) / entry_binance * 100) if current_b and entry_binance else 0
+                    extra_info = f" | binance_entry={entry_binance:,.2f} | binance_now={current_b:,.2f} | change={change:+.2f}%"
+
+                if self._config.momentum_reversal_dry_run:
+                    self._logger.info(
+                        f"[DRY] {reason} WOULD fire | token={pos.token_id[:8]} | "
+                        f"entry_dir={entry_dir} | source={source_used}{extra_info} | "
+                        f"entry_price={pos.entry_price:.4f} | "
+                        f"current_price={pos.current_price:.4f}"
+                    )
+                else:
+                    self._logger.info(
+                        f"{reason} triggered | token_id={pos.token_id} | "
+                        f"entry_dir={entry_dir} | source={source_used}{extra_info}"
+                    )
+                    return ExitSignal(
+                        token_id=pos.token_id,
+                        reason=reason,
+                        exit_price=pos.current_price or pos.entry_price,
+                    )
+
+        # === CHECK #3b2: trailing stop (lock in gains from peak) ===
+        # Only fires after position gained trailing_stop_min_gain_pct from entry,
+        # then dropped trailing_stop_pct from peak. Skips hold_to_resolution.
+        if (self._config.trailing_stop_enabled
+                and not hold_to_resolution
+                and pos.current_price > 0
+                and pos.peak_price > 0
+                and pos.entry_time
+                and (datetime.now(timezone.utc) - pos.entry_time).total_seconds() >= 15):
+            min_peak = pos.entry_price * (1 + self._config.trailing_stop_min_gain_pct)
+            if pos.peak_price >= min_peak:
+                trail_stop = pos.peak_price * (1 - self._config.trailing_stop_pct)
+                if pos.current_price <= trail_stop:
+                    if self._config.trailing_stop_dry_run:
                         self._logger.info(
-                            f"momentum_reversal triggered | token_id={pos.token_id} | "
-                            f"entry_dir={entry_dir} | current_pct={current_pct:+.3%} | "
-                            f"threshold={threshold:.3%}"
+                            f"[DRY] trailing_stop WOULD fire | token={pos.token_id[:8]} | "
+                            f"entry={pos.entry_price:.4f} | peak={pos.peak_price:.4f} | "
+                            f"current={pos.current_price:.4f} | trail_stop={trail_stop:.4f}"
+                        )
+                        return None  # block lower-priority exits when trailing stop would fire
+                    else:
+                        self._logger.info(
+                            f"trailing_stop triggered | token_id={pos.token_id} | "
+                            f"entry={pos.entry_price:.4f} | peak={pos.peak_price:.4f} | "
+                            f"current={pos.current_price:.4f} | trail_stop={trail_stop:.4f}"
                         )
                         return ExitSignal(
                             token_id=pos.token_id,
-                            reason="momentum_reversal",
-                            exit_price=pos.current_price or pos.entry_price,
+                            reason="trailing_stop",
+                            exit_price=pos.current_price,
                         )
 
-        # === HOLD-TO-RESOLUTION: skip stop_loss and profit_target on 5m markets ===
-        if self._config.hold_to_resolution and window_secs <= 300:
-            # Let 5m positions ride to resolution ($0 or $1.00)
-            # Only exit via market_resolved, max_hold, or time_exit above
+        # === CHECK #3c: mid-price stop for momentum positions ===
+        if (self._config.mid_price_stop_enabled
+                and not hold_to_resolution
+                and pos.current_price > 0
+                and pos.entry_time
+                and (datetime.now(timezone.utc) - pos.entry_time).total_seconds() >= 15):
+            stop_price = pos.entry_price * (1 - self._config.mid_price_stop_pct)
+            if pos.current_price <= stop_price:
+                self._logger.info(
+                    f"mid_price_stop triggered | token_id={pos.token_id} | "
+                    f"entry={pos.entry_price:.4f} | current={pos.current_price:.4f} | "
+                    f"stop_price={stop_price:.4f}"
+                )
+                return ExitSignal(
+                    token_id=pos.token_id,
+                    reason=ExitReason.MID_PRICE_STOP.value,
+                    exit_price=pos.current_price,
+                )
+
+        # === CHECK #3d: pre-resolution exit ===
+        # Last resort: dump position N seconds before market ends to avoid $0.005 resolution.
+        # For momentum: always fires. For snipe/oracle_flip: only if position is losing.
+        snipe_losing = (
+            hold_to_resolution
+            and source in ("resolution_snipe", "resolution_snipe_15m")
+            and pos.current_price > 0
+            and pos.current_price < pos.entry_price
+        )
+        if (self._config.pre_resolution_exit_secs > 0
+                and (not hold_to_resolution or snipe_losing)
+                and pos.market_end_time
+                and pos.current_price > 0):
+            secs_remaining = (pos.market_end_time.timestamp() - time.time())
+            if 0 < secs_remaining <= self._config.pre_resolution_exit_secs:
+                self._logger.info(
+                    f"pre_resolution_exit | token_id={pos.token_id} | "
+                    f"slug={pos.slug} | secs_remaining={secs_remaining:.0f} | "
+                    f"current_price={pos.current_price:.4f}"
+                )
+                return ExitSignal(
+                    token_id=pos.token_id,
+                    reason=ExitReason.PRE_RESOLUTION_EXIT.value,
+                    exit_price=pos.current_price,
+                )
+
+        # === HOLD-TO-RESOLUTION: skip stop_loss and profit_target ===
+        # Oracle flips/snipes always hold. Regular 5m positions hold if config says so.
+        skip_price_exits = hold_to_resolution or (
+            self._config.hold_to_resolution and window_secs <= 300
+        )
+        if skip_price_exits:
+            # Only exit via market_resolved (check #3 / check 1b above)
             pass
         else:
             # === CHECK #4: stop_loss (price-dependent, checked before profit_target) ===
@@ -325,6 +499,7 @@ class ExitManager:
         Check if position is within time_exit buffer of market end.
 
         Does not trigger if market is already resolved (checked in _evaluate).
+        Skips positions designed to hold to resolution (snipe, oracle_flip).
 
         Args:
             pos: Position to check
@@ -340,6 +515,13 @@ class ExitManager:
         from .types import parse_window_from_slug
         window_secs = parse_window_from_slug(pos.slug)
         if window_secs <= 300:
+            return False
+
+        # Skip time_exit for positions that should hold to resolution.
+        # Oracle flips and snipes enter near market end with cheap tokens
+        # that resolve to $1 if correct. Selling them early is always wrong.
+        source = (pos.metadata or {}).get("source", "")
+        if source in ("oracle_flip", "resolution_snipe", "resolution_snipe_15m"):
             return False
 
         mins_to_end = (pos.market_end_time - now).total_seconds() / 60
@@ -441,6 +623,10 @@ class ExitManager:
     def set_momentum_feed(self, feed) -> None:
         """Inject BinanceMomentumFeed for reversal exit checks."""
         self._momentum_feed = feed
+
+    def set_chainlink_feed(self, feed) -> None:
+        """Inject ChainlinkFeed for oracle-based reversal exit checks."""
+        self._chainlink = feed
 
     def complete_exit(self, token_id: str) -> None:
         """

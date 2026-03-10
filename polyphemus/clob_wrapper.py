@@ -220,15 +220,12 @@ class ClobWrapper:
             if price_hint > 0:
                 order_args.price = price_hint
             loop = asyncio.get_event_loop()
-            signed_order = await asyncio.wait_for(
-                loop.run_in_executor(None, self._client.create_market_order, order_args),
-                timeout=ORDER_TIMEOUT,
-            )
+            # Single executor call: sign + post in one thread hop (saves ~5-10ms inter-call overhead)
+            def _sign_and_post():
+                signed = self._client.create_market_order(order_args)
+                return self._client.post_order(signed, OrderType.FAK)
             result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: self._client.post_order(signed_order, OrderType.FAK),
-                ),
+                loop.run_in_executor(None, _sign_and_post),
                 timeout=ORDER_TIMEOUT,
             )
             order_id = result.get("orderID", "")

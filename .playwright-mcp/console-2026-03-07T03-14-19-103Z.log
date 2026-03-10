@@ -1,0 +1,12 @@
+[     550ms] [WARNING] You are using replayIntegration() even though this bundle does not include replay. @ https://browser.sentry-cdn.com/10.27.0/bundle.tracing.min.js:1
+[     808ms] Uncaught ReferenceError: Utils is not defined
+    at <anonymous> (https://cdn.kit.com/assets/legacy-df207777a5100409de48e087d0220fedbcde05c7a2ad1caa14e67bab38826065.js:3:25691)
+    at u (https://cdn.kit.com/assets/application-e6380544db3fc5cb43772bebd2c6893f8f721bdc6d497ec4bb897345df379ba4.js:1:2695)
+    at fireWith (https://cdn.kit.com/assets/application-e6380544db3fc5cb43772bebd2c6893f8f721bdc6d497ec4bb897345df379ba4.js:1:3502)
+    at ready (https://cdn.kit.com/assets/application-e6380544db3fc5cb43772bebd2c6893f8f721bdc6d497ec4bb897345df379ba4.js:1:5291)
+    at r (https://cdn.kit.com/assets/application-e6380544db3fc5cb43772bebd2c6893f8f721bdc6d497ec4bb897345df379ba4.js:0:964)
+[    1219ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/account_settings/email:0
+[   21822ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/account_settings/email:0
+[   85155ms] [WARNING] Failed to execute 'postMessage' on 'DOMWindow': The target origin provided ('https://www.youtube.com') does not match the recipient window's origin ('https://www.google.com'). @ https://www.youtube.com/s/player/6c5cb4f4/www-widgetapi.vflset/www-widgetapi.js:209
+[   87222ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://resend.com/docs?_rsc=1r34m:0
+[  116725ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://resend.com/docs/dashboard/emails/introduction?_rsc=pod2k:0

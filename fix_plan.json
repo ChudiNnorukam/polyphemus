@@ -1,0 +1,215 @@
+{
+  "analysis_timestamp": "2026-02-05 23:45:00 UTC",
+  "database_file": "/Users/chudinnorukam/Projects/business/performance.db",
+  "total_trades_analyzed": 381,
+  "current_pnl": 471.63,
+  "expected_pnl_after_fixes": 1014.63,
+  "improvement_percent": 115.1,
+  "summary": {
+    "win_rate": "58.0% (exceeds DB baseline 35.7%)",
+    "profit_ratio": "1.19x (below DB baseline 4.4x)",
+    "issue": "Strategy is sound but execution has 3 critical bugs"
+  },
+  "critical_bugs": [
+    {
+      "rank": 1,
+      "name": "Stop Loss Trigger Too Tight",
+      "impact_dollars": 240.29,
+      "affected_trades": 39,
+      "win_rate": "0.0% (catastrophic)",
+      "root_cause": "stop_loss_pct threshold triggers on normal volatility",
+      "evidence": "Stop loss exits (0% WR) vs market resolution exits (93.8% WR)",
+      "fix": {
+        "file": "/opt/polymarket-bot/run_signal_bot.py or exit_manager.py",
+        "change": "stop_loss_pct = 0.15 \u2192 stop_loss_pct = 0.98",
+        "rationale": "Only exit on catastrophic crash, let positions recover"
+      },
+      "verification": "After fix, 39 trades with stop_loss exit reason should disappear"
+    },
+    {
+      "rank": 2,
+      "name": "SELL Signals Still Active",
+      "impact_dollars": 116.7,
+      "affected_trades": 151,
+      "win_rate": "40.4% (too early exits)",
+      "root_cause": "SELL signal block not enabled or re-introduced",
+      "evidence": "Memory notes 'SELL signals fully disabled' but bot still executing them",
+      "fix": {
+        "file": "/opt/polymarket-bot/run_signal_bot.py",
+        "change": "Ensure 'if direction == SELL: return' in handle_signal()",
+        "rationale": "Market-resolution strategy should ignore sell signals"
+      },
+      "verification": "After fix, no new sell_signal exit reasons should appear"
+    },
+    {
+      "rank": 3,
+      "name": "Hour 00:00 Trading Catastrophe",
+      "impact_dollars": 187.09,
+      "affected_trades": 25,
+      "win_rate": "0.0% (midnight hour)",
+      "root_cause": "Unknown - possibly market volatility, signal quality, or data sync",
+      "evidence": "Hour 00:00 = 0% WR, Hour 01:00 = 33% WR, Hours 15-20 = 100% WR",
+      "fix": {
+        "file": "/opt/polymarket-bot/run_signal_bot.py",
+        "change": "Add hour check: if datetime.now(timezone.utc).hour == 0: return",
+        "rationale": "No good trades at midnight, high variance window"
+      },
+      "verification": "After fix, zero trades should appear during 00:00-00:59 UTC"
+    },
+    {
+      "rank": 4,
+      "name": "Entry Price Mismatch (Long-term)",
+      "impact_dollars": 164.52,
+      "affected_trades": 105,
+      "win_rate": "49.5% at 0.80-0.90 bracket",
+      "root_cause": "Not following asymmetric sizing (small bets on high-risk)",
+      "evidence": "0.65-0.80 = 92% WR vs 0.80+ = 51% WR",
+      "fix": {
+        "file": "/opt/polymarket-bot/signal_executor.py",
+        "change": "In calculate_position_size(), cap bets at $10 if entry_price > 0.80",
+        "rationale": "DB strategy: big bets on high-confidence (0.70-0.80), small on low-confidence"
+      },
+      "verification": "New 0.80+ trades should be smaller; overall 0.80+ bracket WR should improve"
+    }
+  ],
+  "performance_by_bucket": {
+    "0.65-0.70": {
+      "trades": 40,
+      "wr": "90.0%",
+      "pnl": 315.39,
+      "status": "\ud83d\udfe2 Excellent"
+    },
+    "0.70-0.80": {
+      "trades": 40,
+      "wr": "92.5%",
+      "pnl": 259.47,
+      "status": "\ud83d\udfe2 Excellent"
+    },
+    "0.80-0.90": {
+      "trades": 105,
+      "wr": "49.5%",
+      "pnl": -164.52,
+      "status": "\ud83d\udd34 Bleeding"
+    },
+    "0.90+": {
+      "trades": 33,
+      "wr": "54.5%",
+      "pnl": -41.4,
+      "status": "\ud83d\udd34 Bleeding"
+    }
+  },
+  "time_of_day_patterns": {
+    "best_hours": "15:00-20:00 (50 trades, 100% WR, $431.96)",
+    "worst_hours": [
+      "00:00 (25 trades, 0% WR, -$187.09) \u2190 BLACKLIST THIS",
+      "01:00 (30 trades, 33.3% WR, -$38.97)",
+      "02:00 (42 trades, 38.1% WR, +$0.63)"
+    ]
+  },
+  "exit_reason_analysis": {
+    "market_resolved": {
+      "trades": 113,
+      "wr": "93.8%",
+      "pnl": 552.0,
+      "status": "\u2713 Keep"
+    },
+    "profit_target": {
+      "trades": 30,
+      "wr": "100.0%",
+      "pnl": 293.89,
+      "status": "\u2713 Keep"
+    },
+    "time_exit": {
+      "trades": 8,
+      "wr": "100.0%",
+      "pnl": 54.72,
+      "status": "\u2713 Keep"
+    },
+    "sell_signal": {
+      "trades": 151,
+      "wr": "40.4%",
+      "pnl": -116.7,
+      "status": "\u2717 Remove"
+    },
+    "stop_loss": {
+      "trades": 39,
+      "wr": "0.0%",
+      "pnl": -240.29,
+      "status": "\u2717 Disable"
+    }
+  },
+  "implementation_checklist": [
+    {
+      "task": "Disable stop loss trigger",
+      "priority": "P0",
+      "effort": "5 minutes",
+      "files": [
+        "/opt/polymarket-bot/exit_manager.py"
+      ],
+      "test": "Verify stop_loss exit reason disappears from new trades"
+    },
+    {
+      "task": "Verify/enable SELL signal block",
+      "priority": "P0",
+      "effort": "5 minutes",
+      "files": [
+        "/opt/polymarket-bot/run_signal_bot.py"
+      ],
+      "test": "Verify sell_signal exit reason disappears from new trades"
+    },
+    {
+      "task": "Add hour 00:00 blacklist",
+      "priority": "P0",
+      "effort": "10 minutes",
+      "files": [
+        "/opt/polymarket-bot/run_signal_bot.py"
+      ],
+      "test": "Verify no trades during 00:00-00:59 UTC"
+    },
+    {
+      "task": "Implement entry price bucketing",
+      "priority": "P1",
+      "effort": "30 minutes",
+      "files": [
+        "/opt/polymarket-bot/signal_executor.py"
+      ],
+      "test": "Verify 0.80+ entries sized at max $10"
+    },
+    {
+      "task": "Add time-of-day filtering",
+      "priority": "P2",
+      "effort": "20 minutes",
+      "files": [
+        "/opt/polymarket-bot/run_signal_bot.py"
+      ],
+      "test": "Verify best hours 15:00-20:00 get more signal volume"
+    },
+    {
+      "task": "Investigate hour 00:00 root cause",
+      "priority": "P2",
+      "effort": "60 minutes",
+      "files": [
+        "logs from 00:00-02:00 window"
+      ],
+      "test": "Identify if market volatility, signal quality, or system issue"
+    }
+  ],
+  "expected_outcomes": {
+    "after_p0_fixes": {
+      "pnl": 1014.63,
+      "improvement": "+115.1%",
+      "trades_affected": 215,
+      "estimated_time": "20 minutes"
+    },
+    "after_p1_fixes": {
+      "pnl": "~$1,100+",
+      "additional_improvement": "+8-10%",
+      "estimated_time": "30 minutes"
+    },
+    "after_p2_fixes": {
+      "pnl": "~$1,200+",
+      "additional_improvement": "+10-15%",
+      "estimated_time": "80 minutes"
+    }
+  }
+}

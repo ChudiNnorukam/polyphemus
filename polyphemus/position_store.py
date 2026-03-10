@@ -118,13 +118,13 @@ class PositionStore:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT token_id, slug, entry_price, entry_size, entry_time, outcome, metadata
+                SELECT token_id, slug, entry_price, entry_size, entry_time, outcome, metadata, entry_tx_hash
                 FROM trades
                 WHERE exit_time IS NULL
                 """
             )
             for row in cursor.fetchall():
-                token_id, slug, entry_price, entry_size, entry_time, outcome, metadata_json = row
+                token_id, slug, entry_price, entry_size, entry_time, outcome, metadata_json, entry_tx_hash = row
 
                 # Convert entry_time from Unix timestamp to aware datetime
                 if entry_time is not None:
@@ -159,7 +159,7 @@ class PositionStore:
                     entry_price=entry_price,
                     entry_size=entry_size,
                     entry_time=entry_dt,
-                    entry_tx_hash='',
+                    entry_tx_hash=entry_tx_hash or '',
                     market_end_time=market_end_time,
                     metadata=pos_metadata,
                     outcome=outcome or '',

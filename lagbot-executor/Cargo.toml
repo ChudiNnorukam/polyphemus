@@ -1,0 +1,54 @@
+[package]
+name = "lagbot-executor"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance order execution engine for Lagbot (Polymarket latency arb)"
+
+[dependencies]
+# Polymarket CLOB client (fastest available)
+polyfill-rs = "0.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "native-tls"] }
+
+# JSON (SIMD-accelerated)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+simd-json = "0.14"
+
+# Decimal arithmetic (order prices)
+rust_decimal = "1"
+rust_decimal_macros = "1"
+
+# Crypto (order signing)
+ethers = { version = "2", features = ["abigen"] }
+
+# Unix socket IPC
+interprocess = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Time
+chrono = "0.4"
+
+# Environment
+dotenvy = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

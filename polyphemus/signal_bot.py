@@ -44,6 +44,8 @@ from .adaptive_tuner import AdaptiveTuner
 from .market_ws import MarketWS
 from .telegram_approver import TelegramApprover
 from .slack_notifier import SlackNotifier
+from .chainlink_feed import ChainlinkFeed
+from .market_maker import MarketMaker
 
 
 class SignalBot:
@@ -135,6 +137,7 @@ class SignalBot:
                 state_path=os.path.join(config.lagbot_data_dir, "streak_state.json"),
             ),
             logger=self._logger,
+            post_loss_cooldown_mins=config.post_loss_cooldown_mins,
         )
         self._trading_halted = False  # Set True if live reconciliation fails
 
@@ -170,6 +173,39 @@ class SignalBot:
                 db=self._tracker.db,
             )
             self._logger.info("Signal mode: NOAA weather arb")
+
+        # 11b. Chainlink oracle feed (wired to momentum feed + exit manager)
+        self._chainlink = None
+        if config.oracle_enabled and self._momentum_feed:
+            self._chainlink = ChainlinkFeed(config=config)
+            self._chainlink.set_on_direction_cross(
+                self._momentum_feed._on_oracle_direction_cross
+            )
+            self._momentum_feed.set_chainlink_feed(self._chainlink)
+            self._exit_mgr.set_chainlink_feed(self._chainlink)
+            self._health.set_pipeline_feeds(
+                chainlink_feed=self._chainlink,
+                momentum_feed=self._momentum_feed,
+            )
+            self._logger.info("ChainlinkFeed wired (RTDS + Alchemy)")
+        elif config.oracle_enabled:
+            self._logger.warning("ORACLE_ENABLED=true but no momentum feed — ChainlinkFeed skipped")
+
+        # 11c. Market maker (pair-cost arbitrage scanner + stale quote sniping)
+        self._market_maker = None
+        if config.enable_market_maker:
+            self._market_maker = MarketMaker(
+                config=config,
+                clob=self._clob,
+                market_ws=self._market_ws,
+                momentum_feed=self._momentum_feed,
+                tracker=self._tracker,
+                store=self._store,
+            )
+            self._logger.info(
+                f"MarketMaker wired (dry_run={config.mm_dry_run}, "
+                f"interval={config.mm_scan_interval}s)"
+            )
 
         # Telegram approval gate (weather mode only; no-op if token not configured)
         self._telegram = TelegramApprover(
@@ -269,6 +305,9 @@ class SignalBot:
                     self._accumulator.set_redeemer(self._redeemer)
                 self._health.redeemer = self._redeemer
                 self._logger.info("Auto-redeemer ENABLED")
+                # Wire redeemer into market maker for stale quote position tracking
+                if self._market_maker:
+                    self._market_maker._redeemer = self._redeemer
 
         # 13a-iii. Accumulator learning stack (metrics → tracker → tuner)
         self._accum_metrics = None
@@ -376,6 +415,7 @@ class SignalBot:
             ok = False
         else:
             self._logger.info(f"PREFLIGHT [OK]   wallet balance ${balance:.2f}")
+        self._slack.seed_stats(0, 0, 0.0, start_balance=balance)
 
         # 3. Binance WS host TCP reachability (skip for modes that don't use Binance)
         needs_binance = (
@@ -438,15 +478,38 @@ class SignalBot:
                         market_end = market_epoch + window
                         if time.time() > market_end + 600:  # ended 10+ min ago
                             mins_ago = (time.time() - market_end) / 60
-                            self._logger.info(
-                                f"Purging stale position: {pos.slug} "
-                                f"(market ended {mins_ago:.0f} min ago)"
-                            )
+                            # Check share balance to determine win/loss
+                            # Shares > 0 after resolution = WIN (shares worth $1.00)
+                            # Shares = 0 = LOSS (worthless)
+                            try:
+                                shares = await self._clob.get_share_balance(pos.token_id)
+                                if shares >= 5.0:
+                                    # WIN - shares resolved to $1.00, queue for redemption
+                                    exit_price = 1.0
+                                    self._logger.info(
+                                        f"Purging stale WIN: {pos.slug} "
+                                        f"(market ended {mins_ago:.0f} min ago, "
+                                        f"{shares:.1f} shares to redeem)"
+                                    )
+                                    self._enqueue_redemption(pos)
+                                else:
+                                    exit_price = 0.0
+                                    self._logger.info(
+                                        f"Purging stale LOSS: {pos.slug} "
+                                        f"(market ended {mins_ago:.0f} min ago, "
+                                        f"0 shares remaining)"
+                                    )
+                            except Exception as bal_err:
+                                exit_price = 0.0
+                                self._logger.warning(
+                                    f"Share balance check failed for {pos.slug}: {bal_err}, "
+                                    f"assuming loss (redeemer will correct if win)"
+                                )
                             self._store.remove(pos.token_id)
                             self._tracker.db.force_close_trade(
                                 slug=pos.slug,
                                 exit_reason='market_resolved',
-                                exit_price=0.0,
+                                exit_price=exit_price,
                             )
                             stale_count += 1
                             continue
@@ -457,7 +520,10 @@ class SignalBot:
                 self._logger.info(f"Startup: purged {stale_count} stale positions (expired markets)")
 
             # 4. Reconcile remaining positions against CLOB share holdings
+            # Only ghost-cleanup positions whose market has ENDED. Active markets
+            # are left alone — the exit_manager will handle them normally.
             ghost_count = 0
+            resumed_count = 0
             for pos in list(self._store.get_open()):
                 # Skip accumulator positions — managed by AccumulatorEngine
                 if pos.metadata and pos.metadata.get("is_accumulator"):
@@ -466,6 +532,28 @@ class SignalBot:
                 # not within the 5-minute CLOB settlement window used by this check
                 if pos.metadata and pos.metadata.get("is_weather"):
                     continue
+
+                # Check if market is still active
+                market_still_active = False
+                try:
+                    parts = pos.slug.rsplit('-', 1)
+                    if len(parts) == 2 and parts[1].isdigit():
+                        market_epoch = int(parts[1])
+                        window = 300 if '5m' in pos.slug else 900
+                        market_end = market_epoch + window
+                        market_still_active = time.time() < market_end
+                except Exception:
+                    pass
+
+                if market_still_active:
+                    # Market is live — resume monitoring, don't ghost-cleanup
+                    resumed_count += 1
+                    self._logger.info(
+                        f"Resuming active position: {pos.slug} | "
+                        f"entry={pos.entry_price:.4f} | size={pos.entry_size:.1f} shares"
+                    )
+                    continue
+
                 try:
                     shares = await self._clob.get_share_balance(pos.token_id)
                     if shares < 5.0:  # MIN_SHARES_FOR_SELL
@@ -486,10 +574,10 @@ class SignalBot:
 
             total_purged = stale_count + ghost_count
             remaining = len(self._store.get_open())
-            if total_purged > 0:
+            if total_purged > 0 or resumed_count > 0:
                 self._logger.info(
                     f"Reconciliation: purged {stale_count} stale + {ghost_count} ghost = "
-                    f"{total_purged} positions | {remaining} active remain"
+                    f"{total_purged} positions | {resumed_count} resumed | {remaining} active remain"
                 )
             else:
                 self._logger.info(f"Reconciliation: all {remaining} positions verified on CLOB")
@@ -558,10 +646,14 @@ class SignalBot:
                 tasks.append(self._safe_task(self._gabagool_tracker.start(), "gabagool_tracker"))
             if self._adaptive_tuner:
                 tasks.append(self._safe_task(self._adaptive_tuner.start(), "adaptive_tuner"))
+            if self._chainlink:
+                tasks.append(self._safe_task(self._chainlink.start(), "chainlink_feed"))
             if self._config.enable_pair_arb and self._momentum_feed:
                 tasks.append(self._safe_task(self._momentum_feed.pair_arb_scan_loop(), "pair_arb_scan"))
             if self._config.pair_arb_near_res_enabled and self._momentum_feed:
                 tasks.append(self._safe_task(self._momentum_feed.near_res_pair_arb_loop(), "near_res_pair_arb"))
+            if self._market_maker:
+                tasks.append(self._safe_task(self._market_maker.start(), "market_maker"))
             await asyncio.gather(*tasks)
 
         except KeyboardInterrupt:
@@ -788,13 +880,15 @@ class SignalBot:
                 self._logger.info(f"Signal score: {signal_score:.1f} for {signal.get('slug', '?')}")
 
             # 2b. Circuit breaker check (entries only — exits never blocked)
+            # Bypass for reversal_short: the flip is triggered BY a loss, cooldown must not block it
             if self._trading_halted:
                 self._logger.warning("Trading halted: startup reconciliation failed")
                 return
-            allowed, cb_reason = self._circuit_breaker.is_trading_allowed()
-            if not allowed:
-                self._logger.warning(f"Circuit breaker blocked entry: {cb_reason}")
-                return
+            if signal.get('source') != 'reversal_short':
+                allowed, cb_reason = self._circuit_breaker.is_trading_allowed()
+                if not allowed:
+                    self._logger.warning(f"Circuit breaker blocked entry: {cb_reason}")
+                    return
 
             # 3. Check if safe to trade
             if not await self._balance.is_safe_to_trade():
@@ -828,11 +922,23 @@ class SignalBot:
                 await self._telegram.submit(signal)
                 return  # execution happens via _execute_weather_signal callback
 
-            # 5c. Snapshot entry momentum direction for reversal exit (momentum signals only)
-            if signal.get('source') in ('binance_momentum', 'binance_momentum_lag', 'sharp_move') and self._momentum_feed:
-                signal.setdefault("metadata", {})
+            # 5c. Populate entry metadata for ALL signal types (direction, source, asset)
+            signal.setdefault("metadata", {})
+            signal["metadata"]["direction"] = signal.get("outcome", "").lower()
+            signal["metadata"]["source"] = signal.get("source", "")
+            signal["metadata"]["asset"] = signal.get("asset", "")
+            signal["metadata"]["entry_price_at_signal"] = signal.get("price", 0.0)
+
+            # 5d. Extra momentum fields for reversal exit (all Binance-sourced entries)
+            reversal_sources = ('binance_momentum', 'binance_momentum_lag', 'sharp_move',
+                                'oracle_flip', 'reversal_short', 'window_delta', 'streak_contrarian')
+            if signal.get('source') in reversal_sources and self._momentum_feed:
                 signal["metadata"]["entry_momentum_direction"] = signal.get("outcome", "").lower()
                 signal["metadata"]["entry_momentum_ts"] = time.time()
+                bp = signal.get("binance_price", 0.0)
+                if not bp:
+                    bp = self._momentum_feed.get_latest_price(signal.get("asset", "BTC")) or 0.0
+                signal["metadata"]["entry_binance_price"] = bp
 
             # 6. Execute buy
             exec_result = await self._executor.execute_buy(signal, available)
@@ -851,7 +957,7 @@ class SignalBot:
                 f"@ ${exec_result.fill_price:.4f} x {exec_result.fill_size:.1f}"
             )
 
-            # 7. Record to performance DB
+            # 7. Record to performance DB (include metadata for direction analysis)
             await self._tracker.record_entry(
                 trade_id=exec_result.order_id,
                 token_id=signal.get("token_id", ""),
@@ -863,6 +969,7 @@ class SignalBot:
                 market_title=signal.get("market_title", ""),
                 entry_time=time.time(),
                 filter_score=signal_score,
+                metadata=signal.get("metadata"),
             )
 
             # 7b. Slack notification (non-fatal)
@@ -1031,10 +1138,11 @@ class SignalBot:
                             )
                             continue
                         if price > 0:
-                            self._store.update(pos.token_id, current_price=price)
+                            new_peak = max(price, pos.peak_price or pos.entry_price)
+                            self._store.update(pos.token_id, current_price=price, peak_price=new_peak)
                             self._logger.debug(
                                 f"Price updated: {pos.slug} "
-                                f"entry={pos.entry_price:.4f} current={price:.4f}"
+                                f"entry={pos.entry_price:.4f} current={price:.4f} peak={new_peak:.4f}"
                             )
                 except Exception as e:
                     self._logger.warning(f"Price feed error: {e}")
@@ -1070,6 +1178,13 @@ class SignalBot:
                     f"@ ${exit_signal.exit_price or pos.current_price:.4f} "
                     f"({exit_signal.reason})"
                 )
+                # Record to circuit breaker so post-loss cooldown works in paper mode
+                try:
+                    dry_exit_price = exit_signal.exit_price or pos.current_price or pos.entry_price
+                    dry_pnl = (dry_exit_price - pos.entry_price) * pos.entry_size
+                    self._circuit_breaker.record_trade_result(dry_pnl)
+                except Exception:
+                    pass
                 # Still record as exit to advance state
                 self._exit_mgr.complete_exit(exit_signal.token_id)
                 return
@@ -1097,6 +1212,13 @@ class SignalBot:
                         self._logger.error(
                             f"force_close_trade failed for {pos.slug}: {db_err}"
                         )
+                    # Record to circuit breaker: estimate PnL from current price
+                    try:
+                        est_price = pos.current_price or pos.entry_price
+                        est_pnl = (est_price - pos.entry_price) * pos.entry_size
+                        self._circuit_breaker.record_trade_result(est_pnl)
+                    except Exception:
+                        pass
                     self._store.remove(exit_signal.token_id)
                     self._exit_mgr.complete_exit(exit_signal.token_id)
                     self._enqueue_redemption(pos)
@@ -1213,6 +1335,12 @@ class SignalBot:
                     exit_reason=exit_signal.reason,
                     hold_secs=hold_secs,
                 )
+                # Update balance for session line (best-effort)
+                try:
+                    bal = await self._balance.get_balance()
+                    self._slack.update_balance(bal)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1223,6 +1351,12 @@ class SignalBot:
                     self._fill_optimizer.update_profit(pos.slug, fo_pnl)
             except Exception as fo_err:
                 self._logger.error(f"Fill optimizer profit update failed (non-fatal): {fo_err}")
+
+            # 5f. Reversal short: flip to opposite side after reversal exit (non-fatal)
+            try:
+                await self._try_reversal_short(pos, exit_signal)
+            except Exception as rs_err:
+                self._logger.error(f"Reversal short failed for {pos.slug} (non-fatal): {rs_err}")
 
             # 6. Remove from position store (MUST run after successful SELL)
             self._store.remove(exit_signal.token_id)
@@ -1258,6 +1392,144 @@ class SignalBot:
             self._logger.info(f"Auto-redeem queued: {pos.slug} ({pos.entry_size:.1f} shares)")
         except Exception as e:
             self._logger.error(f"Failed to enqueue redemption for {pos.slug}: {e}")
+
+    async def _try_reversal_short(self, pos, exit_signal):
+        """After a reversal exit, create a signal to buy the opposite side token.
+
+        Only fires on oracle_reversal or binance_reversal exits.
+        Uses the same market_cache + market_ws pattern as oracle_flip.
+        """
+        # Gate 1: only on reversal exits
+        if exit_signal.reason not in ('oracle_reversal', 'binance_reversal'):
+            return
+
+        # Gate 2: config enabled
+        if not self._config.reversal_short_enabled:
+            return
+
+        # Gate 3: anti-loop -- never flip a flip
+        source = (pos.metadata or {}).get("source", "")
+        if source == "reversal_short":
+            self._logger.debug(f"Skipping reversal_short for {pos.slug}: already a reversal_short position")
+            return
+
+        # Gate 4: need momentum feed for market cache
+        if not self._momentum_feed or not hasattr(self._momentum_feed, '_market_cache'):
+            self._logger.debug("Reversal short: no momentum feed or market cache")
+            return
+
+        # Gate 5: time remaining
+        now = time.time()
+        if pos.market_end_time:
+            secs_left = pos.market_end_time.timestamp() - now
+        else:
+            self._logger.debug(f"Reversal short: no market_end_time for {pos.slug}")
+            return
+
+        if secs_left < self._config.reversal_short_min_secs_remaining:
+            self._logger.debug(
+                f"Reversal short skip: {secs_left:.0f}s left < "
+                f"{self._config.reversal_short_min_secs_remaining}s min"
+            )
+            return
+
+        # Lookup opposite token from market cache
+        slug = pos.slug
+        market_info = self._momentum_feed._market_cache.get(slug)
+        if not market_info:
+            self._logger.debug(f"Reversal short: no market_cache entry for {slug}")
+            return
+
+        # Determine opposite direction
+        entry_direction = (pos.metadata or {}).get("direction", "").lower()
+        if entry_direction == "down":
+            opp_direction = "Up"
+            opp_key = "up_token_id"
+        elif entry_direction == "up":
+            opp_direction = "Down"
+            opp_key = "down_token_id"
+        else:
+            self._logger.debug(f"Reversal short: unknown direction '{entry_direction}' for {slug}")
+            return
+
+        opp_token_id = market_info.get(opp_key)
+        if not opp_token_id:
+            self._logger.debug(f"Reversal short: no {opp_key} in market_cache for {slug}")
+            return
+
+        # Get midpoint of opposite token (market_ws first, clob fallback)
+        opp_mid = 0.0
+        if self._market_ws:
+            opp_mid = self._market_ws.get_midpoint(opp_token_id)
+        if opp_mid <= 0:
+            try:
+                opp_mid = await self._clob.get_midpoint(opp_token_id)
+            except Exception:
+                pass
+
+        # Gate 6: price range
+        if (opp_mid <= 0
+                or opp_mid > self._config.reversal_short_max_down_price
+                or opp_mid < self._config.reversal_short_min_down_price):
+            self._logger.debug(
+                f"Reversal short skip: opp_mid={opp_mid:.4f} "
+                f"outside [{self._config.reversal_short_min_down_price}, "
+                f"{self._config.reversal_short_max_down_price}]"
+            )
+            return
+
+        asset = (pos.metadata or {}).get("asset", "")
+        window = (pos.metadata or {}).get("market_window_secs", 300)
+
+        rs_signal = {
+            "slug": slug,
+            "token_id": opp_token_id,
+            "outcome": opp_direction,
+            "midpoint": opp_mid,
+            "price": opp_mid,
+            "source": "reversal_short",
+            "asset": asset,
+            "market_window_secs": window,
+            "time_remaining_secs": int(secs_left),
+            "condition_id": market_info.get("condition_id", ""),
+            "metadata": {
+                "source": "reversal_short",
+                "triggered_by": exit_signal.reason,
+                "original_direction": entry_direction,
+                "original_entry_price": pos.entry_price,
+            },
+        }
+
+        if self._config.reversal_short_dry_run:
+            potential_shares = self._config.reversal_short_max_bet / opp_mid if opp_mid > 0 else 0
+            self._logger.info(
+                f"[REVERSAL_SHORT DRY] {slug} flip to {opp_direction} "
+                f"@ {opp_mid:.4f} | {secs_left:.0f}s left | "
+                f"trigger={exit_signal.reason} | "
+                f"projected_shares={potential_shares:.0f} "
+                f"max_bet=${self._config.reversal_short_max_bet:.0f}"
+            )
+            # Log to signal_logger for tracking
+            if self._signal_logger:
+                rs_signal["dry_run"] = True
+                self._signal_logger.log_signal({
+                    "slug": slug,
+                    "asset": asset,
+                    "direction": opp_direction,
+                    "token_id": opp_token_id,
+                    "midpoint": opp_mid,
+                    "source": "reversal_short",
+                    "outcome": "dry_run",
+                    "dry_run": 1,
+                })
+            return
+
+        self._logger.info(
+            f"[REVERSAL_SHORT] {slug} FLIPPING to {opp_direction} "
+            f"@ {opp_mid:.4f} | {secs_left:.0f}s left | "
+            f"trigger={exit_signal.reason}"
+        )
+        await self._on_signal(rs_signal)
 
 
 async def main():

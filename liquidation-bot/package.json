@@ -1,0 +1,37 @@
+{
+  "name": "aave-v3-liquidation-bot",
+  "version": "1.0.0",
+  "description": "Aave V3 Arbitrum Liquidation Bot with Flash Loans",
+  "main": "run_liquidation_bot.py",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network arbitrumGoerli",
+    "deploy:mainnet": "hardhat run scripts/deploy.ts --network arbitrum",
+    "verify:testnet": "hardhat verify --network arbitrumGoerli <CONTRACT_ADDRESS> <ARGS>",
+    "verify:mainnet": "hardhat verify --network arbitrum <CONTRACT_ADDRESS> <ARGS>",
+    "test": "hardhat test"
+  },
+  "keywords": [
+    "aave",
+    "defi",
+    "liquidation",
+    "arbitrum",
+    "flash-loans"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^3.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.0",
+    "@typechain/ethers-v6": "^11.0.0",
+    "hardhat": "^2.17.0",
+    "hardhat-deploy": "^0.11.0",
+    "typechain": "^8.3.0"
+  },
+  "dependencies": {
+    "@aave/core-v3": "^1.19.0",
+    "@openzeppelin/contracts": "^4.9.3",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.9.0"
+  }
+}

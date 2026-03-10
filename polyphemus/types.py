@@ -27,6 +27,8 @@ class ExitReason(str, Enum):
     MAX_HOLD = "max_hold"
     SELL_SIGNAL = "sell_signal"
     STOP_LOSS = "stop_loss"
+    MID_PRICE_STOP = "mid_price_stop"
+    PRE_RESOLUTION_EXIT = "pre_resolution_exit"
 
 
 class OrderStatus(str, Enum):
@@ -76,6 +78,7 @@ class Position:
     entry_tx_hash: str
     market_end_time: datetime  # UTC-aware
     current_price: float = 0.0
+    peak_price: float = 0.0
     exit_reason: Optional[str] = None
     exit_price: Optional[float] = None
     exit_time: Optional[datetime] = None  # UTC-aware if present
@@ -111,6 +114,7 @@ class FilterResult:
     """Result of applying filters to a signal."""
     passed: bool
     reasons: list[str] = field(default_factory=list)
+    context: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -130,6 +134,7 @@ class ExecutionResult:
     fill_size: float = 0.0
     error: str = ""
     reason: str = ""
+    fill_time_ms: int = 0
 
 
 # ============================================================================
@@ -142,6 +147,7 @@ MAX_ENTRY_PRICE = 0.85
 
 # Order Fill Verification
 ORDER_POLL_INTERVAL = 1  # seconds between fill checks
+FAK_POLL_INTERVAL = 0.2  # FAK fills instantly, just confirming settlement
 ORDER_POLL_MAX = 10  # max polls (10s total) — legacy, use MAKER/TAKER below
 MAKER_POLL_MAX = 20  # 20s for maker orders (15m markets need longer to fill)
 TAKER_POLL_MAX = 10  # 10s for taker orders and SELL exits
@@ -291,6 +297,7 @@ class RedemptionEvent:
     winning_side: str       # "up" or "down"
     shares: float           # matched shares to redeem
     settled_at: float       # time.time() timestamp
+    token_ids: list = field(default_factory=list)  # orphan sweep: token_ids for DB cleanup
 
 
 def parse_window_from_slug(slug: str) -> int:

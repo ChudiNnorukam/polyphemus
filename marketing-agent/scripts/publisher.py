@@ -85,6 +85,48 @@ def send_slack(msg: str):
         print(f"Slack alert failed: {e}")
 
 
+def build_utm_url(slug: str, platform: str = 'linkedin') -> str:
+    """Build a blog URL with UTM tracking parameters."""
+    # Extract the blog slug from the source_slug (e.g., 'w1-mon-i-deployed-4-000' -> use as campaign)
+    params = {
+        'utm_source': platform,
+        'utm_medium': 'social',
+        'utm_campaign': slug,
+        'utm_content': 'post',
+    }
+    query = '&'.join(f'{k}={v}' for k, v in params.items())
+    return f'https://chudi.dev/blog/{slug}?{query}'
+
+
+def comment_linkedin(post_urn: str, comment_text: str) -> str | None:
+    """Post a comment on a LinkedIn post. Returns comment URN or None."""
+    if not LINKEDIN_ACCESS_TOKEN or not LINKEDIN_PERSON_URN:
+        return None
+
+    payload = {
+        'actor': LINKEDIN_PERSON_URN,
+        'message': {
+            'text': comment_text,
+        },
+    }
+
+    r = requests.post(
+        f'https://api.linkedin.com/rest/socialActions/{post_urn}/comments',
+        json=payload,
+        headers={
+            'Authorization': f'Bearer {LINKEDIN_ACCESS_TOKEN}',
+            'LinkedIn-Version': '202602',
+            'Content-Type': 'application/json',
+        },
+        timeout=15
+    )
+    if r.ok:
+        return r.headers.get('X-RestLi-Id', 'commented')
+    else:
+        print(f"    Comment failed: {r.status_code} {r.text[:200]}")
+        return None
+
+
 def post_linkedin(content: str, image_url: str) -> str:
     """Post to LinkedIn. Returns platform_post_id."""
     if not LINKEDIN_ACCESS_TOKEN or not LINKEDIN_PERSON_URN:
@@ -107,7 +149,7 @@ def post_linkedin(content: str, image_url: str) -> str:
         json=payload,
         headers={
             'Authorization': f'Bearer {LINKEDIN_ACCESS_TOKEN}',
-            'LinkedIn-Version': '202501',
+            'LinkedIn-Version': '202602',
             'Content-Type': 'application/json',
         },
         timeout=15
@@ -260,6 +302,23 @@ def main():
             """, (platform_post_id, now, post['id']))
             published_slugs.append(f"{post['platform']}:{post['source_slug']}")
             print(f"    Posted. ID: {platform_post_id}")
+
+            # Auto-comment with UTM-tagged blog link for LinkedIn posts
+            # that mention "in the comments" or are Thursday posts (link-in-comment day)
+            if post['platform'] == 'linkedin' and not DRY_RUN:
+                content_lower = post['content'].lower()
+                has_comment_cta = 'in the comments' in content_lower or 'in comments' in content_lower
+                if has_comment_cta:
+                    # Extract a real blog slug from the source_slug
+                    # Source slugs like 'w1-thu-one-file-replaced-3-produc' -> find matching blog post
+                    blog_url = build_utm_url(post['source_slug'], 'linkedin')
+                    comment_text = f"Full breakdown here: {blog_url}"
+                    time.sleep(3)  # Brief delay before commenting
+                    cid = comment_linkedin(platform_post_id, comment_text)
+                    if cid:
+                        print(f"    Commented with link: {blog_url}")
+                    else:
+                        print(f"    Comment failed (non-blocking)")
         else:
             conn.execute("""
                 UPDATE social_posts

@@ -1,0 +1,39 @@
+[Unit]
+Description=Passivbot Market Maker (Bybit Perpetuals)
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/enarjord/passivbot
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/passivbot
+Environment="PATH=/opt/passivbot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/passivbot/venv/bin/python3 src/passivbot.py --live --config /opt/passivbot/configs/live/active.json
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=always
+RestartSec=15
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=passivbot
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=50%
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/passivbot
+
+[Install]
+WantedBy=multi-user.target

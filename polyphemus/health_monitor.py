@@ -47,6 +47,13 @@ class HealthMonitor:
         self._last_momentum_detections = 0
         self._last_redemption_count = 0
         self._last_redemption_time = None
+        self._chainlink_feed = None
+        self._momentum_feed = None
+
+    def set_pipeline_feeds(self, chainlink_feed=None, momentum_feed=None):
+        """Set feed references for pipeline status reporting."""
+        self._chainlink_feed = chainlink_feed
+        self._momentum_feed = momentum_feed
 
     def notify_ready(self):
         """Send systemd READY=1 notification."""
@@ -148,6 +155,38 @@ class HealthMonitor:
                         health_record["guard"] = gm
                     except Exception:
                         pass
+
+                # Pipeline feed stats for dashboard
+                pipeline = {}
+                if self._chainlink_feed:
+                    try:
+                        pipeline["chainlink"] = self._chainlink_feed.stats()
+                    except Exception:
+                        pipeline["chainlink"] = {"ws_connected": False, "error": True}
+                if self._momentum_feed:
+                    try:
+                        binance_connected = getattr(self._momentum_feed, '_ws_connected', False)
+                        last_age = None
+                        if hasattr(self._momentum_feed, 'last_signal_age'):
+                            last_age = self._momentum_feed.last_signal_age()
+                        pipeline["binance"] = {
+                            "connected": binance_connected,
+                            "last_signal_age_secs": last_age,
+                        }
+                    except Exception:
+                        pipeline["binance"] = {"connected": False, "error": True}
+                if gm:
+                    pipeline["guard"] = {
+                        "signals_received": gm.get("signals_received", 0),
+                        "signals_passed": gm.get("signals_passed", 0),
+                        "rejection_reasons": gm.get("rejection_reasons", {}),
+                    }
+                if pipeline:
+                    health_record["pipeline"] = pipeline
+
+                # Re-write health file with pipeline data included
+                with open(health_file, "w") as f:
+                    json.dump(health_record, f, indent=2)
 
                 self._logger.info(
                     f"health_log: uptime={uptime_hours:.1f}h, positions={open_positions}, "

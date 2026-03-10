@@ -1,0 +1,12 @@
+[     881ms] [WARNING] [Intercom] The App ID in your code snippet has not been set. Set it to your App ID found in settings to complete installation: https://app.intercom.com/a/apps/_/settings/web @ https://js.intercomcdn.com/frame-modern.ce52c412.js:0
+[    1451ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/login:0
+[    5539ms] [WARNING] [Intercom] The App ID in your code snippet has not been set. Set it to your App ID found in settings to complete installation: https://app.intercom.com/a/apps/_/settings/web @ https://js.intercomcdn.com/frame-modern.ce52c412.js:0
+[    5881ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/login:0
+[   63378ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/login:0
+[   64506ms] [WARNING] [Intercom] The App ID in your code snippet has not been set. Set it to your App ID found in settings to complete installation: https://app.intercom.com/a/apps/_/settings/web @ https://js.intercomcdn.com/frame-modern.ce52c412.js:0
+[   64875ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/unknown-device?remember_user=false:0
+[   70743ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/unknown-device?remember_user=false:0
+[  139867ms] [WARNING] [Intercom] The App ID in your code snippet has not been set. Set it to your App ID found in settings to complete installation: https://app.intercom.com/a/apps/_/settings/web @ https://js.intercomcdn.com/frame-modern.ce52c412.js:0
+[  140061ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/login:0
+[  141178ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/login:0
+[  142896ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/account/upgrade?from=sequences:0

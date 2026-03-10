@@ -1,0 +1,26 @@
+{
+  "email_1": {
+    "name": "Problem (Day 0)",
+    "subject_template": "Quick question for [NAME]",
+    "body_template": "Hi [NAME],\n\nMost [TITLE]s at [COMPANY] I talk to are dealing with [PROBLEM].\n\nWhen that happens, [AGITATION].\n\n[SOLUTION].\n\nWorth a 15-min call this week?\n\n[SENDER_NAME]",
+    "notes": "Keep under 80 words. No pitch deck. One specific problem."
+  },
+  "email_2": {
+    "name": "Social Proof (Day 3-4)",
+    "subject_template": "How another [TITLE] solved this",
+    "body_template": "Hi [NAME],\n\nA [TITLE] at a similar company was dealing with [PROBLEM]. They [SOLUTION] and [RESULT].\n\nThought it might be relevant. Open to a quick chat?\n\n[SENDER_NAME]",
+    "notes": "Reference a real or plausible case study. One result metric if possible."
+  },
+  "email_3": {
+    "name": "Value / Insight (Day 7-8)",
+    "subject_template": "One thing changing for [TITLE]s in [INDUSTRY]",
+    "body_template": "Hi [NAME],\n\n[INSIGHT relevant to their role or industry — 1-2 sentences, genuinely useful].\n\nMentioned it because it's directly relevant to what you're working on at [COMPANY].\n\nHappy to share how others are responding to this — just reply here.\n\n[SENDER_NAME]",
+    "notes": "No explicit ask. Pure value. This email re-opens the conversation."
+  },
+  "email_4": {
+    "name": "Breakup (Day 11-12)",
+    "subject_template": "Should I close your file?",
+    "body_template": "Hi [NAME],\n\nHaven't heard back — totally understand if now isn't the right time.\n\nShould I close your file, or would a quick 15-min call still make sense?\n\nEither way, no hard feelings.\n\n[SENDER_NAME]",
+    "notes": "Short, human, low-pressure. Creates urgency without being aggressive."
+  }
+}

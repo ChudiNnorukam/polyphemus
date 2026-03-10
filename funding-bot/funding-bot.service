@@ -1,0 +1,34 @@
+[Unit]
+Description=Bybit Funding Rate Arbitrage Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/funding-bot
+Environment="PATH=/opt/funding-bot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/opt/funding-bot/.env
+ExecStart=/opt/funding-bot/venv/bin/python3 /opt/funding-bot/main.py
+
+Restart=always
+RestartSec=30
+StartLimitInterval=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=funding-bot
+
+MemoryLimit=1G
+CPUQuota=50%
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/funding-bot
+
+[Install]
+WantedBy=multi-user.target

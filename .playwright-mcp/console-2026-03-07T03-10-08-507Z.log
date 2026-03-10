@@ -1,0 +1,2 @@
+[    2048ms] [WARNING] [Intercom] The App ID in your code snippet has not been set. Set it to your App ID found in settings to complete installation: https://app.intercom.com/a/apps/_/settings/web @ https://js.intercomcdn.com/frame-modern.ce52c412.js:0
+[    2888ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://app.kit.com/users/login:0

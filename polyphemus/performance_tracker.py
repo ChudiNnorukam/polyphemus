@@ -163,6 +163,10 @@ class PerformanceTracker:
         """Return (wr, n) for resolved trades in a price bucket. Sync, no await needed."""
         return self.db.get_wr_for_bucket(asset, bucket)
 
+    def get_source_stats(self, source: str) -> dict:
+        """Return (total, wins, wr, pnl) for trades with a given source in metadata."""
+        return self.db.get_source_stats(source)
+
     def check_survivorship_bias(self, stats: Dict) -> None:
         """
         Detect and warn about survivorship bias in statistics.

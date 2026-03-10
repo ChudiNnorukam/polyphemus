@@ -281,7 +281,9 @@ class PerformanceDB:
             import time as _time
             now = _time.time()
             cursor = conn.cursor()
-            # Compute real P&L from entry data when exit_price is meaningful
+            # Compute real P&L from entry data when exit_price is meaningful.
+            # When exit_price=0 (market resolved, outcome unknown), assume LOSS:
+            # pnl = -(entry_price * entry_size). Redeemer updates to win if redeemed.
             cursor.execute(
                 """UPDATE trades SET
                     exit_time = ?,
@@ -290,10 +292,11 @@ class PerformanceDB:
                     exit_tx_hash = 'force_closed',
                     pnl = CASE
                         WHEN ? > 0 THEN (? - entry_price) * entry_size
-                        ELSE 0.0
+                        ELSE -(entry_price * entry_size)
                     END,
                     pnl_pct = CASE
                         WHEN ? > 0 AND entry_price > 0 THEN (? - entry_price) / entry_price
+                        WHEN entry_price > 0 THEN -1.0
                         ELSE 0.0
                     END,
                     hold_seconds = CAST(? - entry_time AS INTEGER)
@@ -309,6 +312,46 @@ class PerformanceDB:
                 self.logger.info(f'Force-closed trade: {slug} | reason={exit_reason} exit_price={exit_price:.4f}')
             else:
                 self.logger.debug(f'No open trade found for slug: {slug}')
+            return updated
+        finally:
+            conn.close()
+
+    def force_close_by_token_id(self, token_id: str, exit_reason: str,
+                               exit_price: float = 0.0) -> bool:
+        """Force-close a trade by token_id (used by orphan sweep)."""
+        conn = self._get_conn()
+        try:
+            import time as _time
+            now = _time.time()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE trades SET
+                    exit_time = ?,
+                    exit_price = ?,
+                    exit_reason = ?,
+                    exit_tx_hash = 'force_closed',
+                    pnl = CASE
+                        WHEN ? > 0 THEN (? - entry_price) * entry_size
+                        ELSE -(entry_price * entry_size)
+                    END,
+                    pnl_pct = CASE
+                        WHEN ? > 0 AND entry_price > 0 THEN (? - entry_price) / entry_price
+                        WHEN entry_price > 0 THEN -1.0
+                        ELSE 0.0
+                    END,
+                    hold_seconds = CAST(? - entry_time AS INTEGER)
+                WHERE token_id = ? AND exit_time IS NULL""",
+                (now, exit_price, exit_reason,
+                 exit_price, exit_price,
+                 exit_price, exit_price,
+                 now, token_id)
+            )
+            updated = cursor.rowcount > 0
+            conn.commit()
+            if updated:
+                self.logger.info(
+                    f'Force-closed trade by token_id: {token_id[:16]}... | reason={exit_reason}'
+                )
             return updated
         finally:
             conn.close()
@@ -372,7 +415,8 @@ class PerformanceDB:
         try:
             row = conn.execute(
                 f"SELECT COALESCE(SUM({pnl_col}), 0.0) FROM trades "
-                f"WHERE exit_time >= ? AND exit_time < ?",
+                f"WHERE exit_time >= ? AND exit_time < ? "
+                f"AND NOT (exit_tx_hash = 'force_closed' AND exit_price <= 0)",
                 (start_epoch, end_epoch)
             ).fetchone()
             return row[0]
@@ -483,5 +527,34 @@ class PerformanceDB:
             return float(wr), int(n)
         except Exception:
             return 0.0, 0
+        finally:
+            conn.close()
+
+    def get_source_stats(self, source: str) -> dict:
+        """Return stats for completed trades matching a source in metadata JSON.
+
+        Args:
+            source: Source name to match in metadata (e.g. 'oracle_flip').
+
+        Returns:
+            Dict with keys: total, wins, wr (%), pnl.
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), "
+                "COALESCE(SUM(pnl), 0) "
+                "FROM trades WHERE metadata LIKE ? AND exit_time IS NOT NULL",
+                (f'%"source": "{source}"%',)
+            )
+            row = cur.fetchone()
+            total = row[0] or 0
+            wins = row[1] or 0
+            pnl = row[2] or 0.0
+            wr = (wins / total * 100) if total > 0 else 0.0
+            return {"total": total, "wins": wins, "wr": wr, "pnl": pnl}
+        except Exception:
+            return {"total": 0, "wins": 0, "wr": 0.0, "pnl": 0.0}
         finally:
             conn.close()

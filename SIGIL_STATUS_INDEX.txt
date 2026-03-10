@@ -1,0 +1,245 @@
+================================================================================
+                    SIGIL V2 STATUS REPORT INDEX
+                         2026-02-09 03:05 UTC
+================================================================================
+
+QUICK NAVIGATION
+================================================================================
+
+📌 NEED A QUICK ANSWER?
+   → Read: SIGIL_QUICK_REFERENCE.md (2-3 minutes)
+   Key metrics: 59.2% WR, +$1,145.28 P&L, 608 trades, 0 errors
+
+📊 NEED FULL ANALYSIS?
+   → Read: SIGIL_OPERATIONAL_SUMMARY.md (5-7 minutes) ⭐ RECOMMENDED
+   Includes: Executive summary, architecture, recommendations
+
+📋 NEED TO OPERATE THE SERVICE?
+   → Read: README_SIGIL_STATUS.md (3-5 minutes)
+   Includes: Daily monitoring commands, alert triggers, escalation path
+
+📈 NEED ALL THE DETAILS?
+   → Read: SIGIL_STATUS_2026-02-09.txt (10+ minutes)
+   Includes: Every metric, log excerpt, comprehensive analysis
+
+================================================================================
+REPORT SUMMARIES
+================================================================================
+
+FILE: SIGIL_QUICK_REFERENCE.md
+Size: 3.1K | Read Time: 2-3 min
+Content:
+  • Current state metrics (6 key stats)
+  • Historical performance (5 key metrics)
+  • Exit reasons breakdown (6 categories)
+  • Asset performance comparison (2 assets)
+  • VPS configuration (4 items)
+  • Current activity status
+  • Known issues
+  • Performance insights
+  • Monitoring checklist
+  • Next steps (5 items)
+Purpose: Fast lookup, decision-making, briefing non-technical stakeholders
+
+FILE: SIGIL_OPERATIONAL_SUMMARY.md ⭐
+Size: 6.0K | Read Time: 5-7 min
+Content:
+  • Executive summary (key facts)
+  • Performance summary (608 trades, 59.2% WR, +$1,145.28)
+  • Exit strategy distribution (detailed breakdown)
+  • Current operational status (healthy systems + minor issues)
+  • Technical architecture (deployment, components, schema)
+  • Monitoring & alerts (what to watch)
+  • Comparative analysis (vs V1, historical context)
+  • Recommendations (immediate, short-term, ongoing)
+  • Conclusion (production-ready assessment)
+Purpose: Complete operational assessment, strategic decisions, stakeholder report
+
+FILE: README_SIGIL_STATUS.md
+Size: 4.2K | Read Time: 3-5 min
+Content:
+  • Quick links to other reports
+  • Status overview table
+  • Key findings summary
+  • Quick statistics (608 trades, 59.2% WR)
+  • Daily monitoring commands (4 SSH commands)
+  • Alert triggers (5 conditions)
+  • Escalation path (4 steps)
+  • Report contents explanation
+  • Next steps (immediate, short-term, ongoing)
+  • Contact information
+Purpose: Operations team reference, daily monitoring guide, incident response
+
+FILE: SIGIL_STATUS_2026-02-09.txt
+Size: 7.9K | Read Time: 10+ min
+Content:
+  • Service status (running state, health metrics)
+  • Current health metrics (balance, positions, errors)
+  • Signal processing details (50 signals, all rejected)
+  • Rejection breakdown (market_expired, price range, conviction, signal type)
+  • Historical performance (608 trades, 59.2% WR, +$1,145.28)
+  • Hold time analysis (0s min, 9154s max, 616s avg)
+  • Deployment details (VPS config, database, monitoring)
+  • Recent activity (feed status, API status)
+  • Positive signals (10 items)
+  • Areas to monitor (5 items)
+  • Technical notes (database, feeds, position management)
+  • Recommendation (status and next steps)
+Purpose: Complete record, deep technical analysis, audit trail
+
+================================================================================
+KEY METRICS AT A GLANCE
+================================================================================
+
+SERVICE STATUS:
+  Status:        ✅ RUNNING
+  Uptime:        10 minutes (recent restart 02:53:54 UTC)
+  Error Count:   0
+  Memory:        56.5M (stable)
+
+PERFORMANCE (608 trades):
+  Win Rate:      59.2% (360 winners / 248 losers)
+  Total P&L:     +$1,145.28
+  Avg P&L:       +$1.88 per trade
+  Avg Hold:      616 seconds (~10 min)
+
+CURRENT STATE:
+  Balance:       $137.33 USDC
+  Positions:     0 open
+  Signals:       50 processed (all rejected, normal)
+
+HEALTH:
+  WebSocket:     ✅ Connected
+  Database:      ✅ Functional
+  Feeds:         ✅ Receiving signals
+  Monitoring:    ✅ Active
+
+================================================================================
+READING RECOMMENDATIONS BY ROLE
+================================================================================
+
+EXECUTIVE / STAKEHOLDER:
+  1. Read: SIGIL_QUICK_REFERENCE.md (2 min)
+  2. Read: Executive Summary from SIGIL_OPERATIONAL_SUMMARY.md (2 min)
+  3. Done! You have all key facts
+
+OPERATIONS / DEVOPS:
+  1. Read: README_SIGIL_STATUS.md (4 min)
+  2. Bookmark: Daily monitoring commands
+  3. Save: Alert triggers for alerting system
+  4. Reference: SIGIL_STATUS_2026-02-09.txt for troubleshooting
+
+ENGINEER / TECHNICAL LEAD:
+  1. Read: SIGIL_OPERATIONAL_SUMMARY.md (6 min)
+  2. Read: Technical Architecture section
+  3. Reference: SIGIL_STATUS_2026-02-09.txt for deep details
+  4. Use: Commands from README_SIGIL_STATUS.md for debugging
+
+PRODUCT / ANALYST:
+  1. Read: SIGIL_QUICK_REFERENCE.md (2 min)
+  2. Read: Performance Insights section (3 min)
+  3. Reference: Historical Performance table for trend analysis
+
+================================================================================
+CRITICAL INFORMATION
+================================================================================
+
+SERVICE IS HEALTHY - NO ACTION REQUIRED
+
+What's Working:
+  ✅ Service running without errors (0 error count)
+  ✅ Database functional with 608 trades
+  ✅ 59.2% win rate demonstrates strategy profitability
+  ✅ WebSocket feed connected and receiving signals
+  ✅ Health monitoring active
+
+What's Normal:
+  ✅ All signals rejected as "market_expired" (waiting for fresh markets)
+  ✅ No open positions (expected after restart)
+  ✅ Balance at $137.33 (trading loss is normal)
+  ✅ Recent restart (10 min uptime, still warming up)
+
+What to Monitor:
+  ⚠️ Signal acceptance rate (should increase when fresh markets appear)
+  ⚠️ Balance trend (should stabilize once trading resumes)
+  ⚠️ API reliability (2 Gamma API timeouts, non-critical)
+  ⚠️ Uptime duration (confirm stability over next 4-6 hours)
+
+NEXT CHECK RECOMMENDED: 2026-02-09 07:00 UTC (4 hours from report generation)
+
+================================================================================
+FILE LOCATIONS
+================================================================================
+
+All reports are in: /Users/chudinnorukam/Projects/business/
+
+  README_SIGIL_STATUS.md           (4.2K) - Operations reference
+  SIGIL_OPERATIONAL_SUMMARY.md     (6.0K) - Main report ⭐
+  SIGIL_QUICK_REFERENCE.md         (3.1K) - Quick lookup
+  SIGIL_STATUS_2026-02-09.txt      (7.9K) - Detailed technical
+  SIGIL_STATUS_INDEX.txt           (this file)
+
+VPS Location: /opt/sigil/ on 142.93.143.178
+
+================================================================================
+COMMANDS FOR MANUAL CHECKS
+================================================================================
+
+Service Status:
+  ssh root@142.93.143.178 'systemctl status sigil'
+
+Recent Logs (50 lines):
+  ssh root@142.93.143.178 'journalctl -u sigil -n 50'
+
+Full Logs (200 lines):
+  ssh root@142.93.143.178 'journalctl -u sigil -n 200'
+
+Current Health:
+  ssh root@142.93.143.178 'ls -lt /opt/sigil/data/health_*.json | head -1 | xargs -I {} cat {}'
+
+Service Restart (if needed):
+  ssh root@142.93.143.178 'systemctl restart sigil'
+
+View systemd Unit:
+  ssh root@142.93.143.178 'cat /etc/systemd/system/sigil.service'
+
+See all available reports:
+  ls -lh /opt/sigil/data/
+
+================================================================================
+QUICK DECISION TREE
+================================================================================
+
+Q: Is the service running?
+A: Yes, ✅ ACTIVE since 02:53:54 UTC (PID 194514)
+
+Q: Are there any errors?
+A: No, error_count = 0. System is healthy.
+
+Q: Is it profitable?
+A: Yes, +$1,145.28 P&L across 608 trades (59.2% WR)
+
+Q: Why aren't signals being accepted?
+A: Normal - all 15-min markets already resolved. Waiting for fresh markets.
+   This is expected behavior during market cycle transition.
+
+Q: What should I watch?
+A: Signal acceptance rate should increase when fresh markets launch.
+   Balance should stabilize once trading resumes. Monitor next 4-6 hours.
+
+Q: Is there a problem?
+A: No. Service is performing normally. 2 API timeouts are non-critical.
+   Recent restart is clean. System is stable.
+
+Q: Should I restart it?
+A: No. Service is running fine. Recommend 4-6 hour stability test.
+
+Q: What's the next step?
+A: Monitor for 4 hours. Check signal acceptance and balance trends.
+   No action required unless alerts trigger.
+
+================================================================================
+                         Report Index Complete
+                    Generated: 2026-02-09 03:05 UTC
+                          Status: ✅ OPERATIONAL
+================================================================================

@@ -184,12 +184,16 @@ class Settings(BaseSettings):
     dual_window_assets: str = ""  # Assets on BOTH default AND 15m windows (e.g., "BTC")
     momentum_max_pct: float = 0.02  # 2% cap — reject flash crashes / data glitches
 
+    # S2: Early-epoch entry filter (T0: 4-5m remaining = only net-positive bucket)
+    momentum_max_epoch_elapsed_secs: int = 0  # 0=disabled. Block momentum entries after N secs into epoch
+
     # Sharp move detector (fires on 0.2% in 15s alongside the 60s rolling window)
     enable_sharp_move: bool = False
     sharp_move_window_secs: int = 15       # rolling sub-window for sharp spike detection
     sharp_move_trigger_pct: float = 0.002  # 0.2% in 15s = sharp move
     sharp_move_shadow: bool = True         # shadow mode: log only, no execution
     sharp_move_max_entry_price: float = 0.95  # sharp moves can enter 0.90-0.95 with taker (fee <0.20%)
+    sharp_move_bet_multiplier: float = 1.0  # sizing multiplier for sharp_move (0.5 = half-size for first 30 trades)
 
     # Per-asset entry price ranges (0=use global min/max_entry_price)
     asset_min_entry_btc: float = 0.0
@@ -216,9 +220,71 @@ class Settings(BaseSettings):
     momentum_reversal_exit: bool = False       # enable reversal exit check
     momentum_reversal_pct: float = 0.002       # 0.2% reversal from entry triggers exit
     momentum_reversal_window_secs: int = 180   # only check within first N secs of entry
+    binance_reversal_min_hold_secs: int = 15   # min secs before Binance reversal exit can fire
+    momentum_reversal_dry_run: bool = True     # log reversal signals without exiting
+    momentum_entry_dry_run: bool = True       # log momentum entries without placing orders
+
+    # Chainlink Oracle Feed (BTC/USD on Polygon — actual resolution source)
+    oracle_enabled: bool = False                    # master switch
+    oracle_alchemy_api_key: str = ""                # ORACLE_ALCHEMY_API_KEY in .env
+    oracle_contract: str = "0xc907E116054Ad103354f2D350FD2514433D57F6f"
+    oracle_stale_threshold_secs: int = 60           # treat as unhealthy if no update within this
+    rtds_enabled: bool = True                       # Polymarket RTDS WS for resolution-aligned Chainlink prices
+
+    # Oracle snipe confirmation gate (block snipes when oracle disagrees with direction)
+    oracle_snipe_confirm: bool = False
+    oracle_snipe_confirm_dry_run: bool = True       # log disagreements without blocking
+
+    # Oracle reversal exit (use Chainlink instead of Binance for reversal detection)
+    oracle_reversal_exit: bool = False              # reuses momentum_reversal_dry_run
+    oracle_exit_min_hold_secs: int = 45            # wait N secs after entry before oracle can exit
+    oracle_exit_secs_remaining: int = 90
+    oracle_exit_secs_remaining_momentum: int = 240  # wider ceiling for momentum positions (entered >120s before market end)           # only check oracle when < N secs remain
+    oracle_exit_5m_only: bool = True               # restrict oracle exit to 5m windows (15m formula wrong)
+
+    # Oracle epoch delta assist: use oracle delta from epoch open as supplementary momentum signal
+    oracle_epoch_delta_assist: bool = False         # enable oracle delta as additional momentum source
+    oracle_epoch_delta_min_pct: float = 0.0015      # min |delta| to consider (0.15%)
+    oracle_epoch_delta_shadow: bool = True           # shadow mode: log only, no live trades
+
+    # Oracle flip: when snipe gate blocks, buy the OPPOSITE (cheap) token oracle says wins
+    oracle_flip_enabled: bool = False
+    oracle_flip_dry_run: bool = True              # log flips without placing orders
+    oracle_flip_max_bet: float = 100.0            # dedicated max bet (can be higher, oracle is certain)
+    oracle_flip_max_opposite_price: float = 0.15  # only flip if cheap side <= this
+    oracle_flip_min_opposite_price: float = 0.01  # skip if too cheap (no liquidity)
+    oracle_flip_max_secs_remaining: int = 30      # only flip with <= 30s left (highest certainty)
+    oracle_flip_min_delta_pct: float = 0.001      # min oracle vs open price delta (0.1%) to flip — skip noise
+
+    # Oracle flip auto-escalation: raise max_bet after proven track record
+    oracle_flip_escalation_min_trades: int = 30   # min completed flip trades before escalating (R8: n<30 is ANECDOTAL)
+    oracle_flip_escalation_min_wr: float = 70.0   # min WR% to escalate
+    oracle_flip_escalated_max_bet: float = 100.0  # escalated max bet after gate
+
+    # Reversal short: exit losing side + enter winning side on oracle reversal
+    reversal_short_enabled: bool = False
+    reversal_short_dry_run: bool = True
+    reversal_short_min_secs_remaining: int = 45     # only flip if >= this many secs left
+    reversal_short_max_down_price: float = 0.35     # only flip if opposite side <= this
+    reversal_short_min_down_price: float = 0.10     # skip if opposite side too cheap (edge gone)
+    reversal_short_max_bet: float = 25.0             # hard cap on flip bet size
+
+    # Trailing stop: exit when price drops X% from peak (locks in gains)
+    trailing_stop_enabled: bool = False
+    trailing_stop_pct: float = 0.12       # 12% drop from peak triggers exit
+    trailing_stop_min_gain_pct: float = 0.05  # only activate after 5% gain from entry
+    trailing_stop_dry_run: bool = True    # log only, no actual exits
+
+    # Mid-price stop-loss for momentum positions (bypasses hold_to_resolution)
+    mid_price_stop_enabled: bool = False
+    mid_price_stop_pct: float = 0.35   # exit when mid-price drops 35% below entry
+
+    # Pre-resolution exit: force sell momentum positions N seconds before market end
+    pre_resolution_exit_secs: int = 0   # 0 = disabled. e.g. 15 = sell 15s before resolution
 
     # Window Delta mode (buy winning side at T-N seconds before 5m window close)
     enable_window_delta: bool = False
+    window_delta_shadow: bool = True   # shadow mode: log signal without executing
     window_delta_lead_secs: int = 10   # fire signal N seconds before window close
     window_delta_min_pct: float = 0.001  # 0.1% minimum price move to consider direction "decided"
     window_delta_assets: str = ""  # comma-separated, empty = use asset_filter
@@ -248,6 +314,42 @@ class Settings(BaseSettings):
     snipe_15m_max_entry_price: float = 0.985
     snipe_15m_min_secs_remaining: int = 8
     snipe_15m_max_secs_remaining: int = 45
+    snipe_15m_block_directions: str = ""  # comma-sep "BTC:Up,ETH:Down" to skip specific asset+direction combos on 15m
+
+    # S4: Contrarian streak entry (bet against 3+ consecutive same-direction outcomes)
+    streak_tracking_enabled: bool = False    # track epoch outcomes for streak detection
+    streak_min_length: int = 3              # minimum consecutive same-direction outcomes to trigger
+    streak_contrarian_dry_run: bool = True  # log only, no real orders
+    streak_contrarian_bet_pct: float = 0.03  # 3% of balance per contrarian entry
+    streak_contrarian_max_bet: float = 30.0  # hard $ cap per contrarian trade
+    streak_contrarian_min_price: float = 0.40  # only enter if opposite side >= this (meaningful edge)
+    streak_contrarian_max_price: float = 0.60  # only enter if opposite side <= this (avoid chasing)
+
+    # Market maker (risk-free pair-cost arbitrage: buy BOTH sides when pair_cost < $1.00)
+    enable_market_maker: bool = False
+    mm_dry_run: bool = True               # log only, no real orders
+    mm_assets: str = ""                    # comma-separated, empty = use asset_filter
+    mm_scan_5m: bool = True               # scan 5m markets
+    mm_scan_15m: bool = True              # scan 15m markets
+    mm_max_pair_cost: float = 0.995       # max fee-inclusive pair cost (profit = 1.00 - this)
+    mm_bet_pct: float = 0.05             # 5% of balance per leg
+    mm_max_bet: float = 50.0             # hard $ cap per leg
+    mm_scan_interval: float = 0.05       # seconds between scans (50ms for sub-second reaction)
+    mm_obs_flush_interval: float = 5.0   # seconds between batched observation DB flushes
+    mm_balance_cache_ttl: float = 30.0   # seconds to cache get_balance() result
+    mm_max_secs_remaining: int = 60      # start scanning N seconds before epoch end
+    mm_min_secs_remaining: int = 8       # stop scanning (need time for FOK fill)
+
+    # Stale quote sniping (directional: buy underpriced side when Binance shows clear direction)
+    mm_stale_enabled: bool = False       # enable stale quote detection (respects mm_dry_run)
+    mm_stale_min_move_pct: float = 0.002 # 0.2% min Binance move to consider direction clear
+    mm_stale_max_fair_discount: float = 0.08  # buy if ask is >=8% below implied fair value
+    mm_stale_min_ask: float = 0.45       # don't buy below this (too risky, high fees)
+    mm_stale_max_ask: float = 0.92       # don't buy above this (not enough upside)
+    mm_stale_bet_pct: float = 0.05       # 5% of balance per stale quote trade
+    mm_stale_max_bet: float = 50.0       # hard $ cap per stale quote trade
+    mm_stale_max_secs_remaining: int = 180  # stale quotes scan up to 3min before epoch end (wider than pair arb)
+    mm_stale_min_secs_remaining: int = 8    # stop scanning (need time for FOK fill)
 
     # Order entry/exit mode
     entry_mode: str = "taker"  # "taker" (cross spread) or "maker" (post-only)
@@ -263,6 +365,7 @@ class Settings(BaseSettings):
     max_daily_loss: float = 40.0         # Halt new trades if daily realized loss exceeds this ($, 0=disabled)
     max_consecutive_losses: int = 5      # Halt after N consecutive losing trades (0=disabled)
     loss_cooldown_mins: int = 60         # Pause duration after consecutive loss trigger (minutes)
+    post_loss_cooldown_mins: int = 0     # Pause after ANY single loss (0=disabled). T0: 29% WR after loss vs 85% after win (n=240).
     kill_switch_path: str = ""           # File path for kill switch (empty=disabled)
     lagbot_data_dir: str = "data"        # Per-instance data directory (set via LAGBOT_DATA_DIR)
 
@@ -292,6 +395,45 @@ class Settings(BaseSettings):
     danger_hours: str = ""                 # CSV of UTC hours, e.g. "1,2,3" (5-7pm PST)
     danger_hours_size_mult: float = 0.5    # sizing multiplier during danger hours
     up_direction_size_mult: float = 0.5    # sizing multiplier for Up direction trades (Down=1.0)
+
+    # Flat regime blocking (low vol = directionality ratio is noisy, WR drops)
+    flat_regime_block: bool = False         # block trading when volatility_1h < flat_regime_max_vol
+    flat_regime_max_vol: float = 0.003     # vol below this = flat regime (default 0.3%)
+
+    # S1: Regime-adaptive sizing (T0: calm=44% WR, moderate=80% WR, elevated=mixed)
+    regime_sizing_enabled: bool = False     # enable 4-tier vol regime sizing
+    regime_cautious_max_vol: float = 0.005  # vol below this = cautious regime (reduced size)
+    regime_optimal_max_vol: float = 0.010   # vol below this = optimal regime (full size), above = elevated
+    regime_cautious_mult: float = 0.50      # sizing multiplier for cautious regime
+    regime_elevated_mult: float = 0.75      # sizing multiplier for elevated regime (big tails)
+
+    # Liquidation cascade block (block entries when large cascade opposes direction)
+    liq_cascade_block_enabled: bool = False  # block when liq cascade > threshold against our direction
+    liq_cascade_min_volume: float = 10_000_000  # $10M in 60s to trigger block
+
+    # Extreme funding rate gate (block entries when crowded positioning)
+    funding_extreme_block_enabled: bool = False  # block when funding rate is extreme
+    funding_extreme_threshold: float = 0.0005    # 0.05% = overheated (matches regime_detector)
+
+    # Taker CVD confirmation (filter momentum by taker buy/sell agreement)
+    cvd_confirmation_enabled: bool = False  # require taker delta agrees with momentum direction
+    cvd_confirmation_dry_run: bool = True   # log CVD mismatches but don't block
+
+    # VPIN adverse selection filter (block entries when informed traders oppose our direction)
+    vpin_block_enabled: bool = False         # block when VPIN indicates adverse selection
+    vpin_block_threshold: float = 0.65       # VPIN above this = high informed trading activity
+    vpin_block_dry_run: bool = True          # log only, no actual blocking
+
+    # Coinbase Premium confirmation (cross-exchange divergence signal)
+    coinbase_premium_enabled: bool = False    # enable concurrent Coinbase feed for premium calc
+    coinbase_premium_block_enabled: bool = False  # block when premium strongly opposes direction
+    coinbase_premium_min_bps: float = 10.0   # min absolute premium (bps) to consider significant
+    coinbase_premium_block_dry_run: bool = True   # log only, no actual blocking
+
+    # Liquidation cascade offensive boost (increase sizing during aligned cascades)
+    liq_cascade_boost_enabled: bool = False   # boost sizing when cascade aligns with direction
+    liq_cascade_boost_volume: float = 5_000_000  # $5M in 60s to trigger offensive boost
+    liq_cascade_boost_multiplier: float = 2.0    # max sizing multiplier during aligned cascade
 
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training

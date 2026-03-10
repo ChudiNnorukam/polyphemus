@@ -67,6 +67,10 @@ class SignalLogger:
                 minute_utc INTEGER,
                 day_of_week INTEGER,
 
+                -- Order flow (from Binance WS)
+                vpin_5m REAL,
+                taker_delta REAL,
+
                 -- Regime (from RegimeDetector)
                 regime TEXT,
                 volatility_1h REAL,
@@ -109,12 +113,43 @@ class SignalLogger:
         """)
         self._conn.commit()
 
+        # Epoch coverage: log every 5m epoch for analysis of missed opportunities
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS epoch_coverage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                epoch INTEGER NOT NULL,
+                asset TEXT NOT NULL,
+                window_secs INTEGER NOT NULL DEFAULT 300,
+                oracle_open_price REAL,
+                oracle_close_price REAL,
+                oracle_delta_pct REAL,
+                oracle_direction TEXT,
+                binance_open_price REAL,
+                binance_close_price REAL,
+                binance_delta_pct REAL,
+                bot_saw_signal INTEGER DEFAULT 0,
+                bot_signal_source TEXT,
+                resolved_outcome TEXT,
+                resolved_price REAL,
+                timestamp TEXT NOT NULL,
+                UNIQUE(epoch, asset, window_secs)
+            )
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_epoch_coverage_epoch ON epoch_coverage(epoch)
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_epoch_coverage_asset ON epoch_coverage(asset)
+        """)
+        self._conn.commit()
+
         # Additive migrations — try/except pattern (ALTER TABLE IF NOT EXISTS not valid in SQLite)
         _migration_cols = [
             ("strategy_type", "TEXT"), ("pair_cost", "REAL"), ("source", "TEXT"),
             ("fear_greed", "REAL"), ("market_regime", "TEXT"),
             ("oi_change_pct", "REAL"), ("oi_trend", "TEXT"),
             ("dry_run", "INTEGER"),
+            ("vpin_5m", "REAL"), ("taker_delta", "REAL"),
         ]
         for col_name, col_def in _migration_cols:
             try:
@@ -183,6 +218,62 @@ class SignalLogger:
         except Exception as e:
             self._logger.error(f"Failed to update signal {signal_id}: {e}")
 
+    def log_epoch(self, epoch: int, asset: str, window_secs: int = 300,
+                  oracle_open: float = None, binance_open: float = None,
+                  bot_saw_signal: bool = False, bot_signal_source: str = None):
+        """Log the start of a new epoch for coverage analysis."""
+        now = datetime.now(timezone.utc)
+        try:
+            self._conn.execute("""
+                INSERT OR IGNORE INTO epoch_coverage
+                    (epoch, asset, window_secs, oracle_open_price, binance_open_price,
+                     bot_saw_signal, bot_signal_source, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (epoch, asset, window_secs, oracle_open, binance_open,
+                  1 if bot_saw_signal else 0, bot_signal_source, now.isoformat()))
+            self._conn.commit()
+        except Exception as e:
+            self._logger.error(f"Failed to log epoch {epoch}/{asset}: {e}")
+
+    def update_epoch_outcome(self, epoch: int, asset: str, window_secs: int = 300,
+                             oracle_close: float = None, oracle_delta_pct: float = None,
+                             oracle_direction: str = None, binance_close: float = None,
+                             binance_delta_pct: float = None,
+                             resolved_outcome: str = None, resolved_price: float = None,
+                             bot_saw_signal: bool = None, bot_signal_source: str = None):
+        """Update epoch with close/resolution data at epoch end."""
+        updates = {}
+        if oracle_close is not None:
+            updates["oracle_close_price"] = oracle_close
+        if oracle_delta_pct is not None:
+            updates["oracle_delta_pct"] = oracle_delta_pct
+        if oracle_direction is not None:
+            updates["oracle_direction"] = oracle_direction
+        if binance_close is not None:
+            updates["binance_close_price"] = binance_close
+        if binance_delta_pct is not None:
+            updates["binance_delta_pct"] = binance_delta_pct
+        if resolved_outcome is not None:
+            updates["resolved_outcome"] = resolved_outcome
+        if resolved_price is not None:
+            updates["resolved_price"] = resolved_price
+        if bot_saw_signal is not None:
+            updates["bot_saw_signal"] = 1 if bot_saw_signal else 0
+        if bot_signal_source is not None:
+            updates["bot_signal_source"] = bot_signal_source
+        if not updates:
+            return
+        set_clauses = ", ".join([f"{k} = ?" for k in updates.keys()])
+        values = list(updates.values()) + [epoch, asset, window_secs]
+        try:
+            self._conn.execute(
+                f"UPDATE epoch_coverage SET {set_clauses} WHERE epoch = ? AND asset = ? AND window_secs = ?",
+                values,
+            )
+            self._conn.commit()
+        except Exception as e:
+            self._logger.error(f"Failed to update epoch {epoch}/{asset}: {e}")
+
     def get_training_data(self, min_signals: int = 50) -> Optional[list]:
         """Get labeled signals for ML training.
 
@@ -199,6 +290,7 @@ class SignalLogger:
                 CASE WHEN asset = 'SOL' THEN 1 ELSE 0 END as is_sol,
                 CASE WHEN direction = 'Up' THEN 1 ELSE 0 END as is_up,
                 market_window_secs,
+                COALESCE(vpin_5m, 0.5) as vpin_5m,
                 is_win
             FROM signals
             WHERE is_win IS NOT NULL
@@ -225,6 +317,7 @@ class SignalLogger:
             "volatility_1h", "trend_1h",
             "is_btc", "is_eth", "is_sol", "is_up",
             "market_window_secs",
+            "vpin_5m",
         ]
 
     def get_stats(self) -> Dict[str, Any]:

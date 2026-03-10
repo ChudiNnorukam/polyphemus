@@ -1,0 +1,40 @@
+[Unit]
+Description=Aave V3 Liquidation Bot (Flash Loans on Arbitrum)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=root
+WorkingDirectory=/opt/liquidation-bot
+Environment="PATH=/opt/liquidation-bot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/opt/liquidation-bot/.env
+ExecStart=/opt/liquidation-bot/venv/bin/python3 /opt/liquidation-bot/run_liquidation_bot.py
+WatchdogSec=300
+NotifyAccess=all
+
+# Restart policy
+Restart=always
+RestartSec=30
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=liquidation-bot
+
+# Resource limits
+MemoryLimit=1G
+CPUQuota=50%
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/liquidation-bot
+
+[Install]
+WantedBy=multi-user.target

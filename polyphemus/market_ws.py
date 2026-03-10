@@ -19,6 +19,7 @@ PING_INTERVAL = 10  # seconds
 RECONNECT_BASE = 1
 RECONNECT_MAX = 30
 RECONNECT_MULTIPLIER = 2
+MAX_CONNECTION_AGE = 300  # Force reconnect every 5 min to fix stale subscriptions
 
 
 class MarketWS:
@@ -41,6 +42,7 @@ class MarketWS:
         self._connected = False
         self._update_count = 0
         self._price_event: Optional[asyncio.Event] = None  # Set on every price update
+        self._connected_at: float = 0.0  # Track connection age for forced reconnects
 
     async def start(self) -> None:
         """Connect and run the message loop with auto-reconnect."""
@@ -152,6 +154,7 @@ class MarketWS:
                 self._session = aiohttp.ClientSession()
                 self._ws = await self._session.ws_connect(WS_URL, timeout=10)
                 self._connected = True
+                self._connected_at = time.time()
                 attempt = 0
                 self._logger.info(
                     f"MarketWS connected | {len(self._subscribed)} tokens tracked"
@@ -177,6 +180,15 @@ class MarketWS:
 
     async def _message_loop(self) -> None:
         async for msg in self._ws:
+            # Force reconnect after MAX_CONNECTION_AGE to fix stale subscriptions.
+            # Polymarket WS silently stops delivering book data for tokens
+            # subscribed on long-lived connections. Periodic reconnect ensures
+            # new epoch tokens always get fresh data.
+            if time.time() - self._connected_at > MAX_CONNECTION_AGE:
+                self._logger.info(
+                    f"MarketWS max age ({MAX_CONNECTION_AGE}s) reached, forcing reconnect"
+                )
+                break
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)

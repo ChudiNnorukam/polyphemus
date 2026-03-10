@@ -1,0 +1,365 @@
+================================================================================
+PASSIVBOT DEPLOYMENT KIT - COMPLETE MANIFEST
+================================================================================
+
+Created: 2026-02-05
+Target: VPS 142.93.143.178 (root)
+Exchange: Bybit USDT Perpetuals
+Status: READY FOR DEPLOYMENT
+
+================================================================================
+FILE INVENTORY
+================================================================================
+
+DOCUMENTATION (5 files)
+  ✓ INDEX.md                          Navigation guide and quick reference
+  ✓ QUICKSTART.md                     5-minute getting started guide
+  ✓ README.md                         Complete reference documentation
+  ✓ TROUBLESHOOTING.md                Problem diagnosis and solutions
+  ✓ INVENTORY.md                      What's included and file descriptions
+
+EXECUTABLE SCRIPTS (3 files)
+  ✓ deploy-passivbot.sh               Initial VPS deployment (141 lines)
+  ✓ setup-api-keys.sh                 API key configuration (64 lines)
+  ✓ manage-bot.sh                     Daily bot management (383 lines)
+
+CONFIGURATION TEMPLATES (2 files)
+  ✓ configs/bybit-100-conservative.json    Conservative config ($100)
+  ✓ configs/bybit-500-balanced.json        Balanced config ($500)
+
+SYSTEM FILES (1 file)
+  ✓ passivbot.service                 Systemd service definition
+
+================================================================================
+TOTAL PACKAGE STATISTICS
+================================================================================
+
+Total Files:        11
+Total Lines:        ~2,100
+Total Size:         88 KB
+Documentation:      1,361 lines
+Code/Config:        740 lines
+
+Files by Type:
+  - Shell Scripts:  3 (all executable)
+  - JSON Config:    2
+  - Documentation:  5
+  - Systemd:        1
+
+================================================================================
+QUICK START (3 STEPS)
+================================================================================
+
+STEP 1: Deploy (5-10 minutes)
+  cd /Users/chudinnorukam/Projects/business/passivbot-deploy
+  ./deploy-passivbot.sh
+
+STEP 2: Configure (2 minutes)
+  ssh root@142.93.143.178
+  bash /opt/passivbot/setup-api-keys.sh
+  cp /opt/passivbot/configs/bybit-100-conservative.json \
+     /opt/passivbot/configs/live/active.json
+
+STEP 3: Start (1 minute)
+  systemctl start passivbot
+  journalctl -u passivbot -f
+
+Total Time to Live Trading: ~10 minutes
+
+================================================================================
+RECOMMENDED READING ORDER
+================================================================================
+
+1. INDEX.md (2 min)           - Navigation and overview
+2. QUICKSTART.md (3 min)      - 5-minute getting started
+3. README.md (15 min)         - Full documentation
+4. TROUBLESHOOTING.md (ref)   - Bookmark for later
+5. INVENTORY.md (5 min)       - Details about what's included
+
+================================================================================
+KEY FEATURES
+================================================================================
+
+Deployment Script (deploy-passivbot.sh)
+  ✓ Fully automated SSH deployment
+  ✓ System dependency installation
+  ✓ Python 3.12 with venv setup
+  ✓ Rust toolchain for optimization
+  ✓ Auto-configuration of systemd service
+  ✓ Config template upload
+
+API Key Setup (setup-api-keys.sh)
+  ✓ Interactive credential configuration
+  ✓ Input validation and confirmation
+  ✓ Secure storage (600 permissions)
+  ✓ Clear instructions for Bybit API keys
+
+Management Script (manage-bot.sh)
+  ✓ Remote bot control without port forwarding
+  ✓ 10+ commands (status, logs, health, etc.)
+  ✓ Color-coded output
+  ✓ Remote config upload capability
+  ✓ Comprehensive diagnostics
+
+Configuration Templates
+  ✓ Conservative: Long-only, single symbol, $50 max risk
+  ✓ Balanced: Both sides, dual symbols, $300 max risk
+  ✓ Pre-tuned for learning and active trading
+
+Systemd Service
+  ✓ Auto-restart on failure
+  ✓ Resource limits (512M memory, 50% CPU)
+  ✓ Journalctl logging
+  ✓ Security hardening
+
+================================================================================
+CONFIGURATION COMPARISON
+================================================================================
+
+CONSERVATIVE (bybit-100-conservative.json)
+  Capital Target:      $100
+  Max Exposure:        $50 (0.5 wallet limit)
+  Leverage:            3x
+  Symbols:             BTCUSDT (single)
+  Trading Sides:       Long only (no shorts)
+  Grid Spacing:        0.5%
+  Take Profit:         1-3%
+  Best For:            Learning, low risk, small accounts
+
+BALANCED (bybit-500-balanced.json)
+  Capital Target:      $500
+  Max Exposure:        $150/symbol (0.3 wallet limit)
+  Leverage:            3x
+  Symbols:             BTCUSDT + ETHUSDT (dual)
+  Trading Sides:       Both long and short
+  Grid Spacing:        0.4%
+  Take Profit:         0.8-1.2%
+  Best For:            Active trading, moderate capital
+
+================================================================================
+VERIFICATION CHECKLIST
+================================================================================
+
+Pre-Deployment:
+  [ ] SSH access verified to 142.93.143.178
+  [ ] Bybit account ready with perpetuals enabled
+  [ ] USDT available in futures wallet
+  [ ] All files in /Users/chudinnorukam/Projects/business/passivbot-deploy/
+
+Deployment:
+  [ ] ./deploy-passivbot.sh completed without errors
+  [ ] /opt/passivbot directory exists on VPS
+  [ ] Python venv created and activated
+  [ ] Passivbot repository cloned
+  [ ] Service file installed to /etc/systemd/system/
+
+Configuration:
+  [ ] bash /opt/passivbot/setup-api-keys.sh completed
+  [ ] API keys stored in /opt/passivbot/api_keys/api-keys.json
+  [ ] Config copied to /opt/passivbot/configs/live/active.json
+  [ ] JSON validation passed
+
+Testing:
+  [ ] systemctl status passivbot shows "active (running)"
+  [ ] journalctl shows "Connected to Bybit"
+  [ ] Bybit order book shows grid orders within 5 minutes
+  [ ] ./manage-bot.sh health shows all green checks
+  [ ] Manual position check on Bybit shows active trades
+
+Post-Launch:
+  [ ] Monitor logs for 24 hours: ./manage-bot.sh follow
+  [ ] Check P&L on Bybit dashboard daily
+  [ ] Review error logs weekly: ./manage-bot.sh errors
+  [ ] Scale capital only after 1-2 weeks of profits
+
+================================================================================
+COMMAND REFERENCE
+================================================================================
+
+LOCAL MACHINE (Deployment)
+  ./deploy-passivbot.sh              Deploy entire kit to VPS
+
+ON VPS (Initial Setup)
+  bash /opt/passivbot/setup-api-keys.sh
+  cp /opt/passivbot/configs/bybit-*.json /opt/passivbot/configs/live/active.json
+  systemctl start passivbot
+
+LOCAL MACHINE (Daily Management)
+  ./manage-bot.sh status              Full status report
+  ./manage-bot.sh logs 50             Show last 50 lines
+  ./manage-bot.sh follow              Real-time logs (Ctrl+C exit)
+  ./manage-bot.sh health              Health check
+  ./manage-bot.sh restart             Restart service
+  ./manage-bot.sh stop                Stop service
+  ./manage-bot.sh update-config FILE  Upload and activate config
+
+VPS DIRECT (Alternative)
+  journalctl -u passivbot -f          Real-time logs
+  journalctl -u passivbot -p err      Error logs only
+  systemctl status passivbot          Service status
+  systemctl restart passivbot         Restart service
+
+================================================================================
+SUPPORT RESOURCES
+================================================================================
+
+Passivbot
+  GitHub:        https://github.com/enarjord/passivbot
+  Documentation: https://enarjord.github.io/passivbot/
+  Community:     Discord (link in GitHub README)
+
+Bybit
+  API Docs:      https://bybit-exchange.github.io/docs/linear/
+  Status:        https://status.bybit.com
+  Support:       https://www.bybit.com/en/help-center/
+
+This Kit
+  Quick Start:   QUICKSTART.md
+  Full Docs:     README.md
+  Troubleshoot:  TROUBLESHOOTING.md
+  Reference:     INVENTORY.md
+
+================================================================================
+WHAT COMES AFTER DEPLOYMENT
+================================================================================
+
+First 24 Hours:
+  - Monitor in real-time with: ./manage-bot.sh follow
+  - Verify orders appear on Bybit
+  - Check that grid orders are being filled
+
+First Week:
+  - Review logs daily for errors
+  - Monitor P&L on Bybit dashboard
+  - Verify consistent trading activity
+
+First Month:
+  - Analyze trading performance
+  - Check win rate and profitability
+  - Consider config adjustments
+
+Ongoing:
+  - Monitor weekly logs
+  - Review monthly P&L
+  - Rotate API keys every 3 months
+  - Update Passivbot when new versions available
+
+================================================================================
+TROUBLESHOOTING QUICK REFERENCE
+================================================================================
+
+Bot Won't Start
+  → Check logs: journalctl -u passivbot -p err
+  → Verify config: python3 -m json.tool /opt/passivbot/configs/live/active.json
+  → See TROUBLESHOOTING.md → "Bot won't start"
+
+No Orders Placed
+  → Verify Bybit balance has USDT
+  → Check API key has "Trade" permission enabled
+  → See TROUBLESHOOTING.md → "Bot not placing orders"
+
+API Key Invalid
+  → Re-run: bash /opt/passivbot/setup-api-keys.sh
+  → Verify on Bybit: API key enabled, IP whitelisted
+  → See TROUBLESHOOTING.md → "API Key Issues"
+
+Connection Issues
+  → Check VPS internet: ssh root@142.93.143.178 "ping 8.8.8.8"
+  → Check Bybit API: curl -I https://api.bybit.com
+  → See TROUBLESHOOTING.md → "Network Issues"
+
+Performance Issues
+  → Check logs: ./manage-bot.sh logs 100
+  → Check health: ./manage-bot.sh health
+  → See TROUBLESHOOTING.md → "Performance Issues"
+
+================================================================================
+SAFETY REMINDERS
+================================================================================
+
+1. START SMALL
+   Use conservative config with $100 first
+   Increase capital only after proven stability
+
+2. MONITOR CONSTANTLY
+   Watch logs for first 24 hours
+   Check P&L daily for first week
+   Review weekly thereafter
+
+3. VERIFY ORDERS
+   Check Bybit order book to confirm trades
+   Ensure grid orders are actually being placed
+   Verify fills are occurring
+
+4. SECURE API KEYS
+   Store API keys only in /opt/passivbot/api_keys/api-keys.json
+   File permissions: 600 (readable by root only)
+   Rotate keys every 3 months
+   Never share or commit API keys
+
+5. RISK MANAGEMENT
+   Leverage (3x) is built into configs
+   Exposure limits prevent overleveraging
+   Stop losses are configured
+   Do not disable safety features
+
+6. BACKUP CONFIGURATION
+   Save custom configs outside VPS
+   Keep backups before major changes
+   Test changes on conservative config first
+
+================================================================================
+VERSION INFORMATION
+================================================================================
+
+Kit Version:          1.0
+Release Date:         2026-02-05
+Python Target:        3.12
+Exchange:             Bybit Linear (USDT Perpetuals)
+Default Leverage:     3x
+Min Capital:          $100 (conservative)
+Recommended Capital:  $500+ (balanced)
+
+================================================================================
+GETTING STARTED NOW
+================================================================================
+
+1. Read INDEX.md (2 minutes)
+   Overview of what you have
+
+2. Read QUICKSTART.md (3 minutes)
+   The fastest path to deployment
+
+3. Run ./deploy-passivbot.sh
+   Wait 5-10 minutes for installation
+
+4. SSH to VPS and configure
+   bash /opt/passivbot/setup-api-keys.sh
+
+5. Copy config and start
+   cp /opt/passivbot/configs/bybit-100-conservative.json \
+      /opt/passivbot/configs/live/active.json
+   systemctl start passivbot
+
+6. Monitor logs
+   journalctl -u passivbot -f
+
+Total time to live trading: ~10 minutes
+
+================================================================================
+READY TO DEPLOY!
+================================================================================
+
+Your Passivbot deployment kit is complete and ready.
+
+Next Steps:
+1. Start with INDEX.md for navigation
+2. Follow QUICKSTART.md for 5-minute setup
+3. Use README.md for complete documentation
+4. Bookmark TROUBLESHOOTING.md for reference
+
+Questions? Check TROUBLESHOOTING.md or README.md for answers.
+
+Good luck with your market making!
+
+================================================================================

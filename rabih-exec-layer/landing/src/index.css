@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Noise overlay — eliminates flat digital gradients */
+/* Noise overlay */
 body::before {
   content: '';
   position: fixed;
@@ -11,30 +11,34 @@ body::before {
   pointer-events: none;
   opacity: 0.04;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
-  background-repeat: repeat;
-  background-size: 128px 128px;
 }
 
-html { scroll-behavior: smooth; }
+:root {
+  --moss:     #2E4036;
+  --clay:     #CC5833;
+  --cream:    #F2F0E9;
+  --charcoal: #1A1A1A;
+  --font-head:  'Plus Jakarta Sans', sans-serif;
+  --font-drama: 'Cormorant Garamond', serif;
+  --font-data:  'IBM Plex Mono', monospace;
+}
 
-*, *::before, *::after { box-sizing: border-box; }
+* { box-sizing: border-box; }
 
 body {
-  margin: 0;
-  font-family: 'Inter', sans-serif;
-  background-color: #FAF8F5;
-  color: #0D0D12;
-  -webkit-font-smoothing: antialiased;
+  font-family: var(--font-head);
+  background: var(--cream);
+  color: var(--charcoal);
+  overflow-x: hidden;
 }
 
-/* Magnetic button */
 .btn-magnetic {
   position: relative;
   overflow: hidden;
   transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 .btn-magnetic:hover { transform: scale(1.03); }
-.btn-bg {
+.btn-magnetic .btn-bg {
   position: absolute;
   inset: 0;
   transform: translateY(101%);
@@ -42,30 +46,18 @@ body {
 }
 .btn-magnetic:hover .btn-bg { transform: translateY(0); }
 
-/* Nav link lift */
-.nav-link { transition: transform 0.2s ease, opacity 0.2s ease; }
-.nav-link:hover { transform: translateY(-1px); opacity: 0.7; }
+@keyframes blink       { 0%,100%{opacity:1}50%{opacity:0} }
+@keyframes pulse-dot   { 0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.4);opacity:0.6} }
+@keyframes ekg         { 0%{stroke-dashoffset:300}100%{stroke-dashoffset:0} }
+@keyframes scan        { 0%{transform:translateX(-100%)}100%{transform:translateX(400%)} }
+@keyframes slow-spin   { from{transform:rotate(0deg)}to{transform:rotate(360deg)} }
+@keyframes op-pulse    { 0%,100%{opacity:0.3}50%{opacity:0.7} }
 
-/* Blinking cursor */
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
-.cursor-blink { animation: blink 1s step-end infinite; }
+.animate-blink      { animation: blink 1s step-end infinite; }
+.animate-pulse-dot  { animation: pulse-dot 2s ease-in-out infinite; }
+.animate-slow-spin  { animation: slow-spin 12s linear infinite; }
+.animate-op-pulse   { animation: op-pulse 3s ease-in-out infinite; }
 
-/* Pulsing dot */
-@keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(1.4)} }
-.pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
-
-/* EKG stroke */
-@keyframes ekg { from{stroke-dashoffset:600} to{stroke-dashoffset:0} }
-.ekg-path { animation: ekg 2.5s linear infinite; }
-
-/* Laser scan */
-@keyframes scan { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
-.laser-scan { animation: scan 2s ease-in-out infinite; }
-
-/* Rotate */
-@keyframes slow-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
-.slow-spin { animation: slow-spin 12s linear infinite; }
-
-/* Green operational pulse */
-@keyframes op-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,0.4)} 70%{box-shadow:0 0 0 6px rgba(34,197,94,0)} }
-.op-dot { animation: op-pulse 2s ease-in-out infinite; }
+.status-on-track { color:#2E8B57; background:rgba(46,139,87,0.12); }
+.status-at-risk  { color:#CC5833; background:rgba(204,88,51,0.12); }
+.status-failing  { color:#B91C1C; background:rgba(185,28,28,0.12); }

@@ -221,39 +221,77 @@ class Redeemer:
         """Set PerformanceDB for updating P&L after redemption confirms a win."""
         self._db = db
 
-    def _record_redemption_pnl(self, event: RedemptionEvent):
-        """Update DB trade P&L after successful redemption (confirms WIN).
+    def _get_usdc_balance(self) -> int:
+        """Check wallet USDC balance on-chain (6 decimals, returns raw int)."""
+        try:
+            return self._usdc_e.functions.balanceOf(self._wallet).call()
+        except Exception:
+            return -1  # -1 signals check failed
 
-        Redemption success means the trade won. Update the force-closed
-        trade record with exit_price=1.0 and computed pnl.
+    def _record_redemption_pnl(self, event: RedemptionEvent, won: bool = True):
+        """Update DB trade P&L after redemption.
+
+        Args:
+            event: Redemption event with slug and shares.
+            won: True if USDC was received (position won), False if lost.
         """
         if not self._db:
             return
+
+        matchable_reasons = (
+            'insufficient_shares', 'ghost_cleanup', 'market_resolved',
+            'restart_stale', 'orphan_sweep',
+        )
+        reason_placeholders = ','.join('?' for _ in matchable_reasons)
+
         try:
             conn = self._db._get_conn()
             try:
                 cursor = conn.cursor()
-                cursor.execute(
-                    """UPDATE trades SET
-                        exit_price = 1.0,
-                        exit_reason = 'redeemed',
-                        pnl = (1.0 - entry_price) * entry_size,
-                        pnl_pct = CASE WHEN entry_price > 0
-                            THEN (1.0 - entry_price) / entry_price ELSE 0.0 END
-                    WHERE slug = ? AND exit_time IS NOT NULL
-                        AND (exit_reason = 'insufficient_shares'
-                             OR exit_reason = 'ghost_cleanup'
-                             OR exit_reason = 'market_resolved')
-                        AND (pnl IS NULL OR pnl = 0.0)""",
-                    (event.slug,)
-                )
-                if cursor.rowcount > 0:
-                    conn.commit()
-                    self._logger.info(
-                        f"Updated P&L for redeemed trade: {event.slug}"
-                    )
+                total_updated = 0
+
+                if won:
+                    update_sql = f"""UPDATE trades SET
+                            exit_price = 1.0,
+                            exit_reason = 'redeemed',
+                            pnl = (1.0 - entry_price) * entry_size,
+                            pnl_pct = CASE WHEN entry_price > 0
+                                THEN (1.0 - entry_price) / entry_price ELSE 0.0 END
+                        WHERE {{where_clause}} AND exit_time IS NOT NULL
+                            AND exit_reason IN ({reason_placeholders})
+                            AND (pnl IS NULL OR pnl <= 0.0)"""
                 else:
-                    conn.commit()
+                    update_sql = f"""UPDATE trades SET
+                            exit_price = 0.0,
+                            exit_reason = 'redeemed_loss',
+                            pnl = -(entry_price * entry_size),
+                            pnl_pct = -1.0
+                        WHERE {{where_clause}} AND exit_time IS NOT NULL
+                            AND exit_reason IN ({reason_placeholders})
+                            AND (pnl IS NULL OR pnl <= 0.0)"""
+
+                # Try matching by slug first (works for non-orphan events)
+                cursor.execute(
+                    update_sql.format(where_clause="slug = ?"),
+                    (event.slug, *matchable_reasons)
+                )
+                total_updated += cursor.rowcount
+
+                # For orphan sweeps, also match by token_id
+                if event.token_ids:
+                    for tid in event.token_ids:
+                        cursor.execute(
+                            update_sql.format(where_clause="token_id = ?"),
+                            (tid, *matchable_reasons)
+                        )
+                        total_updated += cursor.rowcount
+
+                conn.commit()
+                if total_updated > 0:
+                    tag = "WIN" if won else "LOSS"
+                    self._logger.info(
+                        f"Updated P&L ({tag}) for {total_updated} redeemed trade(s): {event.slug}"
+                    )
             finally:
                 conn.close()
         except Exception as e:
@@ -453,6 +491,9 @@ class Redeemer:
         """Redeem via PROXY relay (gasless, for MagicLink/ProxyWallet type 1)."""
         loop = asyncio.get_event_loop()
 
+        # Check USDC balance before redemption (for win/loss detection)
+        bal_before = await loop.run_in_executor(None, self._get_usdc_balance)
+
         def _do():
             redeem_cd = _encode_redeem_calldata(cid_bytes)
             proxy_data = _encode_proxy_calldata([redeem_cd])
@@ -517,21 +558,31 @@ class Redeemer:
         tx_id = result.get("transactionId", "unknown")
         self._total_redeemed += event.shares
         self._gasless_count += 1
+
+        # Check USDC balance after redemption to determine win/loss
+        await asyncio.sleep(3)  # allow relay confirmation
+        bal_after = await loop.run_in_executor(None, self._get_usdc_balance)
+        won = bal_before >= 0 and bal_after > bal_before
+
+        tag = "WIN" if won else "LOSS"
         self._logger.info(
-            f"Redeemed (PROXY relay): {event.slug} | {event.shares:.0f} shares | "
+            f"Redeemed (PROXY relay, {tag}): {event.slug} | {event.shares:.0f} shares | "
             f"txn_id={str(tx_id)[:16]}..."
         )
         if self._slack:
             try:
-                self._slack.notify_redemption(slug=event.slug, shares=event.shares)
+                self._slack.notify_redemption(slug=event.slug, shares=event.shares, won=won)
             except Exception:
                 pass
-        self._record_redemption_pnl(event)
+        self._record_redemption_pnl(event, won=won)
         return "redeemed"
 
     async def _redeem_gasless(self, event: RedemptionEvent, cid_bytes: bytes) -> str:
         """Redeem via Safe Builder Relayer (zero gas cost, type 2 only)."""
         loop = asyncio.get_event_loop()
+
+        # Check USDC balance before redemption
+        bal_before = await loop.run_in_executor(None, self._get_usdc_balance)
 
         def _do():
             from py_builder_relayer_client.models import OperationType, SafeTransaction
@@ -562,16 +613,22 @@ class Redeemer:
             self._gasless_count += 1
             tx_id = getattr(resp, 'transaction_id', 'unknown')
             tx_hash = getattr(resp, 'transaction_hash', '')
+
+            # Determine win/loss from USDC balance change
+            bal_after = await loop.run_in_executor(None, self._get_usdc_balance)
+            won = bal_before >= 0 and bal_after > bal_before
+
+            tag = "WIN" if won else "LOSS"
             self._logger.info(
-                f"Redeemed (gasless): {event.slug} | {event.shares:.0f} shares | "
+                f"Redeemed (gasless, {tag}): {event.slug} | {event.shares:.0f} shares | "
                 f"id={tx_id} | tx={str(tx_hash)[:16]}..."
             )
             if self._slack:
                 try:
-                    self._slack.notify_redemption(slug=event.slug, shares=event.shares)
+                    self._slack.notify_redemption(slug=event.slug, shares=event.shares, won=won)
                 except Exception:
                     pass
-            self._record_redemption_pnl(event)
+            self._record_redemption_pnl(event, won=won)
             return "redeemed"
 
         self._logger.warning(f"Gasless redeem timed out for {event.slug}")
@@ -580,6 +637,9 @@ class Redeemer:
     async def _redeem_onchain(self, event: RedemptionEvent, cid_bytes: bytes) -> str:
         """Redeem via direct on-chain transaction (costs POL gas)."""
         loop = asyncio.get_event_loop()
+
+        # Check USDC balance before redemption
+        bal_before = await loop.run_in_executor(None, self._get_usdc_balance)
 
         def _do():
             # Check POL balance for gas
@@ -633,16 +693,22 @@ class Redeemer:
                 self._total_redeemed += event.shares
                 self._total_gas_pol += result["gas_cost_pol"]
                 self._onchain_count += 1
+
+                # Determine win/loss from USDC balance change
+                bal_after = await loop.run_in_executor(None, self._get_usdc_balance)
+                won = bal_before >= 0 and bal_after > bal_before
+
+                tag = "WIN" if won else "LOSS"
                 self._logger.info(
-                    f"Redeemed (on-chain): {event.slug} | {event.shares:.0f} shares | "
+                    f"Redeemed (on-chain, {tag}): {event.slug} | {event.shares:.0f} shares | "
                     f"tx={result['tx_hash'][:16]}... | gas={result['gas_cost_pol']:.6f} POL"
                 )
                 if self._slack:
                     try:
-                        self._slack.notify_redemption(slug=event.slug, shares=event.shares)
+                        self._slack.notify_redemption(slug=event.slug, shares=event.shares, won=won)
                     except Exception:
                         pass
-                self._record_redemption_pnl(event)
+                self._record_redemption_pnl(event, won=won)
                 return "redeemed"
             else:
                 self._logger.error(
@@ -724,22 +790,37 @@ class Redeemer:
 
         self._logger.info(f"Orphan sweep: {len(orphans)} redeemable orphans found")
 
-        # Dedupe by condition_id (multiple tokens can share one condition)
+        # Dedupe by condition_id, collect ALL token_ids per condition
         seen_conditions = {}
+        condition_token_ids = {}  # condition_id -> list of token_ids
         for o in orphans:
             cid = o["condition_id"]
             if cid not in seen_conditions:
                 seen_conditions[cid] = o
+                condition_token_ids[cid] = [o["token_id"]]
             else:
                 seen_conditions[cid]["size"] += o["size"]
+                condition_token_ids[cid].append(o["token_id"])
 
         for cid, info in seen_conditions.items():
+            token_ids = condition_token_ids[cid]
+
+            # Close any matching DB trades by token_id BEFORE enqueueing.
+            # Prevents ghost entries with exit_time IS NULL on restart.
+            if self._db:
+                for tid in token_ids:
+                    try:
+                        self._db.force_close_by_token_id(tid, 'orphan_sweep')
+                    except Exception as e:
+                        self._logger.warning(f"Orphan sweep DB close failed for {tid[:16]}...: {e}")
+
             event = RedemptionEvent(
                 condition_id=cid,
                 slug=f"orphan:{info['title']}",
                 winning_side="",
                 shares=info["size"],
                 settled_at=time.time(),
+                token_ids=token_ids,
             )
             self._logger.info(
                 f"Orphan sweep: queuing {info['size']:.0f} shares | {info['title']}"

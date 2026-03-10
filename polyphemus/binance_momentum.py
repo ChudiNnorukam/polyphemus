@@ -97,6 +97,18 @@ class BinanceMomentumFeed:
         self._market_ws = None  # type: Optional[MarketWS]
         self._prefetch_task: Optional[asyncio.Task] = None
 
+        # Taker CVD buffers: symbol -> deque of (timestamp, signed_qty)
+        # positive = taker buy, negative = taker sell
+        self._taker_buffers: Dict[str, deque] = {
+            symbol: deque(maxlen=1200)  # ~20 min of trade data
+            for symbol in BINANCE_SYMBOLS
+        }
+
+        # Coinbase Premium: concurrent price feed for cross-exchange divergence
+        self._coinbase_prices: Dict[str, float] = {}  # symbol -> latest price
+        self._coinbase_session: Optional[aiohttp.ClientSession] = None
+        self._coinbase_ws: Optional[aiohttp.ClientWebSocketResponse] = None
+
         # Liquidation tracking: asset -> deque of (timestamp, side, usd_value)
         self._liq_buffers: Dict[str, deque] = {}
         self._liq_ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -109,9 +121,191 @@ class BinanceMomentumFeed:
         # Snipe dry-run resolution tracking: list of (epoch_end_ts, signal_id, token_id, entry_price)
         self._snipe_pending: list = []
 
+        # Optional Chainlink oracle feed for snipe confirmation (set by signal_bot)
+        self._chainlink = None
+
+        # S4: Streak tracking - per-asset list of recent epoch outcomes ("up"/"down")
+        self._epoch_outcomes: Dict[str, list] = {}  # asset -> [(epoch, "up"/"down"), ...]
+        self._streak_last_checked_epoch: Dict[str, int] = {}  # asset -> last epoch we checked
+
     def set_market_ws(self, ws) -> None:
         """Inject MarketWS reference for real-time midpoints."""
         self._market_ws = ws
+
+    def set_chainlink_feed(self, feed) -> None:
+        """Inject ChainlinkFeed for snipe confirmation gate."""
+        self._chainlink = feed
+        # Wire event-driven oracle flip: fires on direction crossover
+        if feed and self._config.oracle_flip_enabled:
+            feed.set_on_direction_cross(self._on_oracle_direction_cross)
+
+    def _record_epoch_outcome(self, asset: str, epoch: int, window: int) -> None:
+        """Record the resolved outcome of a past epoch using Binance price data.
+
+        Called at the start of each new epoch to record the previous epoch's result.
+        Uses Binance price buffer (same data as momentum detection) to determine
+        whether price was above or below epoch open at epoch end.
+        """
+        if not self._config.streak_tracking_enabled:
+            return
+        # Only track 5m epochs for now
+        if window != 300:
+            return
+        # Skip if already recorded
+        last = self._streak_last_checked_epoch.get(asset, 0)
+        if epoch <= last:
+            return
+        self._streak_last_checked_epoch[asset] = epoch
+
+        # Use Chainlink/RTDS for authoritative outcome (it IS the resolution source)
+        if self._chainlink and self._chainlink.is_healthy(asset):
+            verdict = self._chainlink.is_above_window_open(epoch, window, asset)
+            if verdict is not None:
+                outcome = "up" if verdict else "down"
+                if asset not in self._epoch_outcomes:
+                    self._epoch_outcomes[asset] = []
+                self._epoch_outcomes[asset].append((epoch, outcome))
+                # Keep last 20 epochs max
+                if len(self._epoch_outcomes[asset]) > 20:
+                    self._epoch_outcomes[asset] = self._epoch_outcomes[asset][-20:]
+                self._logger.debug(
+                    f"Streak tracker: {asset} epoch {epoch} resolved {outcome} | "
+                    f"history={len(self._epoch_outcomes[asset])}"
+                )
+
+    def _get_current_streak(self, asset: str) -> tuple:
+        """Return (streak_length, streak_direction) for an asset.
+
+        Returns (0, "") if no streak or insufficient data.
+        A streak of 3 means the last 3 epochs all resolved in the same direction.
+        """
+        history = self._epoch_outcomes.get(asset, [])
+        if len(history) < self._config.streak_min_length:
+            return (0, "")
+        # Count consecutive same-direction from the end
+        last_dir = history[-1][1]
+        streak = 1
+        for i in range(len(history) - 2, -1, -1):
+            if history[i][1] == last_dir:
+                streak += 1
+            else:
+                break
+        if streak >= self._config.streak_min_length:
+            return (streak, last_dir)
+        return (0, "")
+
+    async def _on_oracle_direction_cross(
+        self, asset: str, epoch: int, window: int,
+        is_above_open: bool, price: float, open_price: float,
+    ) -> None:
+        """Event-driven oracle flip: fired directly by ChainlinkFeed on direction cross.
+
+        Bypasses snipe loop polling for ~25ms faster response.
+        """
+        if not self._config.oracle_flip_enabled:
+            return
+
+        now = time.time()
+        window_end = epoch + window
+        secs_left = window_end - now
+        if secs_left > self._config.oracle_flip_max_secs_remaining or secs_left < 8:
+            return
+
+        oracle_delta_pct = abs(price - open_price) / open_price if open_price > 0 else 0.0
+        if oracle_delta_pct < self._config.oracle_flip_min_delta_pct:
+            return
+
+        slug = f"{asset.lower()}-updown-{window // 60}m-{epoch}"
+        if slug in self._signaled_slugs:
+            return
+
+        market_info = self._market_cache.get(slug)
+        if not market_info:
+            return
+
+        # Determine which side the oracle says will win
+        flip_outcome = "Up" if is_above_open else "Down"
+        flip_key = "up_token_id" if is_above_open else "down_token_id"
+        flip_token_id = market_info[flip_key]
+
+        flip_mid = 0.0
+        if self._market_ws:
+            flip_mid = self._market_ws.get_midpoint(flip_token_id)
+        if flip_mid <= 0:
+            try:
+                flip_mid = await self._clob.get_midpoint(flip_token_id)
+            except Exception:
+                pass
+
+        if (flip_mid <= 0
+                or flip_mid > self._config.oracle_flip_max_opposite_price
+                or flip_mid < self._config.oracle_flip_min_opposite_price):
+            return
+
+        if self._config.oracle_flip_dry_run:
+            potential_shares = self._config.oracle_flip_max_bet / flip_mid
+            # NOTE: actual P&L depends on resolution, NOT assumed win.
+            # Log IF-WIN profit for reference, but track real outcome via signal_logger.
+            if_win_profit = potential_shares * (1.0 - flip_mid)
+            self._logger.info(
+                f"[ORACLE_FLIP_EVENT DRY] {slug} FLIP to {flip_outcome} "
+                f"@ {flip_mid:.4f} | oracle={price:,.2f} open={open_price:,.2f} | "
+                f"shares={potential_shares:.0f} if_win=${if_win_profit:.2f} | "
+                f"OUTCOME PENDING (check resolution)"
+            )
+            # Still emit signal for signal_logger to track real outcome
+            flip_signal = {
+                "slug": slug,
+                "token_id": flip_token_id,
+                "outcome": flip_outcome,
+                "midpoint": flip_mid,
+                "price": flip_mid,
+                "source": "oracle_flip",
+                "asset": asset,
+                "market_window_secs": window,
+                "time_remaining_secs": int(secs_left),
+                "metadata": {
+                    "source": "oracle_flip",
+                    "event_driven": True,
+                    "dry_run": True,
+                    "oracle_price": price,
+                    "window_open_price": open_price,
+                },
+            }
+            self._signaled_slugs.add(slug)
+            if self._signal_logger:
+                self._signal_logger.log_signal(flip_signal, guard_passed=True)
+            return
+
+        self._logger.info(
+            f"[ORACLE_FLIP_EVENT] {slug} FLIPPING to {flip_outcome} "
+            f"@ {flip_mid:.4f} | oracle={price:,.2f} open={open_price:,.2f} | "
+            f"event-driven (0ms loop latency)"
+        )
+        flip_best_ask = self._market_ws.get_best_ask(flip_token_id) if self._market_ws else 0.0
+        flip_signal = {
+            "slug": slug,
+            "token_id": flip_token_id,
+            "outcome": flip_outcome,
+            "midpoint": flip_mid,
+            "price": flip_mid,
+            "best_ask": flip_best_ask,
+            "source": "oracle_flip",
+            "asset": asset,
+            "market_window_secs": window,
+            "time_remaining_secs": int(secs_left),
+            "condition_id": market_info.get("condition_id", ""),
+            "metadata": {
+                "source": "oracle_flip",
+                "event_driven": True,
+                "oracle_price": price,
+                "window_open_price": open_price,
+                "flip_multiplier": round((1.0 - flip_mid) / flip_mid, 1),
+            },
+        }
+        self._signaled_slugs.add(slug)
+        await self._on_signal(flip_signal)
+        self._state_store.save("signaled_slugs", self._signaled_slugs)
 
     async def start(self) -> None:
         """Start the Binance momentum feed + liquidation feed + funding poller."""
@@ -131,6 +325,8 @@ class BinanceMomentumFeed:
             self._market_prefetch_loop(),
             self._watch_new_markets(),
         ]
+        if self._config.coinbase_premium_enabled:
+            tasks.append(self._coinbase_premium_loop())
         if self._config.enable_resolution_snipe:
             tasks.append(self._snipe_loop())
             if self._config.snipe_dry_run and self._signal_logger:
@@ -161,12 +357,12 @@ class BinanceMomentumFeed:
                     })
                     self._logger.info("Coinbase momentum WS connected")
                 else:
-                    streams = "/".join(
-                        f"{symbol}@kline_1s" for symbol in BINANCE_SYMBOLS
-                    )
+                    kline_streams = [f"{symbol}@kline_1s" for symbol in BINANCE_SYMBOLS]
+                    agg_streams = [f"{symbol}@aggTrade" for symbol in BINANCE_SYMBOLS]
+                    streams = "/".join(kline_streams + agg_streams)
                     url = f"{BINANCE_WS_URL}?streams={streams}"
                     self._ws = await self._session.ws_connect(url, timeout=10)
-                    self._logger.info("Binance momentum WS connected")
+                    self._logger.info("Binance momentum+aggTrade WS connected")
                 attempt = 0
                 self._consecutive_failures = 0
                 await self._read_loop()
@@ -230,11 +426,18 @@ class BinanceMomentumFeed:
                     await self._check_window_delta(symbol, now, price)
 
     async def _process_binance_update(self, data: dict) -> None:
-        """Process a Binance kline update."""
-        kline_data = data.get("data", {})
-        k = kline_data.get("k", {})
+        """Process a Binance kline or aggTrade update."""
+        inner = data.get("data", {})
+        event_type = inner.get("e", "")
 
-        symbol = kline_data.get("s", "").lower()
+        # Route aggTrade events to taker buffer
+        if event_type == "aggTrade":
+            self._process_aggtrade(inner)
+            return
+
+        # Kline processing (existing logic)
+        k = inner.get("k", {})
+        symbol = inner.get("s", "").lower()
         if symbol not in self._price_buffers:
             return
 
@@ -263,11 +466,154 @@ class BinanceMomentumFeed:
         if self._config.enable_window_delta:
             await self._check_window_delta(symbol, now, price)
 
+    def _process_aggtrade(self, data: dict) -> None:
+        """Accumulate taker buy/sell volume from aggTrade events."""
+        symbol = data.get("s", "").lower()
+        if symbol not in self._taker_buffers:
+            return
+        qty = float(data.get("q", 0))
+        is_buyer_maker = data.get("m", False)
+        # m=True means buyer is maker, so TAKER is seller (negative delta)
+        # m=False means taker is buyer (positive delta)
+        signed_qty = -qty if is_buyer_maker else qty
+        ts = float(data.get("T", 0)) / 1000.0  # trade time in ms -> seconds
+        if ts <= 0:
+            ts = time.time()
+        self._taker_buffers[symbol].append((ts, signed_qty))
+
+    def get_taker_delta(self, symbol: str, window_secs: float) -> Optional[float]:
+        """Compute net taker delta over the last window_secs seconds."""
+        buffer = self._taker_buffers.get(symbol)
+        if not buffer:
+            return None
+        cutoff = time.time() - window_secs
+        delta = sum(qty for ts, qty in buffer if ts >= cutoff)
+        return delta
+
+    def get_vpin(self, symbol: str, window_secs: float = 300, n_buckets: int = 10) -> Optional[float]:
+        """Compute VPIN (Volume-Synchronized Probability of Informed Trading).
+
+        Splits recent volume into n_buckets time buckets, classifies each as
+        buy-dominated or sell-dominated, then computes the average imbalance.
+        Returns 0.0 (balanced/noise) to 1.0 (fully informed/one-sided).
+        """
+        buffer = self._taker_buffers.get(symbol)
+        if not buffer:
+            return None
+        now = time.time()
+        cutoff = now - window_secs
+        trades = [(ts, qty) for ts, qty in buffer if ts >= cutoff]
+        if len(trades) < 20:
+            return None  # insufficient data
+
+        bucket_size = window_secs / n_buckets
+        total_imbalance = 0.0
+        total_volume = 0.0
+        for i in range(n_buckets):
+            bucket_start = cutoff + i * bucket_size
+            bucket_end = bucket_start + bucket_size
+            buy_vol = sum(abs(q) for t, q in trades if bucket_start <= t < bucket_end and q > 0)
+            sell_vol = sum(abs(q) for t, q in trades if bucket_start <= t < bucket_end and q < 0)
+            bucket_vol = buy_vol + sell_vol
+            if bucket_vol > 0:
+                total_imbalance += abs(buy_vol - sell_vol)
+                total_volume += bucket_vol
+
+        if total_volume <= 0:
+            return None
+        return total_imbalance / total_volume
+
+    def get_coinbase_premium(self, asset: str) -> Optional[float]:
+        """Compute Coinbase Premium in basis points.
+
+        Premium = (Coinbase_price - Binance_price) / Binance_price * 10000
+        Positive = US institutional buying (bullish).
+        Negative = US institutional selling (bearish).
+        Returns None if either price feed is unavailable.
+        """
+        binance_symbol = ASSET_TO_BINANCE.get(asset)
+        if not binance_symbol:
+            return None
+
+        # Get latest Binance price from momentum buffer
+        buf = self._price_buffers.get(binance_symbol)
+        if not buf:
+            return None
+        binance_price = buf[-1][1]  # (timestamp, price)
+
+        # Get latest Coinbase price
+        coinbase_price = self._coinbase_prices.get(binance_symbol)
+        if not coinbase_price or binance_price <= 0:
+            return None
+
+        return ((coinbase_price - binance_price) / binance_price) * 10_000
+
+    async def _coinbase_premium_loop(self) -> None:
+        """Concurrent Coinbase WS feed for cross-exchange premium calculation.
+
+        Runs alongside the primary Binance feed. Does NOT generate signals --
+        only maintains _coinbase_prices for premium computation.
+        """
+        attempt = 0
+        while True:
+            try:
+                self._coinbase_session = aiohttp.ClientSession()
+                self._coinbase_ws = await self._coinbase_session.ws_connect(
+                    COINBASE_WS_URL, timeout=10
+                )
+                await self._coinbase_ws.send_json({
+                    "type": "subscribe",
+                    "product_ids": COINBASE_PRODUCTS,
+                    "channel": "ticker",
+                })
+                self._logger.info("Coinbase Premium WS connected (parallel feed)")
+                attempt = 0
+
+                async for msg in self._coinbase_ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            data = json.loads(msg.data)
+                            if data.get("type") == "ticker" and "price" in data:
+                                product_id = data.get("product_id", "")
+                                symbol = COINBASE_TO_SYMBOL.get(product_id)
+                                if symbol:
+                                    self._coinbase_prices[symbol] = float(data["price"])
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+
+            except asyncio.CancelledError:
+                self._logger.info("Coinbase Premium feed cancelled")
+                raise
+            except Exception as e:
+                delay = min(BACKOFF_BASE * (BACKOFF_MULTIPLIER ** attempt), BACKOFF_MAX)
+                self._logger.warning(f"Coinbase Premium WS error: {e}, retry in {delay}s")
+                attempt += 1
+                await asyncio.sleep(delay)
+            finally:
+                try:
+                    if self._coinbase_ws and not self._coinbase_ws.closed:
+                        await self._coinbase_ws.close()
+                    if self._coinbase_session and not self._coinbase_session.closed:
+                        await self._coinbase_session.close()
+                except Exception:
+                    pass
+
     async def _check_momentum(self, symbol: str, now: float, current_price: float) -> None:
         """Check if price has moved enough within the window to trigger a signal."""
         buffer = self._price_buffers[symbol]
         window = self._config.momentum_window_secs
         threshold = self._config.momentum_trigger_pct
+
+        # Buffer fullness guard: require data spanning at least 80% of window
+        # After reconnect, buffer has only seconds of data — small moves in 5s
+        # can exceed 0.3% threshold and trigger false signals
+        if len(buffer) < 2:
+            return
+        buffer_span = buffer[-1][0] - buffer[0][0]
+        if buffer_span < window * 0.8:
+            return
 
         # Find oldest price within window
         cutoff = now - window
@@ -333,6 +679,13 @@ class BinanceMomentumFeed:
         buffer = self._sharp_buffers[symbol]
         window = self._config.sharp_move_window_secs
         threshold = self._config.sharp_move_trigger_pct
+
+        # Buffer fullness guard (same as momentum): require 80% of window span
+        if len(buffer) < 2:
+            return
+        buffer_span = buffer[-1][0] - buffer[0][0]
+        if buffer_span < window * 0.8:
+            return
 
         cutoff = now - window
         oldest_price = None
@@ -543,14 +896,46 @@ class BinanceMomentumFeed:
             depth = self._market_ws.get_book_depth(token_id)
             book_imbalance_val = depth["imbalance"] if depth else None
 
+        # Oracle confirmation gate: block momentum if Chainlink disagrees with direction
+        # Only enter when BOTH Binance momentum AND oracle agree on direction
+        if (not shadow
+                and self._chainlink
+                and self._chainlink.is_healthy(asset)
+                and self._config.oracle_snipe_confirm
+                and not self._config.oracle_snipe_confirm_dry_run):
+            epoch_val = epoch
+            oracle_verdict = self._chainlink.is_above_window_open(
+                epoch_val, window, asset
+            )
+            if oracle_verdict is not None:
+                oracle_says_up = oracle_verdict
+                signal_says_up = (outcome == "Up")
+                if oracle_says_up != signal_says_up:
+                    oracle_price = self._chainlink.get_current_price(asset) or 0.0
+                    op = self._chainlink.get_window_open_price(epoch_val, window, asset) or 0.0
+                    self._logger.info(
+                        f"[ORACLE_MOMENTUM_GATE] {slug} {outcome} BLOCKED | "
+                        f"oracle disagrees (says {'UP' if oracle_says_up else 'DOWN'}) | "
+                        f"oracle={oracle_price:,.2f} open={op:,.2f}"
+                    )
+                    return
+
         self.signals_generated += 1
 
-        # Get liquidation conviction from regime detector
+        # Get liquidation and funding data from regime detector
         liq_conviction = 0.0
+        liq_volume_60s = 0.0
+        liq_bias = ""
+        funding_rate = 0.0
         if self._regime_detector:
             liq_conviction = self._regime_detector.get_liquidation_conviction(
                 asset, "UP" if outcome == "Up" else "DOWN"
             )
+            regime_state = self._regime_detector.get_regime(asset)
+            if regime_state:
+                liq_volume_60s = regime_state.liq_volume_60s
+                liq_bias = regime_state.liq_bias
+                funding_rate = regime_state.funding_rate
 
         # Compute pair_cost: our side + opposite side ask
         pair_cost_val = None
@@ -565,6 +950,19 @@ class BinanceMomentumFeed:
                 pass
         if opp_mid > 0 and midpoint > 0:
             pair_cost_val = midpoint + opp_mid
+
+        # Compute taker CVD delta over momentum window + VPIN + Coinbase Premium
+        binance_symbol = ASSET_TO_BINANCE.get(asset)
+        taker_delta = None
+        vpin_5m = None
+        coinbase_premium_bps = None
+        if binance_symbol:
+            taker_delta = self.get_taker_delta(
+                binance_symbol, self._config.momentum_window_secs
+            )
+            vpin_5m = self.get_vpin(binance_symbol, window_secs=300, n_buckets=10)
+        if self._config.coinbase_premium_enabled:
+            coinbase_premium_bps = self.get_coinbase_premium(asset)
 
         # Build signal dict (compatible with existing pipeline)
         signal = {
@@ -590,6 +988,14 @@ class BinanceMomentumFeed:
             "best_ask": best_ask_val,
             "book_imbalance": book_imbalance_val,
             "pair_cost": pair_cost_val,
+            "taker_delta": taker_delta,
+            "binance_price": self.get_latest_price(asset) or 0.0,
+            "liq_volume_60s": liq_volume_60s,
+            "liq_bias": liq_bias,
+            "funding_rate": funding_rate,
+            "vpin_5m": vpin_5m,
+            "coinbase_premium_bps": coinbase_premium_bps,
+            "oracle_epoch_delta": self._get_oracle_epoch_delta(asset, epoch, window),
         }
 
         shadow_tag = " [SHADOW]" if shadow else ""
@@ -737,15 +1143,18 @@ class BinanceMomentumFeed:
         direction = "UP" if pct_change > 0 else "DOWN"
         self._delta_fired.add(delta_slug)
 
+        is_shadow = self._config.window_delta_shadow
+        tag = " [SHADOW]" if is_shadow else ""
         self._logger.info(
-            f"Window delta trigger: {asset} {direction} {pct_change:+.3%} "
+            f"Window delta trigger{tag}: {asset} {direction} {pct_change:+.3%} "
             f"(open={open_price:.4f} now={current_price:.4f}, {secs_to_end:.0f}s left)"
         )
 
-        await self._generate_delta_signal(asset, direction, delta_slug, pct_change, secs_to_end)
+        await self._generate_delta_signal(asset, direction, delta_slug, pct_change, secs_to_end, shadow=is_shadow)
 
     async def _generate_delta_signal(self, asset: str, direction: str, slug: str,
-                                      pct_change: float, secs_left: float) -> None:
+                                      pct_change: float, secs_left: float,
+                                      shadow: bool = False) -> None:
         """Generate a window delta trading signal."""
         market_info = await self._discover_market(slug)
         if not market_info:
@@ -792,10 +1201,12 @@ class BinanceMomentumFeed:
             "momentum_pct": pct_change,
             "time_remaining_secs": int(secs_left),
             "market_window_secs": 300,
+            "shadow": shadow,
         }
 
+        shadow_tag = " [SHADOW]" if shadow else ""
         self._logger.info(
-            f"Window delta signal: {slug} {outcome} @ {midpoint:.4f} "
+            f"Window delta signal{shadow_tag}: {slug} {outcome} @ {midpoint:.4f} "
             f"({secs_left:.0f}s left, delta={pct_change:+.3%})"
         )
 
@@ -845,11 +1256,11 @@ class BinanceMomentumFeed:
 
         while True:
             try:
-                # Event-driven: wake instantly on WS price update, fallback 0.1s
+                # Event-driven: wake instantly on WS price update, fallback 0.05s
                 if self._market_ws:
-                    await self._market_ws.wait_for_update(timeout=0.1)
+                    await self._market_ws.wait_for_update(timeout=0.05)
                 else:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
                 now = time.time()
 
                 # Reset daily counter at midnight
@@ -885,6 +1296,27 @@ class BinanceMomentumFeed:
                         if secs_to_end > 60 and cache_key not in precached:
                             precached.add(cache_key)
                             asyncio.create_task(self._discover_market(slug))
+                            # S4: Record previous epoch outcome for streak tracking
+                            if not is_15m:
+                                prev_epoch = current_epoch - window
+                                self._record_epoch_outcome(asset, prev_epoch, window)
+                                # Epoch coverage: log new epoch + update previous
+                                self._log_epoch_coverage(asset, current_epoch, prev_epoch, window)
+
+                        # S4: Contrarian streak signal — fire early in epoch, opposite of streak
+                        if (not is_15m
+                                and self._config.streak_tracking_enabled
+                                and 240 < secs_to_end < 290):
+                            streak_key = f"streak-{asset.lower()}-{current_epoch}"
+                            if streak_key not in self._snipe_fired:
+                                streak_len, streak_dir = self._get_current_streak(asset)
+                                if streak_len >= self._config.streak_min_length:
+                                    contrarian_dir = "Down" if streak_dir == "up" else "Up"
+                                    asyncio.create_task(self._generate_contrarian_signal(
+                                        asset, slug, contrarian_dir, streak_len,
+                                        streak_dir, secs_to_end, is_shadow
+                                    ))
+                                    self._snipe_fired.add(streak_key)
 
                         # Only fire in the snipe window (15m has separate timing)
                         if is_15m:
@@ -971,9 +1403,19 @@ class BinanceMomentumFeed:
 
         source_tag = "resolution_snipe_15m" if is_15m else "resolution_snipe"
         label = "15m " if is_15m else ""
+        oracle_blocked_count = 0  # track oracle blocks to dedup log spam
 
         # Check BOTH sides - buy whichever the market has priced as the winner
+        blocked = set()
+        if is_15m and self._config.snipe_15m_block_directions:
+            for pair in self._config.snipe_15m_block_directions.split(","):
+                pair = pair.strip()
+                if ":" in pair:
+                    blocked.add(pair.upper())
+
         for outcome, token_key in [("Up", "up_token_id"), ("Down", "down_token_id")]:
+            if f"{asset.upper()}:{outcome.upper()}" in blocked:
+                continue
             token_id = market_info[token_key]
 
             midpoint = 0.0
@@ -990,6 +1432,139 @@ class BinanceMomentumFeed:
                 continue
             if midpoint > max_price:
                 continue
+
+            # Oracle snipe confirmation gate: block if Chainlink disagrees
+            if (self._chainlink
+                    and self._chainlink.is_healthy(asset)
+                    and self._config.oracle_snipe_confirm):
+                epoch_val = int(slug.rsplit("-", 1)[-1]) if "-" in slug else 0
+                if epoch_val > 0:
+                    oracle_verdict = self._chainlink.is_above_window_open(
+                        epoch_val, window, asset
+                    )
+                    if oracle_verdict is not None:
+                        oracle_says_up = oracle_verdict
+                        signal_says_up = (outcome == "Up")
+                        if oracle_says_up != signal_says_up:
+                            oracle_price = self._chainlink.get_current_price(asset) or 0.0
+                            op = self._chainlink.get_window_open_price(epoch_val, window, asset) or 0.0
+                            if self._config.oracle_snipe_confirm_dry_run:
+                                self._logger.info(
+                                    f"[ORACLE_SNIPE_GATE DRY] {slug} {outcome} "
+                                    f"@ {midpoint:.4f} | oracle disagrees "
+                                    f"(says {'UP' if oracle_says_up else 'DOWN'}) | "
+                                    f"oracle_price={oracle_price:,.2f} "
+                                    f"window_open={op:,.2f} | not blocking (dry)"
+                                )
+                            else:
+                                # Oracle flip: buy the cheap opposite token oracle says wins
+                                # Skip if oracle delta is noise (< min threshold)
+                                oracle_delta_pct = abs(oracle_price - op) / op if op > 0 else 0.0
+                                if self._config.oracle_flip_enabled and oracle_delta_pct >= self._config.oracle_flip_min_delta_pct:
+                                    flip_outcome = "Up" if oracle_says_up else "Down"
+                                    flip_key = "up_token_id" if oracle_says_up else "down_token_id"
+                                    flip_token_id = market_info[flip_key]
+                                    flip_mid = 0.0
+                                    if self._market_ws:
+                                        flip_mid = self._market_ws.get_midpoint(flip_token_id)
+                                    if flip_mid <= 0:
+                                        try:
+                                            flip_mid = await self._clob.get_midpoint(flip_token_id)
+                                        except Exception:
+                                            pass
+                                    if (flip_mid > 0
+                                            and flip_mid <= self._config.oracle_flip_max_opposite_price
+                                            and flip_mid >= self._config.oracle_flip_min_opposite_price
+                                            and secs_left <= self._config.oracle_flip_max_secs_remaining):
+                                        potential_shares = self._config.oracle_flip_max_bet / flip_mid
+                                        if_win_profit = potential_shares * (1.0 - flip_mid)
+                                        if self._config.oracle_flip_dry_run:
+                                            self._logger.info(
+                                                f"[ORACLE_FLIP DRY] {slug} FLIP to {flip_outcome} "
+                                                f"@ {flip_mid:.4f} | original={outcome} @ {midpoint:.4f} | "
+                                                f"shares={potential_shares:.0f} | "
+                                                f"if_win=${if_win_profit:.2f} | "
+                                                f"oracle={oracle_price:,.2f} open={op:,.2f} | "
+                                                f"OUTCOME PENDING"
+                                            )
+                                            # Log to signal_logger for real outcome tracking
+                                            if self._signal_logger:
+                                                dry_flip_signal = {
+                                                    "slug": slug, "asset": asset,
+                                                    "outcome": flip_outcome,
+                                                    "midpoint": flip_mid,
+                                                    "source": "oracle_flip",
+                                                    "time_remaining_secs": int(secs_left),
+                                                    "metadata": {"source": "oracle_flip", "dry_run": True},
+                                                }
+                                                self._signal_logger.log_signal(dry_flip_signal, guard_passed=True)
+                                        else:
+                                            self._logger.info(
+                                                f"[ORACLE_FLIP] {slug} FLIPPING to {flip_outcome} "
+                                                f"@ {flip_mid:.4f} | original={outcome} blocked | "
+                                                f"oracle={oracle_price:,.2f} open={op:,.2f}"
+                                            )
+                                            flip_best_ask = self._market_ws.get_best_ask(flip_token_id) if self._market_ws else 0.0
+                                            flip_signal = {
+                                                "slug": slug,
+                                                "token_id": flip_token_id,
+                                                "outcome": flip_outcome,
+                                                "midpoint": flip_mid,
+                                                "price": flip_mid,
+                                                "best_ask": flip_best_ask,
+                                                "source": "oracle_flip",
+                                                "asset": asset,
+                                                "market_window_secs": window,
+                                                "time_remaining_secs": int(secs_left),
+                                                "condition_id": market_info.get("condition_id", ""),
+                                                "metadata": {
+                                                    "source": "oracle_flip",
+                                                    "original_direction": outcome,
+                                                    "original_price": midpoint,
+                                                    "oracle_price": oracle_price,
+                                                    "window_open_price": op,
+                                                    "flip_multiplier": round((1.0 - flip_mid) / flip_mid, 1),
+                                                },
+                                            }
+                                            self._signaled_slugs.add(slug)
+                                            await self._on_signal(flip_signal)
+                                            self._state_store.save("signaled_slugs", self._signaled_slugs)
+                                            return True
+                                    else:
+                                        skip_reason = []
+                                        if flip_mid <= 0:
+                                            skip_reason.append("no_price")
+                                        elif flip_mid > self._config.oracle_flip_max_opposite_price:
+                                            skip_reason.append(f"too_expensive({flip_mid:.4f})")
+                                        elif flip_mid < self._config.oracle_flip_min_opposite_price:
+                                            skip_reason.append(f"too_cheap({flip_mid:.4f})")
+                                        if secs_left > self._config.oracle_flip_max_secs_remaining:
+                                            skip_reason.append(f"too_early({secs_left:.0f}s)")
+                                        self._logger.info(
+                                            f"[ORACLE_FLIP SKIP] {slug} {flip_outcome} | "
+                                            f"reason={','.join(skip_reason)} | "
+                                            f"oracle={oracle_price:,.2f}"
+                                        )
+
+                                elif self._config.oracle_flip_enabled and oracle_delta_pct < self._config.oracle_flip_min_delta_pct:
+                                    _skip_key = f"flip_delta_{slug}"
+                                    if _skip_key not in self._signaled_slugs:
+                                        self._signaled_slugs.add(_skip_key)
+                                        self._logger.info(
+                                            f"[ORACLE_FLIP SKIP] {slug} | "
+                                            f"reason=delta_too_small({oracle_delta_pct:.4%}) "
+                                            f"min={self._config.oracle_flip_min_delta_pct:.3%} | "
+                                            f"oracle={oracle_price:,.2f} open={op:,.2f}"
+                                        )
+
+                                self._logger.info(
+                                    f"[ORACLE_SNIPE_GATE] {slug} {outcome} "
+                                    f"BLOCKED | oracle disagrees | "
+                                    f"oracle_price={oracle_price:,.2f} "
+                                    f"window_open={op:,.2f}"
+                                )
+                                oracle_blocked_count += 1
+                                continue
 
             # Compute pair_cost: our side + opposite side midpoint
             pair_cost_val = None
@@ -1064,6 +1639,8 @@ class BinanceMomentumFeed:
                 "condition_id": market_info.get("condition_id", ""),
                 "pair_cost": pair_cost_val,
                 "best_ask": ws_best_ask if ws_best_ask > 0 else None,
+                "binance_price": self.get_latest_price(asset) or 0.0,
+                "vpin_5m": self.get_vpin(ASSET_TO_BINANCE.get(asset, ""), window_secs=300, n_buckets=10),
             }
 
             self._logger.info(
@@ -1074,7 +1651,83 @@ class BinanceMomentumFeed:
             await self._on_signal(signal)
             return True
 
+        # If oracle blocked both directions, mark as fired to prevent log spam
+        if oracle_blocked_count >= 2:
+            return True  # treat as "handled" so snipe_fired dedup kicks in
+
         return False
+
+    async def _generate_contrarian_signal(
+        self, asset: str, slug: str, contrarian_dir: str,
+        streak_len: int, streak_dir: str, secs_left: float,
+        shadow: bool,
+    ) -> None:
+        """Generate a contrarian streak signal (S4).
+
+        Buys the opposite side of a 3+ epoch streak early in the new epoch,
+        when mean reversion is most likely (academic: gambler's fallacy bias).
+        """
+        market_info = await self._discover_market(slug)
+        if not market_info:
+            return
+
+        token_key = "up_token_id" if contrarian_dir == "Up" else "down_token_id"
+        token_id = market_info[token_key]
+
+        midpoint = 0.0
+        ws_best_ask = 0.0
+        if self._market_ws:
+            midpoint = self._market_ws.get_midpoint(token_id)
+            ws_best_ask = self._market_ws.get_best_ask(token_id)
+        if midpoint <= 0:
+            midpoint = await self._clob.get_midpoint(token_id)
+        if midpoint <= 0:
+            return
+
+        min_p = self._config.streak_contrarian_min_price
+        max_p = self._config.streak_contrarian_max_price
+        if midpoint < min_p or midpoint > max_p:
+            self._logger.debug(
+                f"Streak contrarian skip: {asset} {contrarian_dir} @ {midpoint:.4f} "
+                f"outside [{min_p}-{max_p}]"
+            )
+            return
+
+        is_dry = shadow or self._config.streak_contrarian_dry_run
+        label = "[DRY] " if is_dry else ""
+        self._logger.info(
+            f"{label}STREAK CONTRARIAN: {slug} {contrarian_dir} @ {midpoint:.4f} | "
+            f"streak={streak_len}x {streak_dir} | {secs_left:.0f}s left"
+        )
+
+        signal = {
+            "token_id": token_id,
+            "price": midpoint,
+            "best_ask": ws_best_ask,
+            "slug": slug,
+            "market_title": market_info.get("title", slug),
+            "condition_id": market_info.get("condition_id", ""),
+            "outcome": contrarian_dir,
+            "direction": "BUY",
+            "asset": asset,
+            "source": "streak_contrarian",
+            "time_remaining_secs": int(secs_left),
+            "market_window_secs": 300,
+            "momentum_pct": 0.0,
+            "metadata": {
+                "source": "streak_contrarian",
+                "streak_length": streak_len,
+                "streak_direction": streak_dir,
+                "contrarian_direction": contrarian_dir,
+                "dry_run": is_dry,
+            },
+        }
+
+        if self._signal_logger:
+            self._signal_logger.log_signal(signal, guard_passed=True)
+
+        if not is_dry:
+            await self._on_signal(signal)
 
     async def _snipe_resolution_loop(self) -> None:
         """Check resolved outcomes for dry-run snipe signals.
@@ -1370,6 +2023,65 @@ class BinanceMomentumFeed:
             await asyncio.sleep(sleep_time)
 
     # -----------------------------------------------------------------------
+    # Oracle epoch delta helper
+    # -----------------------------------------------------------------------
+
+    def _get_oracle_epoch_delta(self, asset: str, epoch: int, window: int) -> Optional[float]:
+        """Get oracle price delta from epoch open for signal logging."""
+        if not self._chainlink:
+            return None
+        return self._chainlink.get_epoch_delta_pct(asset, epoch, window)
+
+    def _log_epoch_coverage(self, asset: str, current_epoch: int, prev_epoch: int, window: int) -> None:
+        """Log epoch start and update previous epoch outcome for coverage analysis."""
+        if not self._signal_logger:
+            return
+        try:
+            # Log new epoch with open prices
+            oracle_open = None
+            if self._chainlink:
+                oracle_open = self._chainlink.get_window_open_price(current_epoch, window, asset)
+            binance_symbol = ASSET_TO_BINANCE.get(asset)
+            binance_open = None
+            if binance_symbol and binance_symbol in self._window_open_prices:
+                key = (asset, current_epoch)
+                binance_open = self._window_open_prices.get(key)
+
+            self._signal_logger.log_epoch(
+                epoch=current_epoch, asset=asset, window_secs=window,
+                oracle_open=oracle_open, binance_open=binance_open,
+            )
+
+            # Update previous epoch with close data and outcome
+            oracle_close = None
+            oracle_delta = None
+            oracle_dir = None
+            if self._chainlink and self._chainlink.is_healthy(asset):
+                oracle_close = self._chainlink.get_current_price(asset)
+                oracle_delta = self._chainlink.get_epoch_delta_pct(asset, prev_epoch, window)
+                verdict = self._chainlink.is_above_window_open(prev_epoch, window, asset)
+                if verdict is not None:
+                    oracle_dir = "up" if verdict else "down"
+
+            binance_close = self.get_latest_price(asset)
+            binance_delta = None
+            prev_key = (asset, prev_epoch)
+            if binance_close and prev_key in self._window_open_prices:
+                b_open = self._window_open_prices[prev_key]
+                if b_open and b_open > 0:
+                    binance_delta = (binance_close - b_open) / b_open
+
+            self._signal_logger.update_epoch_outcome(
+                epoch=prev_epoch, asset=asset, window_secs=window,
+                oracle_close=oracle_close, oracle_delta_pct=oracle_delta,
+                oracle_direction=oracle_dir, binance_close=binance_close,
+                binance_delta_pct=binance_delta,
+                resolved_outcome=oracle_dir,
+            )
+        except Exception as e:
+            self._logger.debug(f"Epoch coverage log failed (non-fatal): {e}")
+
+    # -----------------------------------------------------------------------
     # Build 6: Lag signal execution
     # -----------------------------------------------------------------------
 
@@ -1540,6 +2252,42 @@ class BinanceMomentumFeed:
         if oldest_price is None or oldest_price <= 0:
             return None
         return (current_price - oldest_price) / oldest_price
+
+    def get_latest_price(self, asset: str) -> Optional[float]:
+        """Return latest Binance price for asset. Used by ExitManager."""
+        symbol = ASSET_TO_BINANCE.get(asset.upper())
+        if not symbol:
+            return None
+        buffer = self._price_buffers.get(symbol)
+        if not buffer:
+            return None
+        return buffer[-1][1]
+
+    def get_epoch_price_context(self, asset: str, window: int) -> Optional[dict]:
+        """Return current Binance price, epoch open, and pct change for stale quote detection.
+
+        Used by MarketMaker to detect when one side of a market hasn't repriced
+        after a Binance move. Returns None if data unavailable.
+        """
+        current_price = self.get_latest_price(asset)
+        if current_price is None:
+            return None
+
+        now = time.time()
+        current_epoch = (int(now) // window) * window
+        key = (asset.upper(), current_epoch)
+        open_price = self._window_open_prices.get(key)
+        if not open_price or open_price <= 0:
+            return None
+
+        pct_change = (current_price - open_price) / open_price
+        return {
+            "current_price": current_price,
+            "open_price": open_price,
+            "pct_change": pct_change,
+            "direction": "Up" if pct_change > 0 else "Down",
+            "epoch": current_epoch,
+        }
 
     def increment_pair_arb_count(self) -> None:
         self._active_pair_arb_count += 1

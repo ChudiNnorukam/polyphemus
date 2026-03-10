@@ -980,5 +980,378 @@ class TestArbUnwind:
         assert engine._stats["total_unwind_loss"] > 0
 
 
+class TestSlackNotifierCallSites:
+    """Verify all production call sites pass correct kwargs to SlackNotifier.
+
+    These tests exist because a param name mismatch (price= vs entry_price=)
+    silently broke reversal_short notifications for days. Bare except: pass
+    swallowed the TypeError. Every call site in signal_bot.py is covered here.
+    """
+
+    def _make_notifier(self):
+        from polyphemus.slack_notifier import SlackNotifier
+        # Disabled notifier (no webhook/token) - _post is a no-op
+        return SlackNotifier(instance_name="test")
+
+    def test_notify_entry_momentum(self):
+        """Main entry path: signal_bot.py line ~981."""
+        n = self._make_notifier()
+        n.notify_entry(
+            slug="btc-updown-5m-1770944400",
+            asset="BTC",
+            direction="Up",
+            entry_price=0.65,
+            size_usd=32.50,
+            shares=50.0,
+            momentum_pct=0.0045,
+            source="momentum",
+            secs_left=0,
+        )
+
+    def test_notify_entry_snipe(self):
+        n = self._make_notifier()
+        n.notify_entry(
+            slug="btc-updown-5m-1770944400",
+            asset="BTC",
+            direction="Up",
+            entry_price=0.94,
+            size_usd=47.0,
+            shares=50.0,
+            momentum_pct=0.0,
+            source="snipe",
+            secs_left=30,
+        )
+
+    def test_notify_entry_reversal_short(self):
+        """Reversal short entry: signal_bot.py line ~1511.
+        Was broken by price= vs entry_price= param mismatch."""
+        n = self._make_notifier()
+        n.notify_entry(
+            slug="btc-updown-5m-1770944400",
+            asset="BTC",
+            direction="Down",
+            entry_price=0.15,
+            size_usd=7.50,
+            shares=50.0,
+            source="reversal_short",
+        )
+
+    def test_notify_entry_minimal(self):
+        """Minimal kwargs - size_usd is optional, computed from price*shares."""
+        n = self._make_notifier()
+        n.notify_entry(
+            slug="btc-updown-5m-1770944400",
+            asset="BTC",
+            direction="Up",
+            entry_price=0.70,
+            shares=40.0,
+        )
+
+    def test_notify_exit_normal(self):
+        """Normal exit: signal_bot.py line ~1337."""
+        n = self._make_notifier()
+        n.notify_exit(
+            slug="btc-updown-5m-1770944400",
+            asset="BTC",
+            direction="Up",
+            entry_price=0.65,
+            exit_price=0.72,
+            shares=50.0,
+            pnl=3.50,
+            exit_reason="market_resolved",
+            hold_secs=120,
+        )
+
+    def test_notify_exit_ghost_cleanup(self):
+        """Ghost cleanup: signal_bot.py line ~520. Passes asset='', direction=''."""
+        n = self._make_notifier()
+        n.notify_exit(
+            slug="btc-updown-5m-1770944400",
+            asset="",
+            direction="",
+            entry_price=0.93,
+            exit_price=0.0,
+            shares=50.0,
+            pnl=-46.50,
+            exit_reason="ghost_cleanup",
+            hold_secs=0,
+        )
+
+    def test_notify_exit_restart_stale(self):
+        """Restart stale: signal_bot.py line ~481. Passes asset='', direction=''."""
+        n = self._make_notifier()
+        n.notify_exit(
+            slug="eth-updown-5m-1770944400",
+            asset="",
+            direction="",
+            entry_price=0.80,
+            exit_price=0.0,
+            shares=30.0,
+            pnl=-24.0,
+            exit_reason="restart_stale",
+            hold_secs=0,
+        )
+
+    def test_notify_exit_insufficient_shares(self):
+        """Insufficient shares: signal_bot.py line ~1226."""
+        n = self._make_notifier()
+        n.notify_exit(
+            slug="sol-updown-5m-1770944400",
+            asset="",
+            direction="",
+            entry_price=0.75,
+            exit_price=0.0,
+            shares=40.0,
+            pnl=-30.0,
+            exit_reason="insufficient_shares",
+            hold_secs=45.0,
+        )
+
+    def test_notify_redemption_win(self):
+        n = self._make_notifier()
+        n.notify_redemption(
+            slug="btc-updown-5m-1770944400",
+            shares=50.0,
+            won=True,
+            entry_price=0.65,
+        )
+
+    def test_notify_redemption_loss(self):
+        n = self._make_notifier()
+        n.notify_redemption(
+            slug="orphan:BTC Up/Down",
+            shares=50.0,
+            won=False,
+            entry_price=0.65,
+        )
+
+    def test_notify_startup(self):
+        n = self._make_notifier()
+        n.notify_startup(open_positions=3, balance=807.0)
+
+    def test_seed_stats(self):
+        n = self._make_notifier()
+        n.seed_stats(wins=5, losses=3, total_pnl=42.50)
+        assert n._wins == 5
+        assert n._losses == 3
+        assert n._total_pnl == 42.50
+
+    def test_session_line_after_trades(self):
+        n = self._make_notifier()
+        n.seed_stats(3, 1, 25.0)
+        line = n._session_line()
+        assert "3W" in line
+        assert "1L" in line
+        assert "75%" in line
+
+    def test_parse_slug_btc(self):
+        from polyphemus.slack_notifier import _parse_slug
+        asset, direction = _parse_slug("btc-updown-5m-1770944400")
+        assert asset == "BTC"
+
+    def test_parse_slug_empty(self):
+        from polyphemus.slack_notifier import _parse_slug
+        asset, direction = _parse_slug("")
+        assert asset == "?"
+
+    def test_parse_slug_orphan(self):
+        from polyphemus.slack_notifier import _parse_slug
+        asset, direction = _parse_slug("orphan:BTC Up/Down")
+        assert asset == "?"
+
+
+class TestReversalShort:
+    """Tests for _try_reversal_short signal creation in signal_bot._handle_exit."""
+
+    def _make_bot_parts(self, **config_overrides):
+        """Create minimal mock objects for testing _try_reversal_short."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from dataclasses import dataclass, field
+        from datetime import datetime, timezone
+
+        # Config with reversal_short defaults
+        cfg = {
+            "reversal_short_enabled": True,
+            "reversal_short_dry_run": False,
+            "reversal_short_min_secs_remaining": 45,
+            "reversal_short_max_down_price": 0.35,
+            "reversal_short_min_down_price": 0.10,
+            "reversal_short_max_bet": 25.0,
+        }
+        cfg.update(config_overrides)
+        config = MagicMock()
+        for k, v in cfg.items():
+            setattr(config, k, v)
+
+        # Position mock
+        pos = MagicMock()
+        pos.slug = "btc-updown-5m-1770944400"
+        pos.entry_price = 0.85
+        pos.entry_size = 10.0
+        pos.market_end_time = datetime.fromtimestamp(
+            time.time() + 120, tz=timezone.utc  # 120s left
+        )
+        pos.metadata = {
+            "source": "binance_momentum",
+            "direction": "up",
+            "asset": "BTC",
+            "market_window_secs": 300,
+        }
+
+        # Exit signal
+        exit_signal = MagicMock()
+        exit_signal.reason = "oracle_reversal"
+        exit_signal.token_id = "token_up_123"
+
+        # Market cache with both tokens
+        market_cache = {
+            "btc-updown-5m-1770944400": {
+                "up_token_id": "token_up_123",
+                "down_token_id": "token_down_456",
+                "condition_id": "cond_789",
+            }
+        }
+
+        # Momentum feed with market cache
+        momentum_feed = MagicMock()
+        momentum_feed._market_cache = market_cache
+
+        # Market WS returns midpoint for opposite token
+        market_ws = MagicMock()
+        market_ws.get_midpoint = MagicMock(return_value=0.20)
+
+        # CLOB fallback
+        clob = AsyncMock()
+        clob.get_midpoint = AsyncMock(return_value=0.20)
+
+        # Signal logger
+        signal_logger = MagicMock()
+
+        # Bot-like object with all required attributes
+        bot = MagicMock()
+        bot._config = config
+        bot._momentum_feed = momentum_feed
+        bot._market_ws = market_ws
+        bot._clob = clob
+        bot._signal_logger = signal_logger
+        bot._logger = MagicMock()
+        bot._on_signal = AsyncMock()
+
+        return bot, pos, exit_signal
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_fires_on_oracle_reversal(self):
+        """Reversal short creates signal after oracle_reversal exit."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts()
+        exit_signal.reason = "oracle_reversal"
+
+        # Call the real method with mock self
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_called_once()
+        signal = bot._on_signal.call_args[0][0]
+        assert signal["source"] == "reversal_short"
+        assert signal["token_id"] == "token_down_456"  # opposite of Up
+        assert signal["outcome"] == "Down"
+        assert signal["price"] == 0.20
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_fires_on_binance_reversal(self):
+        """Reversal short creates signal after binance_reversal exit."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts()
+        exit_signal.reason = "binance_reversal"
+
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_called_once()
+        signal = bot._on_signal.call_args[0][0]
+        assert signal["source"] == "reversal_short"
+        assert signal["metadata"]["triggered_by"] == "binance_reversal"
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_skipped_when_disabled(self):
+        """No signal when reversal_short_enabled=False."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts(reversal_short_enabled=False)
+
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_antiloop(self):
+        """No signal when exited position is itself a reversal_short."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts()
+        pos.metadata["source"] = "reversal_short"
+
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_skipped_on_non_reversal_exit(self):
+        """No signal on stop_loss, time_exit, etc."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts()
+        exit_signal.reason = "stop_loss"
+
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_skipped_insufficient_time(self):
+        """No signal when time_remaining < min_secs_remaining."""
+        from polyphemus.signal_bot import SignalBot
+        from datetime import datetime, timezone
+        bot, pos, exit_signal = self._make_bot_parts(reversal_short_min_secs_remaining=200)
+        # Only 120s left (set in _make_bot_parts), threshold is 200
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_skipped_price_out_of_range(self):
+        """No signal when opposite midpoint outside price range."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts(reversal_short_max_down_price=0.15)
+        # midpoint is 0.20, max is 0.15 -> out of range
+
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_dry_run_logs_but_no_signal(self):
+        """Dry run mode logs but does not dispatch signal."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts(reversal_short_dry_run=True)
+
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_not_called()
+        # Should have logged info
+        bot._logger.info.assert_called()
+        log_msg = bot._logger.info.call_args[0][0]
+        assert "REVERSAL_SHORT DRY" in log_msg
+
+    @pytest.mark.asyncio
+    async def test_reversal_short_down_entry_flips_to_up(self):
+        """Down entry should flip to Up on reversal."""
+        from polyphemus.signal_bot import SignalBot
+        bot, pos, exit_signal = self._make_bot_parts()
+        pos.metadata["direction"] = "down"
+
+        await SignalBot._try_reversal_short(bot, pos, exit_signal)
+
+        bot._on_signal.assert_called_once()
+        signal = bot._on_signal.call_args[0][0]
+        assert signal["outcome"] == "Up"
+        assert signal["token_id"] == "token_up_123"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

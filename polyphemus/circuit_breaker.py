@@ -5,12 +5,15 @@ All checks block NEW ENTRIES only. Exits are NEVER blocked.
 """
 
 import json
+import logging
 import os
 import time
 from datetime import date, datetime, timezone
 from typing import Tuple
 
 from .config import setup_logger
+
+_log = logging.getLogger("polyphemus.circuit_breaker")
 
 
 class KillSwitch:
@@ -39,11 +42,11 @@ class DailyLossMonitor:
     def has_hit_limit(self) -> bool:
         if self._max_daily_loss <= 0:
             return False
-        daily_pnl = self._db.get_daily_pnl(date.today())
+        daily_pnl = self._db.get_daily_pnl(datetime.now(timezone.utc).date())
         return daily_pnl <= -self._max_daily_loss
 
     def get_daily_pnl(self) -> float:
-        return self._db.get_daily_pnl(date.today())
+        return self._db.get_daily_pnl(datetime.now(timezone.utc).date())
 
 
 class StreakTracker:
@@ -91,8 +94,8 @@ class StreakTracker:
                     'consecutive_losses': self._consecutive_losses,
                     'cooldown_until': self._cooldown_until,
                 }, f)
-        except Exception:
-            pass  # StreakTracker has no logger; silently ignore save failures
+        except Exception as e:
+            _log.error(f"StreakTracker save failed (streak may reset on restart): {e}")
 
     def _load_state(self):
         try:
@@ -106,7 +109,7 @@ class StreakTracker:
 
 
 class CircuitBreaker:
-    """Facade combining kill switch, daily loss, and streak tracking.
+    """Facade combining kill switch, daily loss, streak tracking, and post-loss cooldown.
 
     Usage in signal_bot._on_signal() BEFORE execute_buy():
         allowed, reason = self._circuit_breaker.is_trading_allowed()
@@ -118,17 +121,21 @@ class CircuitBreaker:
     """
 
     def __init__(self, kill_switch: KillSwitch, loss_monitor: DailyLossMonitor,
-                 streak_tracker: StreakTracker, logger):
+                 streak_tracker: StreakTracker, logger,
+                 post_loss_cooldown_mins: int = 0):
         self._ks = kill_switch
         self._lm = loss_monitor
         self._st = streak_tracker
         self._logger = logger
+        self._post_loss_cooldown_secs = post_loss_cooldown_mins * 60
+        self._post_loss_cooldown_until: float = 0.0
         self._logger.info(
             f"Circuit breaker initialized | "
             f"kill_switch={'enabled' if kill_switch._path else 'disabled'} | "
             f"daily_loss_limit=${loss_monitor._max_daily_loss:.0f} | "
             f"max_consecutive_losses={streak_tracker._max} | "
-            f"cooldown={streak_tracker._cooldown_mins}min"
+            f"cooldown={streak_tracker._cooldown_mins}min | "
+            f"post_loss_cooldown={post_loss_cooldown_mins}min"
         )
 
     def is_trading_allowed(self) -> Tuple[bool, str]:
@@ -140,12 +147,20 @@ class CircuitBreaker:
         if self._st.in_cooldown():
             remaining = max(0, self._st._cooldown_until - time.time())
             return False, f"consecutive_loss_cooldown ({remaining:.0f}s remaining)"
+        if self._post_loss_cooldown_secs > 0 and self._post_loss_cooldown_until > time.time():
+            remaining = self._post_loss_cooldown_until - time.time()
+            return False, f"post_loss_cooldown ({remaining:.0f}s remaining)"
         return True, ""
 
     def record_trade_result(self, pnl: float):
         """Record trade outcome. Called after each exit."""
         self._st.record_result(pnl)
         if pnl < 0:
+            if self._post_loss_cooldown_secs > 0:
+                self._post_loss_cooldown_until = time.time() + self._post_loss_cooldown_secs
+                self._logger.info(
+                    f"Post-loss cooldown: {self._post_loss_cooldown_secs // 60}min pause after ${pnl:.2f} loss"
+                )
             self._logger.info(
                 f"Circuit breaker: loss ${pnl:.2f} | "
                 f"streak={self._st.consecutive_losses}/{self._st._max}"
@@ -160,3 +175,5 @@ class CircuitBreaker:
                 self._logger.critical(
                     f"HARD STOP: {self._st._max} consecutive losses — kill switch written to {self._ks._path}"
                 )
+        else:
+            self._post_loss_cooldown_until = 0.0
