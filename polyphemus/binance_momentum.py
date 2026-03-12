@@ -274,7 +274,13 @@ class BinanceMomentumFeed:
             }
             self._signaled_slugs.add(slug)
             if self._signal_logger:
-                self._signal_logger.log_signal(flip_signal, guard_passed=True)
+                self._signal_logger.log_signal(
+                    flip_signal,
+                    guard_passed=True,
+                    pipeline_stage="feed",
+                    pipeline_status="shadow",
+                    pipeline_detail="oracle_flip_event_dry_run",
+                )
             return
 
         self._logger.info(
@@ -1497,7 +1503,13 @@ class BinanceMomentumFeed:
                                                     "time_remaining_secs": int(secs_left),
                                                     "metadata": {"source": "oracle_flip", "dry_run": True},
                                                 }
-                                                self._signal_logger.log_signal(dry_flip_signal, guard_passed=True)
+                                                self._signal_logger.log_signal(
+                                                    dry_flip_signal,
+                                                    guard_passed=True,
+                                                    pipeline_stage="feed",
+                                                    pipeline_status="shadow",
+                                                    pipeline_detail="oracle_flip_dry_run",
+                                                )
                                         else:
                                             self._logger.info(
                                                 f"[ORACLE_FLIP] {slug} FLIPPING to {flip_outcome} "
@@ -1724,7 +1736,13 @@ class BinanceMomentumFeed:
         }
 
         if self._signal_logger:
-            self._signal_logger.log_signal(signal, guard_passed=True)
+            self._signal_logger.log_signal(
+                signal,
+                guard_passed=True,
+                pipeline_stage="feed",
+                pipeline_status="generated",
+                pipeline_detail="streak_contrarian",
+            )
 
         if not is_dry:
             await self._on_signal(signal)

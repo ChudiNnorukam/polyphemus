@@ -1,0 +1,42 @@
+{
+  "updated_at": "2026-03-10T13:55:01Z",
+  "fear_greed": 12,
+  "fear_greed_label": "Extreme Fear",
+  "market_regime": "extreme_fear",
+  "BTC": {
+    "oi_contracts": 82175.837,
+    "oi_change_pct": -0.000163,
+    "oi_trend": "flat",
+    "oi_trend_pct": -0.0033
+  },
+  "ETH": {
+    "oi_contracts": 2026125.706,
+    "oi_change_pct": -3e-05,
+    "oi_trend": "flat",
+    "oi_trend_pct": 0.0066
+  },
+  "perf_chudi": {
+    "total": 0,
+    "wins": 0,
+    "losses": 0,
+    "wr": 0,
+    "pnl": 0,
+    "open": 0
+  },
+  "perf_emmanuel": {
+    "total": 0,
+    "wins": 0,
+    "losses": 0,
+    "wr": 0,
+    "pnl": 0,
+    "open": 0
+  },
+  "perf_polyphemus": {
+    "total": 0,
+    "wins": 0,
+    "losses": 0,
+    "wr": 0,
+    "pnl": 0,
+    "open": 0
+  }
+}

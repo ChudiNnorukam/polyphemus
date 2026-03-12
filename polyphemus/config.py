@@ -437,6 +437,17 @@ class Settings(BaseSettings):
 
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training
+    enable_btc5m_evidence_verdicts: bool = False  # Read-only BTC 5m cohort verdict logging
+    btc5m_evidence_mode: str = "shadow"   # Reserved for future active gating, first pass is log-only
+    btc5m_evidence_min_samples: int = 30  # Minimum comparable executed trades for non-anecdotal verdicts
+    btc5m_entry_retry_enabled: bool = False  # Bounded entry recovery for passed BTC 5m momentum signals
+    btc5m_entry_retry_mode: str = "shadow"   # "shadow" logs retry decisions, "active" places the retry
+    btc5m_entry_retry_max_placement_retries: int = 1  # Retry transient placement failures once
+    btc5m_entry_retry_max_fill_retries: int = 1  # Retry one zero-fill timeout after cancel
+    btc5m_entry_retry_delay_ms: int = 500  # Delay before retrying a passed BTC 5m entry
+    btc5m_entry_retry_reprice_cents: int = 1  # Extra cents over fresh midpoint on retry
+    btc5m_entry_retry_min_secs_remaining: int = 45  # Skip retries too close to market close
+    btc5m_entry_retry_max_overpay_cents: int = 5  # Hard cap over original signal price on retry
     enable_signal_scoring: bool = True    # XGBoost signal quality scoring
     signal_score_mode: str = "shadow"     # "shadow" (log only) or "active" (filter below threshold)
     signal_score_threshold: float = 30.0  # Min score in active mode (0-100)

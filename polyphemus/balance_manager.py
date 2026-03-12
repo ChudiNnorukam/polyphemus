@@ -275,17 +275,38 @@ class BalanceManager:
                     clob_order_ids.add(oid)
         clob_count = len(clob_order_ids)
 
-        # Count DB entries in last N hours
+        # Compare against DB order hashes seen in the same window.
+        #
+        # Bug fix:
+        # The original audit compared all recent CLOB fills against only DB entries
+        # in the same window. That produces false CRITICAL halts when a position was
+        # entered earlier but exited recently: CLOB shows a recent trade, DB shows
+        # no recent entry, and the bot concludes "data loss" even though the recent
+        # event was a valid exit. We need to compare like-for-like order identifiers
+        # across both recent entries and recent exits.
         cutoff = time.time() - (lookback_hours * 3600)
         conn = db._get_conn()
         try:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE entry_time > ? AND entry_time IS NOT NULL",
-                (cutoff,),
-            ).fetchone()
-            db_count = row[0] if row else 0
+            rows = conn.execute(
+                """
+                SELECT trade_id, entry_tx_hash, exit_tx_hash
+                FROM trades
+                WHERE
+                    (entry_time IS NOT NULL AND entry_time > ?)
+                    OR (exit_time IS NOT NULL AND exit_time > ?)
+                """,
+                (cutoff, cutoff),
+            ).fetchall()
         finally:
             conn.close()
+
+        db_order_ids = set()
+        for row in rows:
+            for key in ("trade_id", "entry_tx_hash", "exit_tx_hash"):
+                value = row[key]
+                if value:
+                    db_order_ids.add(str(value))
+        db_count = len(db_order_ids)
 
         window = f"{lookback_hours}h"
 
@@ -293,30 +314,36 @@ class BalanceManager:
         if clob_count == 0 and db_count == 0:
             return (True, f"No trades in last {window} (CLOB=0, DB=0)")
 
-        # CLOB has trades but DB has none = data loss
+        # CLOB has trades but DB has no recent matching orders = likely data loss.
         if clob_count > 0 and db_count == 0:
             msg = (
-                f"CRITICAL: CLOB has {clob_count} trades in {window} but DB has 0 — "
+                f"CRITICAL: CLOB has {clob_count} order ids in {window} but DB has 0 recent order hashes — "
                 f"possible data loss (Bug #42 scenario)"
             )
             return (False, msg)
 
-        ratio = db_count / clob_count if clob_count > 0 else 1.0
+        matched_order_ids = clob_order_ids & db_order_ids
+        matched_count = len(matched_order_ids)
+        unmatched_count = clob_count - matched_count
+        ratio = matched_count / clob_count if clob_count > 0 else 1.0
 
         if ratio < 0.50:
             msg = (
-                f"CRITICAL: DB has {db_count} trades vs CLOB {clob_count} in {window} "
-                f"(ratio={ratio:.1%} < 50%) — halting trading"
+                f"CRITICAL: matched {matched_count}/{clob_count} CLOB order ids in {window} "
+                f"(unmatched={unmatched_count}, ratio={ratio:.1%} < 50%) — halting trading"
             )
             return (False, msg)
 
         if ratio < 0.80:
             msg = (
-                f"WARNING: DB has {db_count} trades vs CLOB {clob_count} in {window} "
-                f"(ratio={ratio:.1%} < 80%) — continuing with caution"
+                f"WARNING: matched {matched_count}/{clob_count} CLOB order ids in {window} "
+                f"(unmatched={unmatched_count}, ratio={ratio:.1%} < 80%) — continuing with caution"
             )
             self._logger.warning(msg)
             return (True, msg)
 
-        msg = f"OK: DB={db_count}, CLOB={clob_count} trades in {window} (ratio={ratio:.1%})"
+        msg = (
+            f"OK: matched {matched_count}/{clob_count} CLOB order ids in {window} "
+            f"(DB recent hashes={db_count}, ratio={ratio:.1%})"
+        )
         return (True, msg)

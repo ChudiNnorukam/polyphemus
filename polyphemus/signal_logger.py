@@ -12,6 +12,7 @@ Features captured per signal:
 - Outcome (executed, filtered, skipped, win, loss)
 """
 
+import json
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ class SignalLogger:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._create_tables()
+        self._signal_columns = self._load_signal_columns()
         self._logger.info(f"SignalLogger initialized: {self._db_path}")
 
     def _create_tables(self):
@@ -96,7 +98,13 @@ class SignalLogger:
 
                 -- Scorer output (if available)
                 signal_score REAL,
-                score_threshold REAL
+                score_threshold REAL,
+
+                -- Pipeline inspection
+                pipeline_stage TEXT,
+                pipeline_status TEXT,
+                pipeline_detail TEXT,
+                noise_flags TEXT
             )
         """)
         self._conn.execute("""
@@ -150,6 +158,12 @@ class SignalLogger:
             ("oi_change_pct", "REAL"), ("oi_trend", "TEXT"),
             ("dry_run", "INTEGER"),
             ("vpin_5m", "REAL"), ("taker_delta", "REAL"),
+            ("evidence_cohort", "TEXT"), ("evidence_sample_size", "INTEGER"),
+            ("evidence_r8_label", "TEXT"), ("evidence_expected_pnl", "REAL"),
+            ("evidence_verdict", "TEXT"), ("evidence_reason", "TEXT"),
+            ("evidence_match_level", "TEXT"),
+            ("pipeline_stage", "TEXT"), ("pipeline_status", "TEXT"),
+            ("pipeline_detail", "TEXT"), ("noise_flags", "TEXT"),
         ]
         for col_name, col_def in _migration_cols:
             try:
@@ -159,7 +173,30 @@ class SignalLogger:
                 pass  # column already exists
         self._conn.commit()
 
-    def log_signal(self, features: Dict[str, Any]) -> int:
+    def _load_signal_columns(self) -> set[str]:
+        rows = self._conn.execute("PRAGMA table_info(signals)").fetchall()
+        return {row[1] for row in rows}
+
+    def _normalize_value(self, column: str, value: Any) -> Any:
+        if isinstance(value, bool):
+            return 1 if value else 0
+        if isinstance(value, (list, tuple, set)):
+            if column in {"guard_reasons", "noise_flags"}:
+                return ",".join(str(item) for item in value)
+            return json.dumps(list(value), sort_keys=True)
+        if isinstance(value, dict):
+            return json.dumps(value, sort_keys=True)
+        return value
+
+    def _sanitize_features(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        sanitized: Dict[str, Any] = {}
+        for key, value in features.items():
+            if key not in self._signal_columns:
+                continue
+            sanitized[key] = self._normalize_value(key, value)
+        return sanitized
+
+    def log_signal(self, features: Dict[str, Any], **overrides: Any) -> int:
         """Log a signal with its feature vector. Returns the signal ID.
 
         Args:
@@ -169,12 +206,22 @@ class SignalLogger:
         Returns:
             signal_id: Auto-incremented ID for this signal row.
         """
+        features = dict(features or {})
+        if overrides:
+            features.update(overrides)
         now = datetime.now(timezone.utc)
         features.setdefault("timestamp", now.isoformat())
         features.setdefault("epoch", now.timestamp())
         features.setdefault("hour_utc", now.hour)
         features.setdefault("minute_utc", now.minute)
         features.setdefault("day_of_week", now.weekday())
+        features.setdefault("slug", "")
+        features.setdefault("asset", "")
+        features.setdefault("direction", "")
+        features = self._sanitize_features(features)
+        if not features:
+            self._logger.error("Failed to log signal: no schema-compatible fields")
+            return -1
 
         columns = list(features.keys())
         placeholders = ", ".join(["?"] * len(columns))
@@ -206,6 +253,9 @@ class SignalLogger:
         """
         if signal_id < 0:
             return
+        updates = self._sanitize_features(updates)
+        if not updates:
+            return
         set_clauses = ", ".join([f"{k} = ?" for k in updates.keys()])
         values = list(updates.values()) + [signal_id]
 
@@ -217,6 +267,23 @@ class SignalLogger:
             self._conn.commit()
         except Exception as e:
             self._logger.error(f"Failed to update signal {signal_id}: {e}")
+
+    def mark_signal_stage(
+        self,
+        signal_id: int,
+        stage: str,
+        status: str,
+        detail: str = "",
+        **extra_updates: Any,
+    ) -> None:
+        """Record where in the pipeline a signal currently sits or stopped."""
+        updates: Dict[str, Any] = {
+            "pipeline_stage": stage,
+            "pipeline_status": status,
+            "pipeline_detail": detail,
+        }
+        updates.update(extra_updates)
+        self.update_signal(signal_id, updates)
 
     def log_epoch(self, epoch: int, asset: str, window_secs: int = 300,
                   oracle_open: float = None, binance_open: float = None,

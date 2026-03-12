@@ -35,6 +35,7 @@ from .dashboard import Dashboard
 from .arb_engine import ArbEngine
 from .accumulator import AccumulatorEngine
 from .signal_logger import SignalLogger
+from .evidence_verdict import BTC5MEvidenceEngine
 from .signal_scorer import SignalScorer
 from .fill_optimizer import FillOptimizer
 from .regime_detector import RegimeDetector
@@ -46,6 +47,46 @@ from .telegram_approver import TelegramApprover
 from .slack_notifier import SlackNotifier
 from .chainlink_feed import ChainlinkFeed
 from .market_maker import MarketMaker
+from .signal_pipeline import (
+    build_entry_metadata,
+    build_signal_log_features,
+    normalize_signal,
+)
+
+
+def _format_guard_context(context: dict) -> str:
+    """Render compact guard diagnostics for logs."""
+    if not context:
+        return ""
+    ordered_keys = (
+        "price",
+        "min_price",
+        "max_price",
+        "directionality",
+        "vol_1h",
+        "trend_1h",
+        "epoch_elapsed_secs",
+        "epoch_max_elapsed_secs",
+        "time_remaining_secs",
+        "flat_vol_1h",
+        "liq_volume_60s",
+        "liq_bias",
+        "funding_rate",
+        "taker_delta",
+        "cvd_agrees",
+        "vpin_5m",
+        "vpin_flow_opposes",
+        "coinbase_premium_bps",
+        "cb_premium_opposes",
+    )
+    parts = []
+    for key in ordered_keys:
+        if key in context:
+            parts.append(f"{key}={context[key]}")
+    for key in sorted(context):
+        if key not in ordered_keys:
+            parts.append(f"{key}={context[key]}")
+    return ", ".join(parts)
 
 
 class SignalBot:
@@ -329,6 +370,7 @@ class SignalBot:
 
         # 13b. Data science modules (all optional, graceful degradation)
         self._signal_logger = None
+        self._btc5m_evidence = None
         self._signal_scorer = None
         self._fill_optimizer = None
         self._regime_detector = None
@@ -336,6 +378,16 @@ class SignalBot:
         if config.enable_signal_logging:
             self._signal_logger = SignalLogger(db_path=os.path.join(config.lagbot_data_dir, "signals.db"))
             self._logger.info("SignalLogger ENABLED")
+            if config.enable_btc5m_evidence_verdicts:
+                self._btc5m_evidence = BTC5MEvidenceEngine(
+                    db_path=os.path.join(config.lagbot_data_dir, "signals.db"),
+                    min_samples=config.btc5m_evidence_min_samples,
+                )
+                self._logger.info(
+                    "BTC5MEvidenceEngine ENABLED (mode=%s, min_samples=%s)",
+                    config.btc5m_evidence_mode,
+                    config.btc5m_evidence_min_samples,
+                )
 
         if config.enable_regime_detection:
             self._regime_detector = RegimeDetector()
@@ -358,6 +410,10 @@ class SignalBot:
         if self._fill_optimizer:
             self._executor._fill_optimizer = self._fill_optimizer
         self._executor._performance_db = self._tracker.db  # Kelly sizing (no-op if disabled)
+        self._health.set_pipeline_dbs(
+            signal_logger=self._signal_logger,
+            perf_db=self._tracker.db,
+        )
         if self._regime_detector and self._momentum_feed:
             self._momentum_feed._regime_detector = self._regime_detector
         if self._momentum_feed:
@@ -385,6 +441,7 @@ class SignalBot:
             regime_detector=self._regime_detector,
             gabagool_tracker=self._gabagool_tracker,
             adaptive_tuner=self._adaptive_tuner,
+            executor=self._executor,
         )
 
         self._logger.info("SignalBot initialized successfully")
@@ -683,6 +740,123 @@ class SignalBot:
         except Exception:
             return {}
 
+    def _enrich_signal_context(self, raw_signal: dict) -> tuple[dict, dict, object]:
+        """Normalize a raw signal and enrich it with external market context."""
+        envelope = normalize_signal(raw_signal)
+        signal = envelope.signal
+
+        market_context = self._read_market_context()
+        if market_context:
+            fg_val = market_context.get("fear_greed")
+            if fg_val is not None:
+                signal["fear_greed"] = fg_val
+            market_regime = market_context.get("market_regime")
+            if market_regime:
+                signal["market_regime"] = market_regime
+            asset_ctx = market_context.get(signal.get("asset", "BTC"), {})
+            if asset_ctx.get("oi_change_pct") is not None:
+                signal["oi_change_pct"] = asset_ctx.get("oi_change_pct")
+            if asset_ctx.get("oi_trend"):
+                signal["oi_trend"] = asset_ctx.get("oi_trend")
+
+        regime = None
+        if self._regime_detector:
+            regime = self._regime_detector.get_regime(signal.get("asset", "BTC"))
+            signal["regime"] = getattr(regime, "regime", "")
+            signal["volatility_1h"] = getattr(regime, "volatility_1h", None)
+            signal["trend_1h"] = getattr(regime, "trend_1h", None)
+
+        return signal, market_context, regime
+
+    def _mark_signal_stage(
+        self,
+        signal_id: int,
+        stage: str,
+        status: str,
+        detail: str = "",
+        **extra_updates,
+    ) -> None:
+        """Persist pipeline stage transitions when signal logging is enabled."""
+        if not self._signal_logger or signal_id <= 0:
+            return
+        if hasattr(self._signal_logger, "mark_signal_stage"):
+            self._signal_logger.mark_signal_stage(
+                signal_id, stage, status, detail, **extra_updates
+            )
+            return
+        updates = {
+            "pipeline_stage": stage,
+            "pipeline_status": status,
+            "pipeline_detail": detail,
+        }
+        updates.update(extra_updates)
+        self._signal_logger.update_signal(signal_id, updates)
+
+    def _log_signal_observation(
+        self,
+        signal: dict,
+        guard_result,
+        *,
+        market_context: dict,
+        regime,
+    ) -> int:
+        """Log the normalized signal once, then attach evidence annotations."""
+        if not self._signal_logger:
+            return -1
+
+        signal_id = self._signal_logger.log_signal(
+            build_signal_log_features(
+                signal,
+                guard_result,
+                market_context=market_context,
+                regime=regime,
+            )
+        )
+        if signal_id <= 0:
+            return signal_id
+
+        evidence_engine = getattr(self, "_btc5m_evidence", None)
+        if evidence_engine:
+            evidence_verdict = evidence_engine.evaluate_signal(signal)
+            if evidence_verdict:
+                self._signal_logger.update_signal(
+                    signal_id,
+                    evidence_verdict.as_signal_updates(),
+                )
+                self._logger.info(
+                    "BTC5m evidence verdict (%s): %s | %s",
+                    evidence_verdict.verdict,
+                    signal.get("slug", "unknown"),
+                    evidence_verdict.reason,
+                )
+        return signal_id
+
+    def _prepare_entry_signal(self, signal: dict) -> dict:
+        """Attach stable metadata before handoff to the executor."""
+        prepared = dict(signal)
+        binance_price = prepared.get("binance_price", 0.0)
+        if not binance_price and self._momentum_feed:
+            binance_price = self._momentum_feed.get_latest_price(
+                prepared.get("asset", "BTC")
+            ) or 0.0
+
+        prepared["metadata"] = build_entry_metadata(
+            prepared,
+            entry_binance_price=binance_price,
+        )
+
+        reversal_sources = (
+            "binance_momentum", "binance_momentum_lag", "sharp_move",
+            "oracle_flip", "reversal_short", "window_delta", "streak_contrarian",
+        )
+        if prepared.get("source") in reversal_sources:
+            prepared["metadata"]["entry_momentum_direction"] = prepared.get(
+                "outcome", ""
+            ).lower()
+            prepared["metadata"]["entry_momentum_ts"] = time.time()
+            prepared["metadata"]["entry_binance_price"] = binance_price
+        return prepared
+
     def _on_invariant_halt(self, reason: str):
         """Called by HealthMonitor when a CRITICAL invariant is violated."""
         self._trading_halted = True
@@ -697,72 +871,36 @@ class SignalBot:
         """
         try:
             self._logger.debug(f"Received signal: {signal.get('slug', 'unknown')}")
+            signal, market_context, regime = self._enrich_signal_context(signal)
+            if signal.get("noise_flags"):
+                self._logger.debug(
+                    "Signal normalization flags for %s: %s",
+                    signal.get("slug", "unknown"),
+                    ",".join(signal["noise_flags"]),
+                )
 
-            # 0b. Inject F&G from market context into signal for guard check
-            mkt_ctx_guard = self._read_market_context()
-            if mkt_ctx_guard:
-                fg_val = mkt_ctx_guard.get("fear_greed")
-                if fg_val is not None:
-                    signal["fear_greed"] = fg_val
-
-            # 0c. Inject regime data (volatility_1h, trend_1h) for whipsaw guard
-            if self._regime_detector:
-                regime = self._regime_detector.get_regime(signal.get("asset", "BTC"))
-                signal["volatility_1h"] = regime.volatility_1h
-                signal["trend_1h"] = regime.trend_1h
-
-            # 1. Run through signal guard
             result = self._guard.check(signal)
-
-            # 1b. Log signal features (captures ALL signals for ML training)
             signal_id = -1
             if self._signal_logger:
-                slug_val = signal.get("slug", "")
-                log_features = {
-                    "slug": slug_val,
-                    "asset": signal.get("asset", ""),
-                    "direction": signal.get("outcome", ""),
-                    "token_id": signal.get("token_id", ""),
-                    "midpoint": signal.get("price", 0.0),
-                    "momentum_pct": signal.get("momentum_pct", 0.0),
-                    "market_window_secs": signal.get("market_window_secs", 0),
-                    "guard_passed": 1 if result.passed else 0,
-                    "guard_reasons": ",".join(result.reasons) if result.reasons else "",
-                    "source": signal.get("source", ""),
-                    "spread": signal.get("spread"),
-                    "book_depth_bid": signal.get("best_bid"),
-                    "book_depth_ask": signal.get("best_ask"),
-                    "book_imbalance": signal.get("book_imbalance"),
-                }
-                # Compute time_remaining from slug if not in signal
-                time_remaining = signal.get("time_remaining_secs", 0)
-                if time_remaining == 0 and slug_val:
-                    parts = slug_val.rsplit('-', 1)
-                    if len(parts) == 2 and parts[1].isdigit():
-                        from .types import parse_window_from_slug
-                        epoch = int(parts[1])
-                        window = parse_window_from_slug(slug_val)
-                        time_remaining = max(0, int(epoch + window - time.time()))
-                log_features["time_remaining_secs"] = time_remaining
-                # Add regime features if available
-                if self._regime_detector:
-                    regime = self._regime_detector.get_regime(signal.get("asset", "BTC"))
-                    log_features["regime"] = regime.regime
-                    log_features["volatility_1h"] = regime.volatility_1h
-                    log_features["trend_1h"] = regime.trend_1h
-                # Add OpenClaw market context (F&G, OI) if available
-                mkt_ctx = self._read_market_context()
-                if mkt_ctx:
-                    log_features["fear_greed"] = mkt_ctx.get("fear_greed")
-                    log_features["market_regime"] = mkt_ctx.get("market_regime", "")
-                    asset_ctx = mkt_ctx.get(signal.get("asset", "BTC"), {})
-                    log_features["oi_change_pct"] = asset_ctx.get("oi_change_pct")
-                    log_features["oi_trend"] = asset_ctx.get("oi_trend", "")
-                signal_id = self._signal_logger.log_signal(log_features)
+                signal_id = self._log_signal_observation(
+                    signal,
+                    result,
+                    market_context=market_context,
+                    regime=regime,
+                )
+                self._mark_signal_stage(
+                    signal_id,
+                    "guard",
+                    "passed" if result.passed else "filtered",
+                    ",".join(result.reasons) if result.reasons else "guard_passed",
+                )
 
             # Shadow mode: log signal but don't execute
             if signal.get("shadow"):
                 guard_status = "passed" if result.passed else f"rejected({','.join(result.reasons)})"
+                context_str = _format_guard_context(result.context)
+                if context_str:
+                    guard_status = f"{guard_status} [{context_str}]"
                 self._logger.info(
                     f"[SHADOW] {signal.get('slug')} {signal.get('outcome')} "
                     f"@ {signal.get('price', 0):.4f} | "
@@ -771,14 +909,20 @@ class SignalBot:
                 )
                 if self._signal_logger and signal_id > 0:
                     self._signal_logger.update_signal(signal_id, {"outcome": "shadow"})
+                self._mark_signal_stage(signal_id, "shadow", "logged", guard_status)
                 return
 
             if not result.passed:
+                context_str = _format_guard_context(result.context)
+                reason_text = f"{result.reasons}"
+                if context_str:
+                    reason_text = f"{reason_text} | context: {context_str}"
                 if self._signal_logger and signal_id > 0:
                     self._signal_logger.update_signal(signal_id, {"outcome": "filtered"})
+                self._mark_signal_stage(signal_id, "guard", "filtered", reason_text)
                 self._logger.info(
                     f"Signal rejected: {signal.get('slug', 'unknown')} "
-                    f"Reasons: {result.reasons}"
+                    f"Reasons: {reason_text}"
                 )
                 return
 
@@ -819,36 +963,50 @@ class SignalBot:
                     )
                     if not self._momentum_confirms(signal, momentum):
                         self._momentum_stats["rejected"] += 1
-                        self._logger.info(
-                            f"Momentum rejected: {signal.get('slug')} "
+                        detail = (
                             f"outcome={signal.get('outcome')} vs {momentum.direction} "
                             f"({momentum.momentum_pct:+.3%}) "
                             f"[{phase} | {lookback}m | thresh={threshold:.4f}]"
                         )
+                        self._logger.info(
+                            f"Momentum rejected: {signal.get('slug')} "
+                            f"{detail}"
+                        )
                         if self._signal_logger and signal_id > 0:
                             self._signal_logger.update_signal(signal_id, {"outcome": "binance_filtered"})
+                        self._mark_signal_stage(signal_id, "momentum_confirmation", "filtered", detail)
                         return
                     self._momentum_stats["approved"] += 1
-                    self._logger.info(
-                        f"Momentum confirmed: {signal.get('slug')} "
+                    detail = (
                         f"{momentum.direction} ({momentum.momentum_pct:+.3%}, "
                         f"conf={momentum.confidence:.2f}) "
                         f"[{phase} | {lookback}m | thresh={threshold:.4f}]"
                     )
+                    self._logger.info(
+                        f"Momentum confirmed: {signal.get('slug')} "
+                        f"{detail}"
+                    )
+                    self._mark_signal_stage(signal_id, "momentum_confirmation", "passed", detail)
 
             # 2c. Regime check (skip flat markets — not applicable to price arb or weather)
             if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather', 'resolution_snipe'):
                 if not self._regime_detector.should_trade(signal.get("asset", "BTC")):
                     if self._signal_logger and signal_id > 0:
                         self._signal_logger.update_signal(signal_id, {"outcome": "regime_filtered"})
+                    self._mark_signal_stage(signal_id, "regime_check", "filtered", "flat_market")
                     self._logger.info(f"Regime filtered: {signal.get('slug', '?')} (flat market)")
                     return
+                self._mark_signal_stage(
+                    signal_id,
+                    "regime_check",
+                    "passed",
+                    getattr(regime, "regime", "tradeable"),
+                )
 
             # 2d. Signal scoring
             signal_score = None
             if self._signal_scorer:
                 now_utc = datetime.now(timezone.utc)
-                regime = self._regime_detector.get_regime(signal.get("asset", "BTC")) if self._regime_detector else None
                 features = self._signal_scorer.build_feature_dict(
                     momentum_pct=signal.get("momentum_pct", 0.0),
                     midpoint=signal.get("price", 0.0),
@@ -876,22 +1034,38 @@ class SignalBot:
                         f"Score filtered: {signal.get('slug', '?')} "
                         f"score={signal_score:.1f} < {self._signal_scorer._threshold}"
                     )
+                    self._mark_signal_stage(
+                        signal_id,
+                        "score",
+                        "filtered",
+                        f"{signal_score:.1f}<{self._signal_scorer._threshold}",
+                    )
                     return
                 self._logger.info(f"Signal score: {signal_score:.1f} for {signal.get('slug', '?')}")
+                self._mark_signal_stage(
+                    signal_id,
+                    "score",
+                    "passed",
+                    f"{signal_score:.1f}>={self._signal_scorer._threshold}",
+                )
 
             # 2b. Circuit breaker check (entries only — exits never blocked)
             # Bypass for reversal_short: the flip is triggered BY a loss, cooldown must not block it
             if self._trading_halted:
+                self._mark_signal_stage(signal_id, "circuit_breaker", "halted", "startup_reconciliation_failed")
                 self._logger.warning("Trading halted: startup reconciliation failed")
                 return
             if signal.get('source') != 'reversal_short':
                 allowed, cb_reason = self._circuit_breaker.is_trading_allowed()
                 if not allowed:
+                    self._mark_signal_stage(signal_id, "circuit_breaker", "blocked", cb_reason)
                     self._logger.warning(f"Circuit breaker blocked entry: {cb_reason}")
                     return
+                self._mark_signal_stage(signal_id, "circuit_breaker", "passed", cb_reason or "allowed")
 
             # 3. Check if safe to trade
             if not await self._balance.is_safe_to_trade():
+                self._mark_signal_stage(signal_id, "balance", "blocked", "unsafe_to_trade")
                 self._logger.warning("Not safe to trade - balance too low or limit reached")
                 return
 
@@ -901,6 +1075,12 @@ class SignalBot:
             else:
                 available = await self._balance.get_available()
             if available < self._config.min_bet:
+                self._mark_signal_stage(
+                    signal_id,
+                    "sizing",
+                    "blocked",
+                    f"available={available:.2f}<min_bet={self._config.min_bet:.2f}",
+                )
                 self._logger.warning(
                     f"Insufficient capital: ${available:.2f} < ${self._config.min_bet:.2f}"
                 )
@@ -911,6 +1091,13 @@ class SignalBot:
                 price = signal.get('price', 0)
                 asset = signal.get('asset', '')
                 projected = self._executor._calculate_size(price, available, asset, spread=signal.get("spread"))
+                self._mark_signal_stage(
+                    signal_id,
+                    "dry_run",
+                    "projected",
+                    f"projected={projected:.2f}/available={available:.2f}",
+                    outcome="dry_run",
+                )
                 self._logger.info(
                     f"[DRY RUN] Would execute BUY: {signal.get('slug', 'unknown')} "
                     f"@ ${price:.4f} (projected ${projected:.2f} / ${available:.2f} avail)"
@@ -919,31 +1106,24 @@ class SignalBot:
 
             # 5b. Telegram approval gate (weather signals only)
             if signal.get('source') == 'noaa_weather' and self._telegram.enabled:
+                self._mark_signal_stage(signal_id, "approval", "pending", "telegram")
                 await self._telegram.submit(signal)
                 return  # execution happens via _execute_weather_signal callback
 
-            # 5c. Populate entry metadata for ALL signal types (direction, source, asset)
-            signal.setdefault("metadata", {})
-            signal["metadata"]["direction"] = signal.get("outcome", "").lower()
-            signal["metadata"]["source"] = signal.get("source", "")
-            signal["metadata"]["asset"] = signal.get("asset", "")
-            signal["metadata"]["entry_price_at_signal"] = signal.get("price", 0.0)
-
-            # 5d. Extra momentum fields for reversal exit (all Binance-sourced entries)
-            reversal_sources = ('binance_momentum', 'binance_momentum_lag', 'sharp_move',
-                                'oracle_flip', 'reversal_short', 'window_delta', 'streak_contrarian')
-            if signal.get('source') in reversal_sources and self._momentum_feed:
-                signal["metadata"]["entry_momentum_direction"] = signal.get("outcome", "").lower()
-                signal["metadata"]["entry_momentum_ts"] = time.time()
-                bp = signal.get("binance_price", 0.0)
-                if not bp:
-                    bp = self._momentum_feed.get_latest_price(signal.get("asset", "BTC")) or 0.0
-                signal["metadata"]["entry_binance_price"] = bp
+            signal = self._prepare_entry_signal(signal)
 
             # 6. Execute buy
+            self._mark_signal_stage(signal_id, "execution", "attempted", self._config.entry_mode)
             exec_result = await self._executor.execute_buy(signal, available)
 
             if not exec_result.success:
+                self._mark_signal_stage(
+                    signal_id,
+                    "execution",
+                    "failed",
+                    exec_result.error or exec_result.reason or "unknown_error",
+                    outcome="execution_failed",
+                )
                 self._logger.error(
                     f"Buy execution failed for {signal.get('slug', 'unknown')}: "
                     f"{exec_result.error}"
@@ -995,6 +1175,12 @@ class SignalBot:
                     "entry_price": exec_result.fill_price,
                     "fill_mode": self._config.entry_mode,
                 })
+                self._mark_signal_stage(
+                    signal_id,
+                    "execution",
+                    "executed",
+                    f"order_id={exec_result.order_id}",
+                )
                 # Store signal_id + trade context in position for exit tracking
                 stored_pos = self._store.get(signal.get("token_id", ""))
                 if stored_pos and stored_pos.metadata is not None:
@@ -1521,6 +1707,9 @@ class SignalBot:
                     "source": "reversal_short",
                     "outcome": "dry_run",
                     "dry_run": 1,
+                    "pipeline_stage": "reversal_short",
+                    "pipeline_status": "dry_run",
+                    "pipeline_detail": exit_signal.reason,
                 })
             return
 

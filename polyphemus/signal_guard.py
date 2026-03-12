@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from .types import FilterResult
+from .types import FilterResult, parse_window_from_slug
 from .config import Settings
 from .position_store import PositionStore
 
@@ -276,14 +276,31 @@ class SignalGuard:
         # (T0: 4-5m remaining = +$70.92, later buckets all negative)
         # ====================================================================
         if is_momentum and self._config.momentum_max_epoch_elapsed_secs > 0:
-            slug_check_epoch = signal.get('slug', '')
-            parts_epoch = slug_check_epoch.rsplit('-', 1)
-            if len(parts_epoch) == 2 and parts_epoch[1].isdigit():
-                market_epoch_s2 = int(parts_epoch[1])
-                elapsed_s2 = time.time() - market_epoch_s2
-                if elapsed_s2 > self._config.momentum_max_epoch_elapsed_secs:
-                    reasons.append('epoch_too_late')
-                    context['epoch_elapsed_secs'] = round(elapsed_s2)
+            elapsed_s2 = None
+            time_remaining_s2 = signal.get('time_remaining_secs')
+            window_s2 = signal.get('market_window_secs') or parse_window_from_slug(signal.get('slug', ''))
+            if time_remaining_s2 is not None and window_s2:
+                try:
+                    elapsed_s2 = max(0.0, float(window_s2) - float(time_remaining_s2))
+                except (TypeError, ValueError):
+                    elapsed_s2 = None
+
+            if elapsed_s2 is None:
+                slug_check_epoch = signal.get('slug', '')
+                parts_epoch = slug_check_epoch.rsplit('-', 1)
+                if len(parts_epoch) == 2 and parts_epoch[1].isdigit():
+                    market_epoch_s2 = int(parts_epoch[1])
+                    elapsed_s2 = time.time() - market_epoch_s2
+                    if not window_s2:
+                        window_s2 = parse_window_from_slug(slug_check_epoch)
+                    time_remaining_s2 = max(0.0, float(window_s2) - elapsed_s2) if window_s2 else None
+
+            if elapsed_s2 is not None and elapsed_s2 > self._config.momentum_max_epoch_elapsed_secs:
+                reasons.append('epoch_too_late')
+                context['epoch_elapsed_secs'] = round(elapsed_s2)
+                context['epoch_max_elapsed_secs'] = self._config.momentum_max_epoch_elapsed_secs
+                if time_remaining_s2 is not None:
+                    context['time_remaining_secs'] = int(max(0.0, float(time_remaining_s2)))
 
         # ====================================================================
         # FILTER 6e: Extreme Funding Rate Gate
@@ -375,7 +392,6 @@ class SignalGuard:
         # Window delta signals are DESIGNED to fire with <10s remaining — skip check
         # ====================================================================
         slug = signal.get('slug', '')
-        from .types import parse_window_from_slug
         window = parse_window_from_slug(slug)
         min_secs = 0
         if not is_window_delta and not is_weather and not is_15m_momentum and not is_snipe and not is_oracle_flip and not is_streak_contrarian:

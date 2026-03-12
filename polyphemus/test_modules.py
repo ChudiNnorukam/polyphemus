@@ -3,11 +3,13 @@
 import asyncio
 import json
 import os
+import sqlite3
 import sys
 import time
 import tempfile
 import pytest
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 # Ensure polyphemus package is importable
@@ -28,6 +30,8 @@ from polyphemus.config import Settings
 from polyphemus.binance_feed import BinanceFeed
 from polyphemus.arb_engine import ArbEngine
 from polyphemus.balance_manager import BalanceManager
+from polyphemus.dashboard import Dashboard
+from polyphemus.performance_db import PerformanceDB
 
 
 def make_config(**overrides):
@@ -255,6 +259,45 @@ class TestSignalGuard:
         metrics = guard.get_metrics()
         assert metrics["signals_received"] == 2
         assert metrics["signals_passed"] == 1
+
+    def test_momentum_epoch_filter_uses_time_remaining(self):
+        config = make_config(momentum_max_epoch_elapsed_secs=60)
+        store = PositionStore()
+        guard = SignalGuard(config, store)
+        market_epoch = int(time.time()) - 89
+        signal = make_signal(
+            source="binance_momentum",
+            asset="BTC",
+            outcome="Up",
+            slug=f"btc-updown-5m-{market_epoch}",
+            market_window_secs=300,
+            time_remaining_secs=211,
+            price=0.72,
+        )
+        result = guard.check(signal)
+        assert not result.passed
+        assert "epoch_too_late" in result.reasons
+        assert result.context["epoch_elapsed_secs"] == 89
+        assert result.context["epoch_max_elapsed_secs"] == 60
+        assert result.context["time_remaining_secs"] == 211
+
+    def test_momentum_epoch_filter_accepts_early_signal_from_time_remaining(self):
+        config = make_config(momentum_max_epoch_elapsed_secs=60)
+        store = PositionStore()
+        guard = SignalGuard(config, store)
+        market_epoch = int(time.time()) - 50
+        signal = make_signal(
+            source="binance_momentum",
+            asset="BTC",
+            outcome="Up",
+            slug=f"btc-updown-5m-{market_epoch}",
+            market_window_secs=300,
+            time_remaining_secs=250,
+            price=0.72,
+        )
+        result = guard.check(signal)
+        assert result.passed
+        assert "epoch_too_late" not in result.reasons
 
 
 # ============================================================================
@@ -513,6 +556,10 @@ class TestSelfTuner:
 # ============================================================================
 
 class TestPositionExecutor:
+    @staticmethod
+    async def _fast_sleep(_seconds):
+        return None
+
     @pytest.mark.asyncio
     async def test_execute_buy_success(self):
         """Successful buy places order, polls fill, creates position."""
@@ -587,6 +634,398 @@ class TestPositionExecutor:
         assert not result.success
         # place_order should not have been called
         clob.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_btc5m_placement_retry_succeeds_after_transient_failure(self):
+        config = make_config(
+            dry_run=False,
+            btc5m_entry_retry_enabled=True,
+            btc5m_entry_retry_mode="active",
+            btc5m_entry_retry_delay_ms=0,
+            max_entry_price=0.75,
+        )
+        store = PositionStore()
+        clob = AsyncMock(spec=ClobWrapper)
+        clob.place_order.side_effect = [
+            ExecutionResult(success=False, error="Order placement failed: Request exception!"),
+            ExecutionResult(success=True, order_id="0xretry001"),
+        ]
+        clob.get_midpoint.return_value = 0.68
+        clob.get_order_details.return_value = {
+            "status": OrderStatus.FILLED,
+            "size_matched": 11.0,
+            "original_size": 11.0,
+            "price": 0.69,
+        }
+        clob.get_share_balance.return_value = 11.0
+
+        executor = PositionExecutor(clob, store, config)
+        signal = make_signal(
+            asset="BTC",
+            source="binance_momentum",
+            market_window_secs=300,
+            time_remaining_secs=280,
+            price=0.68,
+            slug="btc-updown-5m-1773250800",
+        )
+        with patch("polyphemus.position_executor.asyncio.sleep", new=self._fast_sleep):
+            result = await executor.execute_buy(signal, available_capital=500.0)
+
+        assert result.success
+        stats = executor.get_entry_retry_stats()
+        assert stats["placement_retry_eligible"] == 1
+        assert stats["placement_retry_attempted"] == 1
+        assert stats["retry_recovered"] == 1
+        assert store.count_open() == 1
+
+    @pytest.mark.asyncio
+    async def test_btc5m_fill_retry_succeeds_after_timeout(self):
+        config = make_config(
+            dry_run=False,
+            btc5m_entry_retry_enabled=True,
+            btc5m_entry_retry_mode="active",
+            btc5m_entry_retry_delay_ms=0,
+            max_entry_price=0.75,
+        )
+        store = PositionStore()
+        clob = AsyncMock(spec=ClobWrapper)
+        clob.place_order.side_effect = [
+            ExecutionResult(success=True, order_id="0xfirst"),
+            ExecutionResult(success=True, order_id="0xsecond"),
+        ]
+        clob.get_midpoint.return_value = 0.68
+        clob.get_order_details.side_effect = (
+            [{"status": OrderStatus.LIVE, "size_matched": 0.0, "original_size": 11.0, "price": 0.70}] * 11
+            + [{"status": OrderStatus.FILLED, "size_matched": 11.0, "original_size": 11.0, "price": 0.69}]
+        )
+        clob.cancel_order.return_value = True
+        clob.get_share_balance.return_value = 11.0
+
+        executor = PositionExecutor(clob, store, config)
+        signal = make_signal(
+            asset="BTC",
+            source="binance_momentum",
+            market_window_secs=300,
+            time_remaining_secs=280,
+            price=0.68,
+            slug="btc-updown-5m-1773251100",
+        )
+        with patch("polyphemus.position_executor.asyncio.sleep", new=self._fast_sleep):
+            result = await executor.execute_buy(signal, available_capital=500.0)
+
+        assert result.success
+        stats = executor.get_entry_retry_stats()
+        assert stats["fill_retry_eligible"] == 1
+        assert stats["fill_retry_attempted"] == 1
+        assert stats["fill_timeouts"] == 1
+        assert stats["retry_recovered"] == 1
+        assert store.count_open() == 1
+
+    @pytest.mark.asyncio
+    async def test_btc5m_fill_retry_skips_when_midpoint_above_cap(self):
+        config = make_config(
+            dry_run=False,
+            max_entry_price=0.75,
+            btc5m_entry_retry_enabled=True,
+            btc5m_entry_retry_mode="active",
+            btc5m_entry_retry_delay_ms=0,
+        )
+        store = PositionStore()
+        clob = AsyncMock(spec=ClobWrapper)
+        clob.place_order.return_value = ExecutionResult(success=True, order_id="0xfirst")
+        clob.get_midpoint.return_value = 0.82
+        clob.get_order_details.return_value = {
+            "status": OrderStatus.LIVE,
+            "size_matched": 0.0,
+            "original_size": 11.0,
+            "price": 0.70,
+        }
+        clob.cancel_order.return_value = True
+
+        executor = PositionExecutor(clob, store, config)
+        signal = make_signal(
+            asset="BTC",
+            source="binance_momentum",
+            market_window_secs=300,
+            time_remaining_secs=280,
+            price=0.68,
+            slug="btc-updown-5m-1773251400",
+        )
+        with patch("polyphemus.position_executor.asyncio.sleep", new=self._fast_sleep):
+            result = await executor.execute_buy(signal, available_capital=500.0)
+
+        assert not result.success
+        stats = executor.get_entry_retry_stats()
+        assert stats["fill_retry_eligible"] == 1
+        assert stats["fill_retry_attempted"] == 0
+        assert stats["retry_skip_reasons"]["fill:midpoint_above_cap"] == 1
+
+    @pytest.mark.asyncio
+    async def test_btc5m_fill_retry_skips_when_too_late(self):
+        config = make_config(
+            dry_run=False,
+            btc5m_entry_retry_enabled=True,
+            btc5m_entry_retry_mode="active",
+            btc5m_entry_retry_delay_ms=0,
+            btc5m_entry_retry_min_secs_remaining=45,
+            max_entry_price=0.75,
+        )
+        store = PositionStore()
+        clob = AsyncMock(spec=ClobWrapper)
+        clob.place_order.return_value = ExecutionResult(success=True, order_id="0xfirst")
+        clob.get_midpoint.return_value = 0.69
+        clob.get_order_details.return_value = {
+            "status": OrderStatus.LIVE,
+            "size_matched": 0.0,
+            "original_size": 11.0,
+            "price": 0.70,
+        }
+        clob.cancel_order.return_value = True
+
+        executor = PositionExecutor(clob, store, config)
+        signal = make_signal(
+            asset="BTC",
+            source="binance_momentum",
+            market_window_secs=300,
+            time_remaining_secs=30,
+            price=0.68,
+            slug="btc-updown-5m-1773251700",
+        )
+        with patch("polyphemus.position_executor.asyncio.sleep", new=self._fast_sleep):
+            result = await executor.execute_buy(signal, available_capital=500.0)
+
+        assert not result.success
+        stats = executor.get_entry_retry_stats()
+        assert stats["fill_retry_eligible"] == 1
+        assert stats["retry_skip_reasons"]["fill:too_late"] == 1
+
+    @pytest.mark.asyncio
+    async def test_btc5m_retry_shadow_logs_without_second_order(self):
+        config = make_config(
+            dry_run=False,
+            btc5m_entry_retry_enabled=True,
+            btc5m_entry_retry_mode="shadow",
+            btc5m_entry_retry_delay_ms=0,
+            max_entry_price=0.75,
+        )
+        store = PositionStore()
+        clob = AsyncMock(spec=ClobWrapper)
+        clob.place_order.return_value = ExecutionResult(success=False, error="Order placement failed: Request exception!")
+        clob.get_midpoint.return_value = 0.68
+
+        executor = PositionExecutor(clob, store, config)
+        signal = make_signal(
+            asset="BTC",
+            source="binance_momentum",
+            market_window_secs=300,
+            time_remaining_secs=280,
+            price=0.68,
+            slug="btc-updown-5m-1773252000",
+        )
+        with patch("polyphemus.position_executor.asyncio.sleep", new=self._fast_sleep):
+            result = await executor.execute_buy(signal, available_capital=500.0)
+
+        assert not result.success
+        assert clob.place_order.call_count == 1
+        stats = executor.get_entry_retry_stats()
+        assert stats["placement_retry_eligible"] == 1
+        assert stats["placement_retry_attempted"] == 0
+        assert stats["retry_skip_reasons"]["placement:shadow_would_retry@0.69"] == 1
+
+    @pytest.mark.asyncio
+    async def test_btc5m_retry_never_runs_for_non_matching_signal(self):
+        config = make_config(
+            dry_run=False,
+            btc5m_entry_retry_enabled=True,
+            btc5m_entry_retry_mode="active",
+            btc5m_entry_retry_delay_ms=0,
+        )
+        store = PositionStore()
+        clob = AsyncMock(spec=ClobWrapper)
+        clob.place_order.return_value = ExecutionResult(success=False, error="Order placement failed: Request exception!")
+        clob.get_midpoint.return_value = 0.68
+
+        executor = PositionExecutor(clob, store, config)
+        signal = make_signal(
+            asset="ETH",
+            source="binance_momentum",
+            market_window_secs=300,
+            time_remaining_secs=280,
+            price=0.68,
+            slug="eth-updown-5m-1773252300",
+        )
+        with patch("polyphemus.position_executor.asyncio.sleep", new=self._fast_sleep):
+            result = await executor.execute_buy(signal, available_capital=500.0)
+
+        assert not result.success
+        assert clob.place_order.call_count == 1
+        stats = executor.get_entry_retry_stats()
+        assert stats["placement_retry_eligible"] == 0
+        assert stats["fill_retry_eligible"] == 0
+
+    def test_up_direction_size_multiplier_uses_outcome(self):
+        config = make_config(
+            dry_run=False,
+            base_bet_pct=0.10,
+            up_direction_size_mult=0.5,
+            asset_multiplier_btc=1.0,
+        )
+        store = PositionStore()
+        clob = AsyncMock(spec=ClobWrapper)
+        executor = PositionExecutor(clob, store, config)
+
+        down_signal = make_signal(asset="BTC", outcome="Down", direction="BUY", price=0.80)
+        up_signal = make_signal(asset="BTC", outcome="Up", direction="BUY", price=0.80)
+
+        down_size = executor._calculate_size(0.80, 500.0, asset="BTC", signal=down_signal)
+        up_size = executor._calculate_size(0.80, 500.0, asset="BTC", signal=up_signal)
+
+        assert down_size > 0
+        assert up_size == pytest.approx(down_size * 0.5)
+
+
+class TestBalanceManager:
+    @pytest.mark.asyncio
+    async def test_reconcile_trades_matches_recent_exit_hashes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = PerformanceDB(os.path.join(tmpdir, "performance.db"))
+            now = time.time()
+            old_entry = now - (48 * 3600)
+            recent_exit = now - 300
+            db.record_entry(
+                trade_id="trade-entry-1",
+                token_id="0xtoken",
+                slug="btc-updown-5m-1",
+                entry_time=old_entry,
+                entry_price=0.70,
+                entry_size=10.0,
+                entry_tx_hash="0xentry",
+                outcome="Up",
+                market_title="BTC",
+            )
+            db.record_exit(
+                trade_id="trade-entry-1",
+                exit_time=recent_exit,
+                exit_price=1.0,
+                exit_size=10.0,
+                exit_reason="market_resolved",
+                exit_tx_hash="0xexit",
+                pnl=3.0,
+                pnl_pct=0.3,
+            )
+
+            clob = AsyncMock(spec=ClobWrapper)
+            clob.get_recent_trades.return_value = [
+                {
+                    "maker_orders": [
+                        {
+                            "maker_address": make_config().wallet_address,
+                            "order_id": "0xexit",
+                        }
+                    ]
+                }
+            ]
+            manager = BalanceManager(clob, PositionStore(), make_config(dry_run=False))
+
+            with patch.dict(os.environ, {"WALLET_ADDRESS": make_config().wallet_address}, clear=False):
+                passed, msg = await manager.reconcile_trades(db)
+
+            assert passed
+            assert "OK:" in msg
+
+    @pytest.mark.asyncio
+    async def test_reconcile_trades_halts_on_unmatched_recent_clob_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = PerformanceDB(os.path.join(tmpdir, "performance.db"))
+            clob = AsyncMock(spec=ClobWrapper)
+            clob.get_recent_trades.return_value = [
+                {
+                    "maker_orders": [
+                        {
+                            "maker_address": make_config().wallet_address,
+                            "order_id": "0xmissing",
+                        }
+                    ]
+                }
+            ]
+            manager = BalanceManager(clob, PositionStore(), make_config(dry_run=False))
+
+            with patch.dict(os.environ, {"WALLET_ADDRESS": make_config().wallet_address}, clear=False):
+                passed, msg = await manager.reconcile_trades(db)
+
+            assert not passed
+            assert "CRITICAL:" in msg
+
+
+class TestDashboard:
+    def test_pipeline_summary_includes_retry_counters(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            signals_db = os.path.join(tmpdir, "signals.db")
+            perf_db = os.path.join(tmpdir, "performance.db")
+
+            sig_conn = sqlite3.connect(signals_db)
+            sig_conn.execute(
+                """
+                CREATE TABLE signals (
+                    asset TEXT,
+                    market_window_secs INTEGER,
+                    epoch REAL,
+                    source TEXT,
+                    guard_passed INTEGER,
+                    outcome TEXT,
+                    guard_reasons TEXT,
+                    slug TEXT,
+                    midpoint REAL,
+                    time_remaining_secs INTEGER
+                )
+                """
+            )
+            now = time.time()
+            sig_conn.executemany(
+                """
+                INSERT INTO signals (
+                    asset, market_window_secs, epoch, source, guard_passed,
+                    outcome, guard_reasons, slug, midpoint, time_remaining_secs
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("BTC", 300, now - 120, "binance_momentum", 1, "passed", "", "btc-updown-5m-1", 0.68, 280),
+                    ("BTC", 300, now - 60, "binance_momentum", 0, "filtered", "price_out_of_range", "btc-updown-5m-2", 0.81, 250),
+                ],
+            )
+            sig_conn.commit()
+            sig_conn.close()
+
+            perf_conn = sqlite3.connect(perf_db)
+            perf_conn.execute("CREATE TABLE trades (slug TEXT, entry_time REAL)")
+            perf_conn.commit()
+            perf_conn.close()
+
+            dash = Dashboard(
+                config=make_config(),
+                store=PositionStore(),
+                balance=SimpleNamespace(_cached_balance=100.0),
+                health=SimpleNamespace(get_uptime_hours=lambda: 1.0, _error_count=0),
+                guard=SimpleNamespace(),
+                perf_db=SimpleNamespace(db_path=perf_db),
+                signal_logger=SimpleNamespace(_db_path=signals_db),
+                executor=SimpleNamespace(
+                    get_entry_retry_stats=lambda: {
+                        "placement_failures": 2,
+                        "fill_timeouts": 1,
+                        "retry_recovered": 1,
+                        "retry_skip_reasons": {"fill:midpoint_above_cap": 2},
+                    }
+                ),
+            )
+
+            summary = dash._get_pipeline_summary()
+
+            assert summary["passed_btc_candidates"] == 1
+            assert summary["placement_failures"] == 2
+            assert summary["fill_timeouts"] == 1
+            assert summary["retry_recovered"] == 1
+            assert summary["retry_skip_reasons"][0]["reason"] == "fill:midpoint_above_cap"
 
 
 # ============================================================================

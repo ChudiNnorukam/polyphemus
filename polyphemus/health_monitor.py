@@ -6,6 +6,7 @@ import asyncio
 import glob
 import json
 import os
+import sqlite3
 import socket
 import sys
 import time
@@ -49,11 +50,18 @@ class HealthMonitor:
         self._last_redemption_time = None
         self._chainlink_feed = None
         self._momentum_feed = None
+        self._signal_logger = None
+        self._perf_db = None
 
     def set_pipeline_feeds(self, chainlink_feed=None, momentum_feed=None):
         """Set feed references for pipeline status reporting."""
         self._chainlink_feed = chainlink_feed
         self._momentum_feed = momentum_feed
+
+    def set_pipeline_dbs(self, signal_logger=None, perf_db=None):
+        """Set DB-backed components used for pipeline watchdog checks."""
+        self._signal_logger = signal_logger
+        self._perf_db = perf_db
 
     def notify_ready(self):
         """Send systemd READY=1 notification."""
@@ -196,6 +204,7 @@ class HealthMonitor:
 
                 # Runtime health invariants (detect silent failures within 5 minutes)
                 self._check_runtime_invariants(uptime_hours, balance, gm, open_positions)
+                self._check_pipeline_watchdog()
 
                 # Clean up old health files (keep last 50)
                 self._cleanup_old_health_files()
@@ -257,6 +266,114 @@ class HealthMonitor:
                 self._last_redemption_count = sweep_count
             except Exception:
                 pass
+
+    def _check_pipeline_watchdog(self):
+        """Warn when the BTC 5m pipeline is starved or stopping at a known stage."""
+        signal_db = getattr(self._signal_logger, "_db_path", None)
+        perf_db_path = getattr(self._perf_db, "db_path", None)
+        if not signal_db or not perf_db_path:
+            return
+
+        now = time.time()
+        try:
+            sig_conn = sqlite3.connect(str(signal_db))
+            sig_conn.row_factory = sqlite3.Row
+            trade_conn = sqlite3.connect(str(perf_db_path))
+            trade_conn.row_factory = sqlite3.Row
+            try:
+                last_decision = sig_conn.execute(
+                    """
+                    SELECT MAX(epoch) AS ts
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                    """
+                ).fetchone()["ts"]
+                last_candidate = sig_conn.execute(
+                    """
+                    SELECT MAX(epoch) AS ts
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND source = 'binance_momentum'
+                    """
+                ).fetchone()["ts"]
+                passed_1h = sig_conn.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND source = 'binance_momentum'
+                      AND epoch >= ? AND guard_passed = 1
+                    """,
+                    (now - 3600,),
+                ).fetchone()["n"]
+                candidates_1h = sig_conn.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND source = 'binance_momentum'
+                      AND epoch >= ?
+                    """,
+                    (now - 3600,),
+                ).fetchone()["n"]
+                top_reasons = sig_conn.execute(
+                    """
+                    SELECT guard_reasons, COUNT(*) AS n
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND source = 'binance_momentum'
+                      AND epoch >= ? AND COALESCE(guard_reasons, '') != ''
+                    GROUP BY guard_reasons
+                    ORDER BY n DESC
+                    LIMIT 3
+                    """,
+                    (now - 3600,),
+                ).fetchall()
+                last_trade = trade_conn.execute(
+                    """
+                    SELECT MAX(entry_time) AS ts
+                    FROM trades
+                    WHERE slug LIKE 'btc-updown-5m-%'
+                    """
+                ).fetchone()["ts"]
+            finally:
+                sig_conn.close()
+                trade_conn.close()
+        except Exception as exc:
+            self._logger.warning(f"pipeline_watchdog query failed: {exc}")
+            return
+
+        if not last_decision or now - float(last_decision) > 900:
+            mins = "never" if not last_decision else f"{(now - float(last_decision)) / 60:.1f}m"
+            self._logger.warning(
+                "PIPELINE WATCHDOG: no BTC 5m decision in %s; market discovery or signal generation may be stalled",
+                mins,
+            )
+
+        if not last_candidate or now - float(last_candidate) > 3600:
+            age = "never" if not last_candidate else f"{(now - float(last_candidate)) / 3600:.1f}h"
+            self._logger.warning(
+                "PIPELINE WATCHDOG: no BTC 5m binance_momentum candidate in %s; entry source may be starved",
+                age,
+            )
+            return
+
+        if candidates_1h > 0 and passed_1h == 0:
+            reasons = ", ".join(
+                f"{row['guard_reasons']} ({row['n']})" for row in top_reasons if row["guard_reasons"]
+            ) or "unknown"
+            self._logger.warning(
+                "PIPELINE WATCHDOG: %s BTC binance_momentum candidates in last hour but 0 passed guards; top blockers: %s",
+                candidates_1h,
+                reasons,
+            )
+
+        if not last_trade or now - float(last_trade) > 21600:
+            age = "never" if not last_trade else f"{(now - float(last_trade)) / 3600:.1f}h"
+            self._logger.warning(
+                "PIPELINE WATCHDOG: no executed BTC 5m trade in %s; pipeline may be starving before execution",
+                age,
+            )
 
     def _cleanup_old_health_files(self, keep=50):
         """Remove old health log files, keeping the most recent N."""

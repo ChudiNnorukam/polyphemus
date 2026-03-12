@@ -56,6 +56,176 @@ class PositionExecutor:
         self._performance_db = None  # Set by signal_bot after init (Kelly sizing)
         self._tracker = None         # Set by signal_bot (flip escalation)
         self._kelly_cache: dict = {}  # (asset, bucket) -> (wr, n, fetched_at)
+        self._entry_retry_stats = {
+            "placement_retry_eligible": 0,
+            "placement_retry_attempted": 0,
+            "placement_retry_skipped": 0,
+            "fill_retry_eligible": 0,
+            "fill_retry_attempted": 0,
+            "fill_retry_skipped": 0,
+            "fill_retry_succeeded": 0,
+            "fill_retry_failed": 0,
+            "placement_failures": 0,
+            "fill_timeouts": 0,
+            "retry_recovered": 0,
+            "retry_skip_reasons": {},
+        }
+
+    def get_entry_retry_stats(self) -> dict:
+        """Return a shallow copy of BTC 5m entry retry counters."""
+        stats = dict(self._entry_retry_stats)
+        stats["retry_skip_reasons"] = dict(self._entry_retry_stats["retry_skip_reasons"])
+        return stats
+
+    def _record_entry_retry_event(self, event: str, slug: str = "", detail: str = "") -> None:
+        """Track retry lifecycle events for dashboard observability."""
+        if event not in self._entry_retry_stats:
+            return
+        self._entry_retry_stats[event] += 1
+        suffix = f" | {detail}" if detail else ""
+        self._logger.info(f"{event}: {slug}{suffix}")
+
+    def _record_entry_retry_skip(self, stage: str, slug: str, reason: str) -> None:
+        """Track why a bounded retry was skipped."""
+        key = f"{stage}:{reason}"
+        skips = self._entry_retry_stats["retry_skip_reasons"]
+        skips[key] = skips.get(key, 0) + 1
+        event = "placement_retry_skipped" if stage == "placement" else "fill_retry_skipped"
+        self._record_entry_retry_event(event, slug, reason)
+
+    def _is_btc5m_retry_candidate(self, signal: dict, window: int) -> bool:
+        """Retry scope is intentionally narrow for the first rollout."""
+        return (
+            bool(self._config.btc5m_entry_retry_enabled)
+            and signal.get("asset") == "BTC"
+            and window <= 300
+            and signal.get("source") == "binance_momentum"
+        )
+
+    def _retry_mode_active(self) -> bool:
+        return str(getattr(self._config, "btc5m_entry_retry_mode", "shadow")).lower() == "active"
+
+    def _is_transient_execution_error(self, result: ExecutionResult) -> bool:
+        """Best-effort detection of a placement failure worth retrying once."""
+        text = f"{result.reason} {result.error}".lower()
+        needles = (
+            "request exception",
+            "timeout",
+            "connection",
+            "tempor",
+            "apiexception",
+            "server error",
+            "status_code=none",
+        )
+        return any(needle in text for needle in needles)
+
+    async def _build_btc5m_retry_plan(
+        self,
+        signal: dict,
+        token_id: str,
+        signal_price: float,
+    ) -> tuple[float | None, str]:
+        """Return a safe retry price or a skip reason."""
+        secs_remaining = int(signal.get("time_remaining_secs", 0) or 0)
+        min_secs = int(getattr(self._config, "btc5m_entry_retry_min_secs_remaining", 45))
+        if secs_remaining < min_secs:
+            return None, "too_late"
+
+        midpoint = await self._clob.get_midpoint(token_id)
+        if midpoint <= 0:
+            return None, "midpoint_unavailable"
+
+        max_entry = float(getattr(self._config, "max_entry_price", MAX_ENTRY_PRICE))
+        if midpoint > max_entry:
+            return None, "midpoint_above_cap"
+
+        reprice_cents = max(0, int(getattr(self._config, "btc5m_entry_retry_reprice_cents", 1)))
+        max_overpay_cents = max(0, int(getattr(self._config, "btc5m_entry_retry_max_overpay_cents", 5)))
+        max_retry_price = min(
+            max_entry,
+            round(signal_price + (max_overpay_cents / 100.0), 2),
+        )
+        retry_price = round(midpoint + (reprice_cents / 100.0), 2)
+        if retry_price > max_retry_price:
+            return None, "overpay_cap"
+
+        return retry_price, ""
+
+    async def _maybe_retry_btc5m_entry(
+        self,
+        *,
+        stage: str,
+        signal: dict,
+        token_id: str,
+        slug: str,
+        signal_price: float,
+        size: float,
+        attempts_allowed: int,
+    ) -> ExecutionResult | None:
+        """Bounded retry path for passed BTC 5m momentum entries."""
+        eligible_event = "placement_retry_eligible" if stage == "placement" else "fill_retry_eligible"
+        attempted_event = "placement_retry_attempted" if stage == "placement" else "fill_retry_attempted"
+        self._record_entry_retry_event(eligible_event, slug)
+
+        if attempts_allowed <= 0:
+            self._record_entry_retry_skip(stage, slug, "max_retries_exhausted")
+            return None
+
+        retry_price, skip_reason = await self._build_btc5m_retry_plan(signal, token_id, signal_price)
+        if retry_price is None:
+            self._record_entry_retry_skip(stage, slug, skip_reason)
+            return None
+
+        if not self._retry_mode_active():
+            self._record_entry_retry_skip(stage, slug, f"shadow_would_retry@{retry_price:.2f}")
+            return None
+
+        delay_ms = max(0, int(getattr(self._config, "btc5m_entry_retry_delay_ms", 500)))
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
+
+        self._record_entry_retry_event(attempted_event, slug, f"retry_price={retry_price:.2f}")
+        placement_result = await self._clob.place_order(
+            token_id=token_id,
+            price=retry_price,
+            size=size,
+            side=BUY,
+        )
+        if not placement_result.success:
+            self._entry_retry_stats["placement_failures"] += 1
+            if stage == "fill":
+                self._record_entry_retry_event("fill_retry_failed", slug, placement_result.error)
+            return placement_result
+
+        order_id = placement_result.order_id
+        self._logger.info(
+            "BTC 5m %s retry order placed: %s | %s @ %.2f x %.2f shares",
+            stage,
+            order_id,
+            slug,
+            retry_price,
+            size,
+        )
+        _fill_start = time.time()
+        fill_result = await self._poll_for_fill(
+            order_id,
+            token_id,
+            retry_price,
+            size,
+            max_polls=TAKER_POLL_MAX,
+        )
+        fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
+        if fill_result.success:
+            self._entry_retry_stats["retry_recovered"] += 1
+            self._record_entry_retry_event("fill_retry_succeeded", slug, f"retry_price={retry_price:.2f}")
+            fill_result.fill_price = retry_price
+            return fill_result
+
+        self._entry_retry_stats["fill_timeouts"] += 1
+        await self._clob.cancel_order(order_id)
+        if stage == "fill":
+            self._record_entry_retry_event("fill_retry_failed", slug, fill_result.reason or fill_result.error)
+        return fill_result
 
     async def execute_buy(
         self,
@@ -116,6 +286,7 @@ class PositionExecutor:
         # Determine entry mode based on config (maker saves ~1.3% taker fee)
         from .types import parse_window_from_slug
         window = parse_window_from_slug(slug)
+        retry_candidate = self._is_btc5m_retry_candidate(signal, window)
         use_maker = self._config.entry_mode == "maker"
 
         # Override: use taker on 5m markets (NOTE: 5m taker fees active since Feb 12 2026)
@@ -251,27 +422,65 @@ class PositionExecutor:
         price = buy_price
 
         if not placement_result.success:
-            self._logger.error(
-                f"Order placement failed for {slug}: {placement_result.error}"
+            if retry_candidate:
+                self._entry_retry_stats["placement_failures"] += 1
+            if retry_candidate and self._is_transient_execution_error(placement_result):
+                retry_result = await self._maybe_retry_btc5m_entry(
+                    stage="placement",
+                    signal=signal,
+                    token_id=token_id,
+                    slug=slug,
+                    signal_price=signal.get("price", price),
+                    size=size,
+                    attempts_allowed=int(getattr(self._config, "btc5m_entry_retry_max_placement_retries", 1)),
+                )
+                if retry_result is not None:
+                    if retry_result.success:
+                        placement_result = retry_result
+                        order_id = retry_result.order_id
+                        fill_result = retry_result
+                        price = retry_result.fill_price or price
+                        goto_share_verification = True
+                    else:
+                        self._logger.error(
+                            f"Order placement failed for {slug}: {retry_result.error or retry_result.reason}"
+                        )
+                        return retry_result
+                else:
+                    self._logger.error(
+                        f"Order placement failed for {slug}: {placement_result.error}"
+                    )
+                    return placement_result
+            else:
+                self._logger.error(
+                    f"Order placement failed for {slug}: {placement_result.error}"
+                )
+                return placement_result
+
+        if placement_result.success and placement_result.fill_size > 0:
+            order_id = placement_result.order_id
+            fill_result = placement_result
+            goto_share_verification = True
+        else:
+            goto_share_verification = False
+
+        if not goto_share_verification:
+            self._logger.info(
+                f"Order placed: {placement_result.order_id} | {slug} @ {price} x {size} shares"
             )
-            return placement_result
+            order_id = placement_result.order_id
 
-        order_id = placement_result.order_id
-        self._logger.info(
-            f"Order placed: {order_id} | {slug} @ {price} x {size} shares"
-        )
-
-        # Poll for fill — maker gets longer timeout, taker gets standard
-        poll_max = MAKER_POLL_MAX if use_maker else TAKER_POLL_MAX
-        # Snipe: cap timeout at (time_remaining - 3s) to cancel before market close
-        if is_snipe:
-            secs_left = signal.get('time_remaining_secs', 15)
-            snipe_polls = max(1, int(secs_left) - 3)  # 3s safety buffer
-            poll_max = min(poll_max, snipe_polls)
-            self._logger.info(f"Snipe fill timeout: {poll_max}s ({secs_left}s remaining, 3s buffer)")
-        _fill_start = time.time()
-        fill_result = await self._poll_for_fill(order_id, token_id, price, size, max_polls=poll_max)
-        fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
+            # Poll for fill — maker gets longer timeout, taker gets standard
+            poll_max = MAKER_POLL_MAX if use_maker else TAKER_POLL_MAX
+            # Snipe: cap timeout at (time_remaining - 3s) to cancel before market close
+            if is_snipe:
+                secs_left = signal.get('time_remaining_secs', 15)
+                snipe_polls = max(1, int(secs_left) - 3)  # 3s safety buffer
+                poll_max = min(poll_max, snipe_polls)
+                self._logger.info(f"Snipe fill timeout: {poll_max}s ({secs_left}s remaining, 3s buffer)")
+            _fill_start = time.time()
+            fill_result = await self._poll_for_fill(order_id, token_id, price, size, max_polls=poll_max)
+            fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
 
         # Record maker fill outcome to optimizer (before fallback)
         if self._fill_optimizer and maker_offset_used is not None:
@@ -287,6 +496,8 @@ class PositionExecutor:
                 self._logger.warning(f"Fill optimizer record failed: {fo_err}")
 
         if not fill_result.success:
+            if retry_candidate and fill_result.reason == "timeout":
+                self._entry_retry_stats["fill_timeouts"] += 1
             # Attempt cancel
             cancel_ok = await self._clob.cancel_order(order_id)
             if not cancel_ok:
@@ -298,8 +509,33 @@ class PositionExecutor:
                 self._logger.info(f"Snipe fill missed for {slug} — no retry near market close")
                 return fill_result
 
-            # Hybrid fallback: if maker timed out, retry as taker
-            if use_maker and fill_result.reason == "timeout":
+            if retry_candidate and not use_maker and fill_result.reason == "timeout":
+                retry_fill_result = await self._maybe_retry_btc5m_entry(
+                    stage="fill",
+                    signal=signal,
+                    token_id=token_id,
+                    slug=slug,
+                    signal_price=signal.get("price", price),
+                    size=size,
+                    attempts_allowed=int(getattr(self._config, "btc5m_entry_retry_max_fill_retries", 1)),
+                )
+                if retry_fill_result is not None:
+                    if retry_fill_result.success:
+                        fill_result = retry_fill_result
+                        order_id = retry_fill_result.order_id
+                        price = retry_fill_result.fill_price or price
+                        size = retry_fill_result.fill_size if retry_fill_result.fill_size > 0 else size
+                    else:
+                        self._logger.warning(
+                            f"BTC 5m fill retry failed for {slug}: {retry_fill_result.reason or retry_fill_result.error}"
+                        )
+                        return retry_fill_result
+                else:
+                    return fill_result
+
+            if fill_result.success:
+                pass
+            elif use_maker and fill_result.reason == "timeout":
                 self._logger.info(
                     f"Maker timeout after {MAKER_POLL_MAX}s for {slug}, "
                     f"falling back to taker order"
@@ -351,6 +587,8 @@ class PositionExecutor:
                     f"Order {order_id} failed to fill: {fill_result.reason}"
                 )
                 return fill_result
+
+        size = fill_result.fill_size if fill_result.fill_size > 0 else size
 
         # Verify shares settled on CLOB before adding to exit watch (Bug #41 fix)
         # After a taker BUY, CLOB takes 1-3s to reflect shares. Exit manager runs every 0.5s
@@ -686,12 +924,12 @@ class PositionExecutor:
 
         # Layer 1h: Up direction reduction (Down is 20W/1L, Up is 19W/6L)
         if signal:
-            direction = signal.get("direction", "")
-            if direction.lower() == "up" and self._config.up_direction_size_mult < 1.0:
+            outcome = str(signal.get("outcome", "") or signal.get("direction", ""))
+            if outcome.lower() == "up" and self._config.up_direction_size_mult < 1.0:
                 up_mult = self._config.up_direction_size_mult
                 base_spend *= up_mult
                 self._logger.info(
-                    f"Layer 1h (up direction): mult={up_mult:.0%}, "
+                    f"Layer 1h (up direction): outcome={outcome}, mult={up_mult:.0%}, "
                     f"after_up={base_spend:.2f}"
                 )
 

@@ -7,43 +7,42 @@ through configurable filter combinations, and ranks the results.
 Usage:
     python3 tools/backtester.py --instance emmanuel --output results.csv
     python3 tools/backtester.py --instance polyphemus
-    python3 tools/backtester.py --instance emmanuel --no-download  # use cached DBs
+    python3 tools/backtester.py --instance emmanuel --no-download
+    python3 tools/backtester.py --instance emmanuel --asset BTC --window 300
 """
 
 import argparse
 import csv
 import itertools
+import json
 import math
-import os
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 VPS_HOST = "root@82.24.19.114"
 VPS_BASE = "/opt/lagbot/instances/{instance}/data"
 LOCAL_CACHE = Path(__file__).parent / ".backtest_cache"
 
-# ── Filter dimensions ──────────────────────────────────────────────
-# Adjusted to actual data availability (VPIN/taker_delta are NULL in current data)
-
+# Adjusted to current data availability. Keep the default grid small enough
+# to be usable on laptop-sized cached DBs.
 FILTER_GRID = {
     "entry_price_min": [0.80, 0.82, 0.84],
     "entry_price_max": [0.85, 0.88, 0.90, 0.92],
-    "min_time_remaining": [0, 30, 60, 120],        # seconds before market close
+    "min_time_remaining": [0, 30, 60, 120],
     "min_momentum_pct": [0.0, 0.001, 0.002, 0.003],
     "allowed_regimes": [
-        ("trending", "volatile", "flat"),           # all
-        ("trending", "volatile"),                   # no flat
-        ("trending",),                              # trending only
+        ("trending", "volatile", "flat"),
+        ("trending", "volatile"),
+        ("trending",),
     ],
-    "post_loss_cooldown": [0, 300, 900, 1800],      # seconds (0, 5m, 15m, 30m)
-    "max_consec_losses": [2, 3, 5, 999],            # 999 = no limit
+    "post_loss_cooldown": [0, 300, 900, 1800],
+    "max_consec_losses": [2, 3, 5, 999],
 }
 
-# For full grid: too many combos. Use a reduced set for speed.
 FILTER_GRID_REDUCED = {
     "entry_price_min": [0.80, 0.82],
     "entry_price_max": [0.88, 0.90],
@@ -60,7 +59,8 @@ FILTER_GRID_REDUCED = {
 
 @dataclass
 class Signal:
-    """A single signal from signals.db."""
+    """A single signal row enriched with any matched trade outcome."""
+
     id: int
     epoch: float
     slug: str
@@ -75,11 +75,19 @@ class Signal:
     guard_reasons: str
     outcome: str
     signal_score: Optional[float]
-    # Trade outcome (from signals.db or joined from performance.db)
+    source: str
+    market_window_secs: int
     pnl: Optional[float]
     pnl_pct: Optional[float]
     is_win: Optional[int]
     exit_reason: Optional[str]
+    evidence_cohort: Optional[str]
+    evidence_sample_size: Optional[int]
+    evidence_r8_label: Optional[str]
+    evidence_expected_pnl: Optional[float]
+    evidence_verdict: Optional[str]
+    evidence_reason: Optional[str]
+    evidence_match_level: Optional[str]
 
 
 @dataclass
@@ -89,14 +97,17 @@ class FilterCombo:
     min_time_remaining: int
     min_momentum_pct: float
     allowed_regimes: Tuple[str, ...]
-    post_loss_cooldown: int  # seconds
+    post_loss_cooldown: int
     max_consec_losses: int
 
     def label(self) -> str:
         regimes = "+".join(self.allowed_regimes)
-        return (f"price=[{self.entry_price_min:.2f}-{self.entry_price_max:.2f}] "
-                f"time>={self.min_time_remaining}s mom>={self.min_momentum_pct:.4f} "
-                f"reg={regimes} cool={self.post_loss_cooldown}s maxL={self.max_consec_losses}")
+        return (
+            f"price=[{self.entry_price_min:.2f}-{self.entry_price_max:.2f}] "
+            f"time>={self.min_time_remaining}s mom>={self.min_momentum_pct:.4f} "
+            f"reg={regimes} cool={self.post_loss_cooldown}s "
+            f"maxL={self.max_consec_losses}"
+        )
 
 
 @dataclass
@@ -108,13 +119,13 @@ class BacktestResult:
     wins: int = 0
     losses: int = 0
     total_pnl: float = 0.0
-    pnl_list: list = field(default_factory=list)
+    pnl_list: List[float] = field(default_factory=list)
     max_drawdown: float = 0.0
     win_rate: float = 0.0
     avg_pnl: float = 0.0
     sharpe: float = 0.0
 
-    def compute_stats(self):
+    def compute_stats(self) -> None:
         if self.trades_taken > 0:
             self.win_rate = self.wins / self.trades_taken
             self.avg_pnl = self.total_pnl / self.trades_taken
@@ -123,18 +134,63 @@ class BacktestResult:
             var = sum((x - mean) ** 2 for x in self.pnl_list) / (len(self.pnl_list) - 1)
             std = math.sqrt(var) if var > 0 else 0.001
             self.sharpe = mean / std
-        # Max drawdown from cumulative PnL
+
         cum = 0.0
         peak = 0.0
         max_dd = 0.0
-        for p in self.pnl_list:
-            cum += p
+        for pnl in self.pnl_list:
+            cum += pnl
             if cum > peak:
                 peak = cum
-            dd = peak - cum
-            if dd > max_dd:
-                max_dd = dd
+            drawdown = peak - cum
+            if drawdown > max_dd:
+                max_dd = drawdown
         self.max_drawdown = max_dd
+
+
+def infer_window_from_slug(slug: str) -> int:
+    """Infer market window seconds from the Polymarket slug."""
+    slug_l = slug.lower()
+    if "-5m-" in slug_l:
+        return 300
+    if "-15m-" in slug_l:
+        return 900
+    if "-1h-" in slug_l:
+        return 3600
+    return 0
+
+
+def get_table_columns(conn: sqlite3.Connection, table: str) -> set:
+    """Return a set of available columns for the SQLite table."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row[1] for row in rows}
+
+
+def optional_expr(columns: set, name: str, alias: Optional[str] = None,
+                  default_sql: str = "NULL") -> str:
+    """Return a safe SQL expression for optional columns."""
+    alias = alias or name
+    if name in columns:
+        return f"{name} AS {alias}"
+    return f"{default_sql} AS {alias}"
+
+
+def detect_trade_pnl_columns(performance_db: Path) -> Tuple[str, str]:
+    """Detect the canonical PnL and PnL% column names in trades."""
+    conn = sqlite3.connect(str(performance_db))
+    try:
+        columns = get_table_columns(conn, "trades")
+    finally:
+        conn.close()
+
+    pnl_col = "pnl" if "pnl" in columns else "profit_loss"
+    if pnl_col not in columns:
+        pnl_col = "NULL"
+
+    pnl_pct_col = "pnl_pct" if "pnl_pct" in columns else "profit_loss_pct"
+    if pnl_pct_col not in columns:
+        pnl_pct_col = "NULL"
+    return pnl_col, pnl_pct_col
 
 
 def download_dbs(instance: str) -> Tuple[Optional[Path], Optional[Path]]:
@@ -143,105 +199,189 @@ def download_dbs(instance: str) -> Tuple[Optional[Path], Optional[Path]]:
     local_dir.mkdir(parents=True, exist_ok=True)
 
     remote_base = VPS_BASE.format(instance=instance)
-    files = {}
+    files: Dict[str, Optional[Path]] = {}
     for db_name in ["signals.db", "performance.db"]:
         remote = f"{VPS_HOST}:{remote_base}/{db_name}"
         local = local_dir / db_name
-        print(f"  Downloading {remote} -> {local}")
         result = subprocess.run(
             ["scp", "-q", remote, str(local)],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
         )
-        if result.returncode == 0 and local.stat().st_size > 0:
+        if result.returncode == 0 and local.exists() and local.stat().st_size > 0:
             files[db_name] = local
         else:
-            print(f"  Warning: Failed to download {db_name}: {result.stderr.strip()}")
             files[db_name] = None
+            print(f"Warning: failed to download {db_name}: {result.stderr.strip()}")
 
     return files.get("signals.db"), files.get("performance.db")
 
 
 def load_signals(signals_db: Path, performance_db: Optional[Path]) -> List[Signal]:
-    """Load all signals, enriching with trade outcomes from performance.db."""
+    """Load all signals, enriching with trade outcomes when available."""
     conn = sqlite3.connect(str(signals_db))
     conn.row_factory = sqlite3.Row
+    try:
+        columns = get_table_columns(conn, "signals")
+        signal_selects = [
+            "id",
+            "epoch",
+            "slug",
+            "asset",
+            "direction",
+            optional_expr(columns, "entry_price"),
+            optional_expr(columns, "midpoint"),
+            optional_expr(columns, "momentum_pct"),
+            optional_expr(columns, "regime"),
+            optional_expr(columns, "time_remaining_secs"),
+            optional_expr(columns, "guard_passed", default_sql="0"),
+            optional_expr(columns, "guard_reasons", default_sql="''"),
+            optional_expr(columns, "outcome", default_sql="''"),
+            optional_expr(columns, "signal_score"),
+            optional_expr(columns, "source", default_sql="''"),
+            optional_expr(columns, "market_window_secs", default_sql="0"),
+            optional_expr(columns, "pnl"),
+            optional_expr(columns, "pnl_pct"),
+            optional_expr(columns, "is_win"),
+            optional_expr(columns, "exit_reason"),
+            optional_expr(columns, "evidence_cohort"),
+            optional_expr(columns, "evidence_sample_size"),
+            optional_expr(columns, "evidence_r8_label", default_sql="''"),
+            optional_expr(columns, "evidence_expected_pnl"),
+            optional_expr(columns, "evidence_verdict", default_sql="''"),
+            optional_expr(columns, "evidence_reason", default_sql="''"),
+            optional_expr(columns, "evidence_match_level", default_sql="''"),
+        ]
+        select_sql = f"""
+            SELECT
+                {", ".join(signal_selects)}
+            FROM signals
+            ORDER BY epoch ASC
+        """
+        rows = conn.execute(select_sql).fetchall()
+    finally:
+        conn.close()
 
-    rows = conn.execute("""
-        SELECT id, epoch, slug, asset, direction, entry_price, midpoint,
-               momentum_pct, regime, time_remaining_secs, guard_passed,
-               guard_reasons, outcome, signal_score, pnl, pnl_pct, is_win,
-               exit_reason
-        FROM signals
-        ORDER BY epoch ASC
-    """).fetchall()
-    conn.close()
-
-    # Build lookup from performance.db for enrichment
     perf_by_slug: Dict[str, Dict[str, Any]] = {}
     if performance_db and performance_db.exists():
+        pnl_col, pnl_pct_col = detect_trade_pnl_columns(performance_db)
         pconn = sqlite3.connect(str(performance_db))
         pconn.row_factory = sqlite3.Row
-        for row in pconn.execute("SELECT slug, pnl, pnl_pct, exit_reason, outcome FROM trades"):
-            perf_by_slug[row["slug"]] = dict(row)
-        pconn.close()
+        try:
+            columns = get_table_columns(pconn, "trades")
+            trade_selects = [
+                "slug",
+                f"{pnl_col} AS trade_pnl",
+                f"{pnl_pct_col} AS trade_pnl_pct",
+                optional_expr(columns, "exit_reason", default_sql="''"),
+                optional_expr(columns, "outcome", default_sql="''"),
+            ]
+            rows_perf = pconn.execute(
+                f"""
+                SELECT
+                    {", ".join(trade_selects)}
+                FROM trades
+                """
+            ).fetchall()
+        finally:
+            pconn.close()
 
-    signals = []
-    for r in rows:
-        pnl = r["pnl"]
-        pnl_pct = r["pnl_pct"]
-        is_win = r["is_win"]
-        exit_reason = r["exit_reason"]
+        for row in rows_perf:
+            slug = row["slug"]
+            if not slug:
+                continue
+            perf_by_slug[slug] = dict(row)
 
-        # Enrich from performance.db if signal data is missing
-        if pnl is None and r["slug"] in perf_by_slug:
-            p = perf_by_slug[r["slug"]]
-            pnl = p.get("pnl")
-            pnl_pct = p.get("pnl_pct")
-            exit_reason = p.get("exit_reason")
+    signals: List[Signal] = []
+    for row in rows:
+        pnl = row["pnl"]
+        pnl_pct = row["pnl_pct"]
+        is_win = row["is_win"]
+        exit_reason = row["exit_reason"]
+
+        if pnl is None and row["slug"] in perf_by_slug:
+            perf = perf_by_slug[row["slug"]]
+            pnl = perf.get("trade_pnl")
+            pnl_pct = perf.get("trade_pnl_pct")
+            exit_reason = exit_reason or perf.get("exit_reason")
             if pnl is not None:
                 is_win = 1 if pnl > 0 else 0
 
-        signals.append(Signal(
-            id=r["id"], epoch=r["epoch"], slug=r["slug"], asset=r["asset"],
-            direction=r["direction"], entry_price=r["entry_price"],
-            midpoint=r["midpoint"], momentum_pct=r["momentum_pct"],
-            regime=r["regime"], time_remaining_secs=r["time_remaining_secs"],
-            guard_passed=r["guard_passed"], guard_reasons=r["guard_reasons"] or "",
-            outcome=r["outcome"] or "", signal_score=r["signal_score"],
-            pnl=pnl, pnl_pct=pnl_pct, is_win=is_win, exit_reason=exit_reason,
-        ))
+        market_window_secs = int(row["market_window_secs"] or 0)
+        if market_window_secs <= 0:
+            market_window_secs = infer_window_from_slug(row["slug"])
+
+        signals.append(
+            Signal(
+                id=int(row["id"]),
+                epoch=float(row["epoch"]),
+                slug=row["slug"],
+                asset=row["asset"],
+                direction=row["direction"],
+                entry_price=row["entry_price"],
+                midpoint=row["midpoint"],
+                momentum_pct=row["momentum_pct"],
+                regime=row["regime"],
+                time_remaining_secs=row["time_remaining_secs"],
+                guard_passed=int(row["guard_passed"] or 0),
+                guard_reasons=row["guard_reasons"] or "",
+                outcome=row["outcome"] or "",
+                signal_score=row["signal_score"],
+                source=row["source"] or "",
+                market_window_secs=market_window_secs,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                is_win=is_win,
+                exit_reason=exit_reason,
+                evidence_cohort=row["evidence_cohort"],
+                evidence_sample_size=row["evidence_sample_size"],
+                evidence_r8_label=row["evidence_r8_label"] or "",
+                evidence_expected_pnl=row["evidence_expected_pnl"],
+                evidence_verdict=row["evidence_verdict"] or "",
+                evidence_reason=row["evidence_reason"] or "",
+                evidence_match_level=row["evidence_match_level"] or "",
+            )
+        )
 
     return signals
 
 
+def filter_signals(signals: Sequence[Signal], asset: Optional[str] = None,
+                   window: Optional[int] = None,
+                   source: Optional[str] = None) -> List[Signal]:
+    """Filter the loaded signals by asset, market window, and source."""
+    filtered: List[Signal] = []
+    for signal in signals:
+        if asset and signal.asset.upper() != asset.upper():
+            continue
+        if window and signal.market_window_secs != window:
+            continue
+        if source and signal.source != source:
+            continue
+        filtered.append(signal)
+    return filtered
+
+
 def signal_passes_filter(sig: Signal, combo: FilterCombo) -> bool:
-    """Check if a signal passes the given filter combination (static filters only)."""
-    # Entry price range
-    ep = sig.entry_price or sig.midpoint
-    if ep is None:
+    """Check if a signal passes the given filter combination."""
+    entry_point = sig.entry_price or sig.midpoint
+    if entry_point is None:
         return False
-    if ep < combo.entry_price_min or ep > combo.entry_price_max:
-        return False
-
-    # Time remaining
-    tr = sig.time_remaining_secs
-    if tr is not None and tr < combo.min_time_remaining:
+    if entry_point < combo.entry_price_min or entry_point > combo.entry_price_max:
         return False
 
-    # Momentum
-    mp = sig.momentum_pct
-    if mp is not None and abs(mp) < combo.min_momentum_pct:
+    if sig.time_remaining_secs is not None and sig.time_remaining_secs < combo.min_time_remaining:
         return False
 
-    # Regime
+    if sig.momentum_pct is not None and abs(sig.momentum_pct) < combo.min_momentum_pct:
+        return False
+
     if sig.regime and sig.regime not in combo.allowed_regimes:
         return False
 
-    # Must be a buy signal (direction-based) - skip "not_buy_signal" filtered ones
     if "not_buy_signal" in sig.guard_reasons:
         return False
 
-    # Skip expired markets
     if "market_expired" in sig.guard_reasons:
         return False
 
@@ -255,28 +395,20 @@ def replay_signals(signals: List[Signal], combo: FilterCombo) -> BacktestResult:
     last_loss_epoch = 0.0
 
     for sig in signals:
-        # Static filter
         if not signal_passes_filter(sig, combo):
             result.trades_filtered += 1
             continue
 
-        # Post-loss cooldown
         if combo.post_loss_cooldown > 0 and last_loss_epoch > 0:
             if (sig.epoch - last_loss_epoch) < combo.post_loss_cooldown:
                 result.trades_filtered += 1
                 continue
 
-        # Max consecutive losses
         if consec_losses >= combo.max_consec_losses:
             result.trades_filtered += 1
-            # Reset after skipping one (the bot would resume)
             consec_losses = 0
             continue
 
-        # This signal would be taken - but do we have outcome data?
-        # If the signal was actually executed, use real outcome.
-        # If it was filtered by the bot but passes OUR filter, we can't know the outcome.
-        # We'll only count signals that were actually executed (have real PnL).
         if sig.pnl is not None:
             result.trades_taken += 1
             result.total_pnl += sig.pnl
@@ -289,8 +421,6 @@ def replay_signals(signals: List[Signal], combo: FilterCombo) -> BacktestResult:
                 consec_losses += 1
                 last_loss_epoch = sig.epoch
         else:
-            # Signal passes our filter but has no outcome data (was filtered by bot or no exit)
-            # We can count it as "would have taken" but skip from PnL calc
             result.trades_filtered += 1
 
     result.compute_stats()
@@ -298,129 +428,297 @@ def replay_signals(signals: List[Signal], combo: FilterCombo) -> BacktestResult:
 
 
 def generate_combos(full: bool = False) -> List[FilterCombo]:
-    """Generate all filter combinations from the grid."""
+    """Generate all filter combinations from the configured grid."""
     grid = FILTER_GRID if full else FILTER_GRID_REDUCED
     keys = list(grid.keys())
-    values = [grid[k] for k in keys]
+    values = [grid[key] for key in keys]
 
-    combos = []
+    combos: List[FilterCombo] = []
     for vals in itertools.product(*values):
         params = dict(zip(keys, vals))
-        # Skip invalid combos (min >= max)
         if params["entry_price_min"] >= params["entry_price_max"]:
             continue
         combos.append(FilterCombo(**params))
     return combos
 
 
-def run_backtest(instance: str, no_download: bool = False, full_grid: bool = False,
-                 output: Optional[str] = None) -> List[BacktestResult]:
-    """Main backtest runner."""
-    print(f"=== Backtesting {instance} ===")
+def summarize_signals(signals: Sequence[Signal]) -> Dict[str, Any]:
+    """Return a compact dataset summary for the filtered signal set."""
+    executed = [sig for sig in signals if sig.pnl is not None]
+    wins = sum(1 for sig in executed if sig.is_win)
+    losses = sum(1 for sig in executed if sig.pnl is not None and not sig.is_win)
+    sources = sorted({sig.source for sig in signals if sig.source})
+    assets = sorted({sig.asset for sig in signals})
+    windows = sorted({sig.market_window_secs for sig in signals if sig.market_window_secs})
+    evidence_signals = [sig for sig in signals if sig.evidence_verdict]
+    evidence_counts: Dict[str, int] = {}
+    evidence_r8_counts: Dict[str, int] = {}
+    for signal in evidence_signals:
+        evidence_counts[signal.evidence_verdict] = evidence_counts.get(signal.evidence_verdict, 0) + 1
+        if signal.evidence_r8_label:
+            evidence_r8_counts[signal.evidence_r8_label] = evidence_r8_counts.get(signal.evidence_r8_label, 0) + 1
+    return {
+        "total_signals": len(signals),
+        "signals_with_outcomes": len(executed),
+        "wins": wins,
+        "losses": losses,
+        "assets": assets,
+        "windows": windows,
+        "sources": sources,
+        "signals_with_evidence": len(evidence_signals),
+        "evidence_verdicts": evidence_counts,
+        "evidence_r8_labels": evidence_r8_counts,
+    }
 
-    # Step 1: Download DBs
-    if no_download:
-        signals_db = LOCAL_CACHE / instance / "signals.db"
-        performance_db = LOCAL_CACHE / instance / "performance.db"
-        if not signals_db.exists():
-            print(f"Error: {signals_db} not found. Run without --no-download first.")
-            sys.exit(1)
+
+def result_to_dict(rank: int, result: BacktestResult) -> Dict[str, Any]:
+    """Serialize a backtest result for JSON/markdown output."""
+    return {
+        "rank": rank,
+        "trades_taken": result.trades_taken,
+        "trades_filtered": result.trades_filtered,
+        "wins": result.wins,
+        "losses": result.losses,
+        "win_rate": result.win_rate,
+        "avg_pnl": result.avg_pnl,
+        "total_pnl": result.total_pnl,
+        "max_drawdown": result.max_drawdown,
+        "sharpe": result.sharpe,
+        "combo": {
+            **asdict(result.combo),
+            "allowed_regimes": list(result.combo.allowed_regimes),
+            "label": result.combo.label(),
+        },
+    }
+
+
+def build_output_payload(title: str, instance: str, signals: Sequence[Signal],
+                         results: Sequence[BacktestResult], asset: Optional[str],
+                         window: Optional[int], source: Optional[str]) -> Dict[str, Any]:
+    """Build a structured payload for JSON and markdown outputs."""
+    return {
+        "title": title,
+        "instance": instance,
+        "filters": {
+            "asset": asset,
+            "window": window,
+            "source": source,
+        },
+        "dataset": summarize_signals(signals),
+        "results": [result_to_dict(idx + 1, result) for idx, result in enumerate(results)],
+    }
+
+
+def render_markdown(payload: Dict[str, Any], top_n: int = 20) -> str:
+    """Render a compact markdown report for the replay results."""
+    dataset = payload["dataset"]
+    filters = payload["filters"]
+    lines = [
+        f"# {payload['title']}",
+        "",
+        f"- Instance: `{payload['instance']}`",
+        f"- Asset filter: `{filters['asset'] or 'ALL'}`",
+        f"- Window filter: `{filters['window'] or 'ALL'}`",
+        f"- Source filter: `{filters['source'] or 'ALL'}`",
+        f"- Signals analyzed: `{dataset['total_signals']}`",
+        f"- Signals with outcomes: `{dataset['signals_with_outcomes']}`",
+        f"- Win/Loss with outcomes: `{dataset['wins']}/{dataset['losses']}`",
+        f"- Signals with evidence verdicts: `{dataset.get('signals_with_evidence', 0)}`",
+        "",
+        "## Evidence Verdicts",
+        "",
+    ]
+
+    evidence_verdicts = dataset.get("evidence_verdicts", {})
+    evidence_r8_labels = dataset.get("evidence_r8_labels", {})
+    if evidence_verdicts:
+        lines.append(
+            "- Verdict counts: "
+            + ", ".join(
+                f"`{name}`={count}" for name, count in sorted(evidence_verdicts.items())
+            )
+        )
     else:
-        print("Downloading databases from VPS...")
-        signals_db, performance_db = download_dbs(instance)
-        if not signals_db:
-            print("Error: Could not download signals.db")
-            sys.exit(1)
+        lines.append("- Verdict counts: `none`")
 
-    # Step 2: Load signals
-    print("Loading signals...")
-    signals = load_signals(signals_db, performance_db)
-    executed = [s for s in signals if s.pnl is not None]
-    print(f"  Total signals: {len(signals)}")
-    print(f"  With outcomes: {len(executed)}")
-    print(f"  Win/Loss: {sum(1 for s in executed if s.is_win)}/{sum(1 for s in executed if not s.is_win)}")
+    if evidence_r8_labels:
+        lines.append(
+            "- R8 labels: "
+            + ", ".join(
+                f"`{name}`={count}" for name, count in sorted(evidence_r8_labels.items())
+            )
+        )
+    else:
+        lines.append("- R8 labels: `none`")
 
-    # Step 3: Generate filter combos
-    combos = generate_combos(full=full_grid)
-    print(f"  Filter combinations: {len(combos)}")
+    lines.extend([
+        "",
+        "## Top Results",
+        "",
+        "| Rank | Trades | Win Rate | Avg PnL | Total PnL | Max DD | Sharpe | Filter |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ])
 
-    # Step 4: Replay
-    print("Running backtest...")
-    results = []
-    for i, combo in enumerate(combos):
-        r = replay_signals(signals, combo)
-        results.append(r)
-        if (i + 1) % 50 == 0:
-            print(f"  {i+1}/{len(combos)} combos evaluated...")
-
-    # Sort by total PnL descending
-    results.sort(key=lambda r: r.total_pnl, reverse=True)
-
-    # Step 5: Print top results
-    print(f"\n{'='*120}")
-    print(f"TOP 20 FILTER COMBINATIONS (by total PnL)")
-    print(f"{'='*120}")
-    print(f"{'Rank':>4} {'Trades':>6} {'WinR':>6} {'AvgPnL':>8} {'TotalPnL':>10} "
-          f"{'MaxDD':>8} {'Sharpe':>7} | Filter")
-    print(f"{'-'*120}")
-    for i, r in enumerate(results[:20]):
-        print(f"{i+1:>4} {r.trades_taken:>6} {r.win_rate:>6.1%} {r.avg_pnl:>8.2f} "
-              f"{r.total_pnl:>10.2f} {r.max_drawdown:>8.2f} {r.sharpe:>7.3f} | "
-              f"{r.combo.label()}")
-
-    # Also show worst 5
-    print(f"\nBOTTOM 5:")
-    for r in results[-5:]:
-        if r.trades_taken > 0:
-            print(f"  Trades={r.trades_taken} WR={r.win_rate:.1%} PnL={r.total_pnl:.2f} | {r.combo.label()}")
-
-    # Step 6: Output CSV
-    if output:
-        write_csv(results, output)
-        print(f"\nResults written to {output}")
-
-    return results
+    for result in payload["results"][:top_n]:
+        lines.append(
+            "| {rank} | {trades_taken} | {win_rate:.1%} | {avg_pnl:.2f} | "
+            "{total_pnl:.2f} | {max_drawdown:.2f} | {sharpe:.3f} | {label} |".format(
+                rank=result["rank"],
+                trades_taken=result["trades_taken"],
+                win_rate=result["win_rate"],
+                avg_pnl=result["avg_pnl"],
+                total_pnl=result["total_pnl"],
+                max_drawdown=result["max_drawdown"],
+                sharpe=result["sharpe"],
+                label=result["combo"]["label"],
+            )
+        )
+    return "\n".join(lines) + "\n"
 
 
-def write_csv(results: List[BacktestResult], path: str):
+def write_csv(results: List[BacktestResult], path: str) -> None:
     """Write results to CSV."""
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
             "rank", "trades_taken", "trades_filtered", "wins", "losses",
             "win_rate", "avg_pnl", "total_pnl", "max_drawdown", "sharpe",
             "entry_price_min", "entry_price_max", "min_time_remaining",
             "min_momentum_pct", "allowed_regimes", "post_loss_cooldown",
             "max_consec_losses",
         ])
-        for i, r in enumerate(results):
-            w.writerow([
-                i + 1, r.trades_taken, r.trades_filtered, r.wins, r.losses,
-                f"{r.win_rate:.4f}", f"{r.avg_pnl:.4f}", f"{r.total_pnl:.4f}",
-                f"{r.max_drawdown:.4f}", f"{r.sharpe:.4f}",
-                r.combo.entry_price_min, r.combo.entry_price_max,
-                r.combo.min_time_remaining, r.combo.min_momentum_pct,
-                "+".join(r.combo.allowed_regimes),
-                r.combo.post_loss_cooldown, r.combo.max_consec_losses,
+        for idx, result in enumerate(results):
+            writer.writerow([
+                idx + 1,
+                result.trades_taken,
+                result.trades_filtered,
+                result.wins,
+                result.losses,
+                f"{result.win_rate:.4f}",
+                f"{result.avg_pnl:.4f}",
+                f"{result.total_pnl:.4f}",
+                f"{result.max_drawdown:.4f}",
+                f"{result.sharpe:.4f}",
+                result.combo.entry_price_min,
+                result.combo.entry_price_max,
+                result.combo.min_time_remaining,
+                result.combo.min_momentum_pct,
+                "+".join(result.combo.allowed_regimes),
+                result.combo.post_loss_cooldown,
+                result.combo.max_consec_losses,
             ])
 
 
-def main():
+def resolve_db_paths(instance: str, no_download: bool = False,
+                     signals_db: Optional[Path] = None,
+                     performance_db: Optional[Path] = None) -> Tuple[Path, Optional[Path]]:
+    """Resolve the database paths either from overrides, cache, or the VPS."""
+    if signals_db:
+        return signals_db, performance_db
+
+    if no_download:
+        cached_signals = LOCAL_CACHE / instance / "signals.db"
+        cached_performance = LOCAL_CACHE / instance / "performance.db"
+        if not cached_signals.exists():
+            raise FileNotFoundError(
+                f"{cached_signals} not found. Run without --no-download first or pass --signals-db."
+            )
+        return cached_signals, cached_performance if cached_performance.exists() else None
+
+    downloaded_signals, downloaded_performance = download_dbs(instance)
+    if not downloaded_signals:
+        raise FileNotFoundError("Could not download signals.db from VPS")
+    return downloaded_signals, downloaded_performance
+
+
+def run_backtest(instance: str, no_download: bool = False,
+                 full_grid: bool = False, output: Optional[str] = None,
+                 output_format: str = "csv", asset: Optional[str] = None,
+                 window: Optional[int] = None, source: Optional[str] = None,
+                 report_title: Optional[str] = None,
+                 signals_db: Optional[Path] = None,
+                 performance_db: Optional[Path] = None) -> List[BacktestResult]:
+    """Run the filtered signal replay and optionally emit structured output."""
+    signals_path, performance_path = resolve_db_paths(
+        instance=instance,
+        no_download=no_download,
+        signals_db=signals_db,
+        performance_db=performance_db,
+    )
+
+    signals = load_signals(signals_path, performance_path)
+    signals = filter_signals(signals, asset=asset, window=window, source=source)
+    combos = generate_combos(full=full_grid)
+
+    results: List[BacktestResult] = []
+    for combo in combos:
+        results.append(replay_signals(signals, combo))
+    results.sort(key=lambda result: result.total_pnl, reverse=True)
+
+    title = report_title or f"Backtest Results: {instance}"
+    payload = build_output_payload(title, instance, signals, results, asset, window, source)
+
+    if output:
+        output_path = Path(output)
+        if output_format == "csv":
+            write_csv(results, str(output_path))
+        elif output_format == "json":
+            output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        elif output_format == "markdown":
+            output_path.write_text(render_markdown(payload), encoding="utf-8")
+        else:
+            raise ValueError(f"Unsupported output format: {output_format}")
+
+    print(f"=== Backtesting {instance} ===")
+    print(f"Signals analyzed: {payload['dataset']['total_signals']}")
+    print(f"Signals with outcomes: {payload['dataset']['signals_with_outcomes']}")
+    print(f"Sources present: {', '.join(payload['dataset']['sources']) or 'none'}")
+    print(f"Top result: {results[0].combo.label()} | total_pnl={results[0].total_pnl:.2f}"
+          if results else "No results")
+    if output:
+        print(f"Output written to {output} ({output_format})")
+
+    return results
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="Backtest signal filter combinations")
-    parser.add_argument("--instance", required=True, choices=["emmanuel", "polyphemus"],
-                        help="Bot instance to backtest")
-    parser.add_argument("--output", "-o", help="Output CSV path")
+    parser.add_argument("--instance", required=True, help="Bot instance name")
+    parser.add_argument("--output", "-o", help="Optional output path")
+    parser.add_argument("--output-format", choices=["csv", "json", "markdown"],
+                        default="csv", help="Structured output format when --output is set")
+    parser.add_argument("--report-title", default=None,
+                        help="Title to use for markdown/json output")
     parser.add_argument("--no-download", action="store_true",
                         help="Use cached DBs instead of downloading")
     parser.add_argument("--full-grid", action="store_true",
-                        help="Use full filter grid (slower, more combos)")
-    args = parser.parse_args()
+                        help="Use the full filter grid (slower)")
+    parser.add_argument("--asset", help="Restrict analysis to a single asset, e.g. BTC")
+    parser.add_argument("--window", type=int,
+                        help="Restrict analysis to a market window in seconds, e.g. 300")
+    parser.add_argument("--source", help="Restrict analysis to a single signal source")
+    parser.add_argument("--signals-db", type=Path,
+                        help="Explicit signals.db path (bypasses download/cache resolution)")
+    parser.add_argument("--performance-db", type=Path,
+                        help="Explicit performance.db path (optional when --signals-db is set)")
+    return parser.parse_args()
 
+
+def main() -> None:
+    args = parse_args()
     run_backtest(
         instance=args.instance,
         no_download=args.no_download,
         full_grid=args.full_grid,
         output=args.output,
+        output_format=args.output_format,
+        asset=args.asset,
+        window=args.window,
+        source=args.source,
+        report_title=args.report_title,
+        signals_db=args.signals_db,
+        performance_db=args.performance_db,
     )
 
 

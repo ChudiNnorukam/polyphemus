@@ -11,6 +11,10 @@ Access: http://<vps-ip>:8080 or via SSH tunnel: ssh -L 8080:localhost:8080 root@
 """
 
 import asyncio
+import json
+import os
+import sqlite3
+import subprocess
 import time
 from typing import TYPE_CHECKING
 
@@ -54,6 +58,7 @@ class Dashboard:
         regime_detector=None,
         gabagool_tracker=None,
         adaptive_tuner=None,
+        executor=None,
     ):
         self._config = config
         self._store = store
@@ -73,6 +78,7 @@ class Dashboard:
         self._regime_detector = regime_detector
         self._gabagool_tracker = gabagool_tracker
         self._adaptive_tuner = adaptive_tuner
+        self._executor = executor
         self._logger = setup_logger("polyphemus.dashboard")
 
     async def start(self) -> None:
@@ -85,6 +91,12 @@ class Dashboard:
         app.router.add_get("/api/accumulator", self._handle_accumulator)
         app.router.add_get("/api/gabagool", self._handle_gabagool)
         app.router.add_get("/api/accumulator/tuning", self._handle_tuning)
+        app.router.add_get("/api/signals", self._handle_signals)
+        app.router.add_get("/api/evidence", self._handle_evidence)
+        app.router.add_get("/api/trades", self._handle_trades)
+        app.router.add_get("/api/filters", self._handle_filters)
+        app.router.add_get("/api/errors", self._handle_errors)
+        app.router.add_get("/api/pipeline", self._handle_pipeline)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -208,6 +220,623 @@ class Dashboard:
             return web.json_response({"enabled": False})
         return web.json_response({"enabled": True, **self._adaptive_tuner.get_state()})
 
+    async def _handle_signals(self, request: web.Request) -> web.Response:
+        """Return recent signal decisions from signals.db."""
+        if not self._signal_logger:
+            return web.json_response({"enabled": False, "signals": []})
+        return web.json_response({
+            "enabled": True,
+            "signals": self._get_recent_signals(limit=20),
+        })
+
+    async def _handle_evidence(self, request: web.Request) -> web.Response:
+        """Return BTC 5m evidence verdict summary from recent signal history."""
+        if not self._signal_logger:
+            return web.json_response({"enabled": False})
+        return web.json_response({
+            "enabled": bool(getattr(self._config, "enable_btc5m_evidence_verdicts", False)),
+            **self._get_evidence_summary(hours=24),
+        })
+
+    async def _handle_trades(self, request: web.Request) -> web.Response:
+        """Return recent trades from performance.db."""
+        trades = []
+        if self._perf_db:
+            trades = self._get_recent_trades(limit=20)
+        return web.json_response({
+            "enabled": self._perf_db is not None,
+            "trades": trades,
+        })
+
+    async def _handle_filters(self, request: web.Request) -> web.Response:
+        """Return recent BTC 5m filter/rejection breakdowns."""
+        if not self._signal_logger:
+            return web.json_response({"enabled": False})
+        return web.json_response({
+            "enabled": True,
+            **self._get_filter_summary(hours=24),
+        })
+
+    async def _handle_errors(self, request: web.Request) -> web.Response:
+        """Return a small recent error stream for the active lagbot unit."""
+        errors = self._get_recent_error_lines(minutes=30, limit=20)
+        return web.json_response({
+            "enabled": True,
+            "unit": self._detect_systemd_unit() or "unknown",
+            "errors": errors,
+        })
+
+    async def _handle_pipeline(self, request: web.Request) -> web.Response:
+        """Return BTC 5m pipeline watchdog summary."""
+        return web.json_response({
+            "enabled": bool(self._signal_logger and self._perf_db),
+            **self._get_pipeline_summary(),
+        })
+
+    def _get_recent_signals(self, limit: int = 20) -> list[dict]:
+        """Fetch recent signals with outcome and evidence fields."""
+        db_path = getattr(self._signal_logger, "_db_path", None)
+        if not db_path:
+            return []
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+            }
+
+            def expr(name: str, default_sql: str = "NULL") -> str:
+                return name if name in columns else f"{default_sql} AS {name}"
+
+            rows = conn.execute(
+                f"""
+                SELECT
+                    timestamp,
+                    epoch,
+                    slug,
+                    asset,
+                    direction,
+                    {expr("source", "''")},
+                    {expr("midpoint")},
+                    {expr("entry_price")},
+                    {expr("time_remaining_secs")},
+                    {expr("outcome", "''")},
+                    {expr("guard_reasons", "''")},
+                    {expr("evidence_verdict", "''")},
+                    {expr("evidence_r8_label", "''")},
+                    {expr("evidence_reason", "''")},
+                    {expr("evidence_match_level", "''")}
+                FROM signals
+                ORDER BY epoch DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def _get_evidence_summary(self, hours: int = 24) -> dict:
+        """Aggregate recent BTC 5m evidence verdict counts and reason prefixes."""
+        db_path = getattr(self._signal_logger, "_db_path", None)
+        if not db_path:
+            return {
+                "window_hours": hours,
+                "signals_scanned": 0,
+                "verdict_counts": {},
+                "reason_counts": [],
+            }
+
+        cutoff = time.time() - (hours * 3600)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+            }
+            if "evidence_verdict" not in columns:
+                return {
+                    "window_hours": hours,
+                    "signals_scanned": 0,
+                    "verdict_counts": {},
+                    "reason_counts": [],
+                }
+
+            count_row = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300 AND epoch >= ?
+                """,
+                (cutoff,),
+            ).fetchone()
+            verdict_rows = conn.execute(
+                """
+                SELECT COALESCE(evidence_verdict, '') AS verdict, COUNT(*) AS count
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                  AND epoch >= ? AND COALESCE(evidence_verdict, '') != ''
+                GROUP BY COALESCE(evidence_verdict, '')
+                ORDER BY count DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+            reason_rows = conn.execute(
+                """
+                SELECT evidence_reason
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                  AND epoch >= ? AND COALESCE(evidence_reason, '') != ''
+                ORDER BY epoch DESC
+                LIMIT 50
+                """,
+                (cutoff,),
+            ).fetchall()
+
+            verdict_counts = {row["verdict"]: row["count"] for row in verdict_rows}
+            reason_counts: dict[str, int] = {}
+            for row in reason_rows:
+                prefix = row["evidence_reason"].split("|", 1)[0].strip()
+                if not prefix:
+                    continue
+                reason_counts[prefix] = reason_counts.get(prefix, 0) + 1
+
+            recent_rows = conn.execute(
+                """
+                SELECT epoch, slug, evidence_verdict, evidence_r8_label, evidence_reason
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                  AND epoch >= ? AND COALESCE(evidence_verdict, '') != ''
+                ORDER BY epoch DESC
+                LIMIT 8
+                """,
+                (cutoff,),
+            ).fetchall()
+            recent = [dict(row) for row in recent_rows]
+            return {
+                "window_hours": hours,
+                "signals_scanned": int(count_row["total"] or 0),
+                "verdict_counts": verdict_counts,
+                "reason_counts": [
+                    {"reason": key, "count": value}
+                    for key, value in sorted(reason_counts.items(), key=lambda item: item[1], reverse=True)[:6]
+                ],
+                "recent": recent,
+            }
+        finally:
+            conn.close()
+
+    def _get_recent_trades(self, limit: int = 20) -> list[dict]:
+        """Fetch recent trades with normalized source and PnL fields."""
+        trades = []
+        for trade in self._perf_db.get_recent_trades(limit=limit):
+            metadata = {}
+            raw_metadata = trade.get("metadata")
+            if raw_metadata:
+                try:
+                    metadata = json.loads(raw_metadata)
+                except Exception:
+                    metadata = {}
+            pnl = trade.get("pnl")
+            if pnl is None:
+                pnl = trade.get("profit_loss")
+            trades.append({
+                "entry_time": trade.get("entry_time"),
+                "exit_time": trade.get("exit_time"),
+                "slug": trade.get("slug"),
+                "outcome": trade.get("outcome"),
+                "entry_price": trade.get("entry_price"),
+                "exit_price": trade.get("exit_price"),
+                "exit_reason": trade.get("exit_reason"),
+                "source": metadata.get("source", ""),
+                "pnl": pnl,
+                "open": trade.get("exit_time") is None,
+            })
+        return trades
+
+    def _get_filter_summary(self, hours: int = 24) -> dict:
+        """Aggregate recent BTC 5m filtered/rejected signals."""
+        db_path = getattr(self._signal_logger, "_db_path", None)
+        if not db_path:
+            return {
+                "window_hours": hours,
+                "filtered_signals": 0,
+                "reason_counts": [],
+                "price_buckets": [],
+                "time_buckets": [],
+                "recent": [],
+            }
+
+        cutoff = time.time() - (hours * 3600)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT epoch, slug, asset, source, outcome, guard_reasons,
+                       entry_price, midpoint, time_remaining_secs
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300 AND epoch >= ?
+                ORDER BY epoch DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+            reason_counts: dict[str, int] = {}
+            price_buckets: dict[str, int] = {}
+            time_buckets: dict[str, int] = {}
+            recent = []
+            filtered_count = 0
+
+            for row in rows:
+                outcome = (row["outcome"] or "").lower()
+                reasons = [part.strip() for part in (row["guard_reasons"] or "").split(",") if part.strip()]
+                is_filtered = (
+                    "filtered" in outcome
+                    or outcome in {"shadow", "missed"}
+                    or bool(reasons)
+                )
+                if not is_filtered:
+                    continue
+
+                filtered_count += 1
+                price = row["entry_price"] if row["entry_price"] is not None else row["midpoint"]
+                p_bucket = self._price_bucket(price)
+                t_bucket = self._time_bucket(row["time_remaining_secs"])
+                price_buckets[p_bucket] = price_buckets.get(p_bucket, 0) + 1
+                time_buckets[t_bucket] = time_buckets.get(t_bucket, 0) + 1
+
+                if not reasons:
+                    reason_counts["unspecified_filter"] = reason_counts.get("unspecified_filter", 0) + 1
+                else:
+                    for reason in reasons:
+                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+                if len(recent) < 12:
+                    recent.append({
+                        "epoch": row["epoch"],
+                        "slug": row["slug"],
+                        "source": row["source"] or "",
+                        "outcome": row["outcome"] or "",
+                        "guard_reasons": row["guard_reasons"] or "",
+                        "price_bucket": p_bucket,
+                        "time_bucket": t_bucket,
+                    })
+
+            return {
+                "window_hours": hours,
+                "filtered_signals": filtered_count,
+                "reason_counts": [
+                    {"reason": key, "count": value}
+                    for key, value in sorted(reason_counts.items(), key=lambda item: item[1], reverse=True)[:8]
+                ],
+                "price_buckets": [
+                    {"bucket": key, "count": value}
+                    for key, value in sorted(price_buckets.items(), key=lambda item: item[0])
+                ],
+                "time_buckets": [
+                    {"bucket": key, "count": value}
+                    for key, value in sorted(time_buckets.items(), key=lambda item: item[0])
+                ],
+                "recent": recent,
+            }
+        finally:
+            conn.close()
+
+    def _get_pipeline_summary(self) -> dict:
+        """Summarize where the BTC 5m pipeline is currently stopping."""
+        db_path = getattr(self._signal_logger, "_db_path", None)
+        perf_db_path = getattr(self._perf_db, "db_path", None)
+        if not db_path or not perf_db_path:
+            return {
+                "stage": "unknown",
+                "headline": "Pipeline data unavailable",
+                "summary": "signals.db or performance.db is not wired",
+            }
+
+        now = time.time()
+        sig_conn = sqlite3.connect(str(db_path))
+        sig_conn.row_factory = sqlite3.Row
+        trade_conn = sqlite3.connect(str(perf_db_path))
+        trade_conn.row_factory = sqlite3.Row
+        try:
+            def query_scalar(conn, sql: str, params=()):
+                row = conn.execute(sql, params).fetchone()
+                if row is None:
+                    return None
+                return row[0]
+
+            signal_columns = {
+                row["name"]
+                for row in sig_conn.execute("PRAGMA table_info(signals)").fetchall()
+            }
+
+            windows = {
+                "15m": now - 900,
+                "1h": now - 3600,
+                "6h": now - 21600,
+            }
+
+            counts = {}
+            for label, cutoff in windows.items():
+                counts[f"decisions_{label}"] = int(query_scalar(
+                    sig_conn,
+                    """
+                    SELECT COUNT(*)
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND epoch >= ?
+                    """,
+                    (cutoff,),
+                ) or 0)
+                counts[f"momentum_{label}"] = int(query_scalar(
+                    sig_conn,
+                    """
+                    SELECT COUNT(*)
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND source = 'binance_momentum'
+                      AND epoch >= ?
+                    """,
+                    (cutoff,),
+                ) or 0)
+                counts[f"passed_{label}"] = int(query_scalar(
+                    sig_conn,
+                    """
+                    SELECT COUNT(*)
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND source = 'binance_momentum'
+                      AND epoch >= ?
+                      AND guard_passed = 1
+                    """,
+                    (cutoff,),
+                ) or 0)
+                counts[f"filtered_{label}"] = int(query_scalar(
+                    sig_conn,
+                    """
+                    SELECT COUNT(*)
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND source = 'binance_momentum'
+                      AND epoch >= ?
+                      AND COALESCE(outcome, '') = 'filtered'
+                    """,
+                    (cutoff,),
+                ) or 0)
+                counts[f"trades_{label}"] = int(query_scalar(
+                    trade_conn,
+                    """
+                    SELECT COUNT(*)
+                    FROM trades
+                    WHERE slug LIKE 'btc-updown-5m-%'
+                      AND entry_time >= ?
+                    """,
+                    (cutoff,),
+                ) or 0)
+
+            last_btc_decision = query_scalar(
+                sig_conn,
+                """
+                SELECT MAX(epoch)
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                """,
+            )
+            last_btc_momentum = query_scalar(
+                sig_conn,
+                """
+                SELECT MAX(epoch)
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                  AND source = 'binance_momentum'
+                """,
+            )
+            last_btc_pass = query_scalar(
+                sig_conn,
+                """
+                SELECT MAX(epoch)
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                  AND source = 'binance_momentum'
+                  AND guard_passed = 1
+                """,
+            )
+            last_trade = query_scalar(
+                trade_conn,
+                """
+                SELECT MAX(entry_time)
+                FROM trades
+                WHERE slug LIKE 'btc-updown-5m-%'
+                """,
+            )
+
+            blocker_rows = sig_conn.execute(
+                """
+                SELECT guard_reasons, COUNT(*) AS n
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                  AND source = 'binance_momentum'
+                  AND epoch >= ?
+                  AND COALESCE(guard_reasons, '') != ''
+                GROUP BY guard_reasons
+                ORDER BY n DESC
+                LIMIT 5
+                """,
+                (windows["6h"],),
+            ).fetchall()
+            blockers = [
+                {"reason": row["guard_reasons"], "count": row["n"]}
+                for row in blocker_rows
+                if row["guard_reasons"]
+            ]
+
+            recent_pass_rows = sig_conn.execute(
+                """
+                SELECT epoch, slug, source, midpoint, time_remaining_secs
+                FROM signals
+                WHERE asset = 'BTC' AND market_window_secs = 300
+                  AND source = 'binance_momentum'
+                  AND guard_passed = 1
+                ORDER BY epoch DESC
+                LIMIT 5
+                """
+            ).fetchall()
+            recent_passes = [dict(row) for row in recent_pass_rows]
+            stage_stops = []
+            if {"pipeline_stage", "pipeline_status"}.issubset(signal_columns):
+                stage_stop_rows = sig_conn.execute(
+                    """
+                    SELECT
+                        COALESCE(pipeline_stage, 'unknown') AS stage,
+                        COALESCE(pipeline_status, 'unknown') AS status,
+                        COUNT(*) AS n
+                    FROM signals
+                    WHERE asset = 'BTC' AND market_window_secs = 300
+                      AND epoch >= ?
+                    GROUP BY COALESCE(pipeline_stage, 'unknown'), COALESCE(pipeline_status, 'unknown')
+                    ORDER BY n DESC
+                    LIMIT 8
+                    """,
+                    (windows["6h"],),
+                ).fetchall()
+                stage_stops = [dict(row) for row in stage_stop_rows]
+            retry_stats = (
+                self._executor.get_entry_retry_stats()
+                if self._executor and hasattr(self._executor, "get_entry_retry_stats")
+                else {}
+            )
+            retry_skip_reasons = [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(
+                    retry_stats.get("retry_skip_reasons", {}).items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:5]
+            ]
+
+            stage = "healthy"
+            headline = "BTC pipeline is flowing"
+            summary = "Recent BTC decisions, passed signals, and trades are present."
+            if counts["decisions_15m"] == 0:
+                stage = "stalled"
+                headline = "No BTC 5m decision in 15 minutes"
+                summary = "Market discovery or signal generation may be stalled."
+            elif counts["momentum_1h"] == 0:
+                stage = "starved"
+                headline = "No BTC momentum candidate in 1 hour"
+                summary = "The entry source is not generating BTC 5m candidates."
+            elif counts["momentum_1h"] > 0 and counts["passed_1h"] == 0:
+                stage = "guard_blocked"
+                headline = "BTC candidates are dying at the guard stage"
+                summary = f"{counts['momentum_1h']} BTC momentum candidates in the last hour, 0 passed."
+            elif counts["passed_6h"] > 0 and counts["trades_6h"] == 0:
+                stage = "execution_gap"
+                headline = "Signals passed but no BTC trade executed in 6 hours"
+                summary = "A handoff or execution path may be missing."
+            elif counts["trades_6h"] == 0:
+                stage = "trade_silent"
+                headline = "No executed BTC trade in 6 hours"
+                summary = "The bot is alive, but the live BTC path has not produced a fill recently."
+            if retry_stats.get("placement_failures", 0) > 0 or retry_stats.get("fill_timeouts", 0) > 0:
+                summary = (
+                    f"{summary} Placement failures={retry_stats.get('placement_failures', 0)}, "
+                    f"fill timeouts={retry_stats.get('fill_timeouts', 0)}, "
+                    f"retry recovered={retry_stats.get('retry_recovered', 0)}."
+                )
+
+            return {
+                "stage": stage,
+                "headline": headline,
+                "summary": summary,
+                "last_btc_decision_ts": last_btc_decision,
+                "last_btc_momentum_ts": last_btc_momentum,
+                "last_btc_pass_ts": last_btc_pass,
+                "last_trade_ts": last_trade,
+                "counts": counts,
+                "blockers": blockers,
+                "recent_passes": recent_passes,
+                "passed_btc_candidates": counts.get("passed_6h", 0),
+                "placement_failures": retry_stats.get("placement_failures", 0),
+                "fill_timeouts": retry_stats.get("fill_timeouts", 0),
+                "retry_recovered": retry_stats.get("retry_recovered", 0),
+                "retry_skip_reasons": retry_skip_reasons,
+                "stage_stops": stage_stops,
+            }
+        finally:
+            sig_conn.close()
+            trade_conn.close()
+
+    def _detect_systemd_unit(self) -> str | None:
+        """Best-effort detection of the running lagbot systemd unit name."""
+        try:
+            with open("/proc/self/cgroup", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if ".service" not in line:
+                        continue
+                    parts = [part for part in line.strip().split("/") if part]
+                    for part in reversed(parts):
+                        if part.endswith(".service") and "lagbot@" in part:
+                            return part
+        except Exception:
+            return None
+        return None
+
+    def _get_recent_error_lines(self, minutes: int = 30, limit: int = 20) -> list[str]:
+        """Return recent error/exception lines from journald for this unit."""
+        unit = self._detect_systemd_unit()
+        if not unit:
+            return []
+        try:
+            result = subprocess.run(
+                [
+                    "journalctl",
+                    "-u",
+                    unit,
+                    "--since",
+                    f"{minutes} minutes ago",
+                    "--no-pager",
+                    "-o",
+                    "short-iso",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                return []
+            lines = []
+            for line in result.stdout.splitlines():
+                if any(token in line for token in ("[ERROR]", "[WARNING]", "[CRITICAL]", "Traceback", "Exception")):
+                    lines.append(line.strip())
+            return lines[-limit:]
+        except Exception:
+            return []
+
+    def _price_bucket(self, price) -> str:
+        """Bucket entry or midpoint prices for dashboard summaries."""
+        if price is None:
+            return "unknown"
+        if price < 0.40:
+            return "0.00-0.39"
+        if price < 0.60:
+            return "0.40-0.59"
+        if price < 0.80:
+            return "0.60-0.79"
+        return "0.80-1.00"
+
+    def _time_bucket(self, secs) -> str:
+        """Bucket time remaining for dashboard summaries."""
+        if secs is None:
+            return "unknown"
+        if secs < 60:
+            return "<60s"
+        if secs < 120:
+            return "60-119s"
+        if secs < 180:
+            return "120-179s"
+        return "180s+"
+
     async def _handle_index(self, request: web.Request) -> web.Response:
         return web.Response(text=DASHBOARD_HTML, content_type="text/html")
 
@@ -274,7 +903,7 @@ header h1{font-size:16px;font-weight:600;color:var(--bright)}
 .row .lbl{color:var(--dim);font-size:12px}
 .row .val{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--bright)}
 .green{color:var(--green) !important}.red{color:var(--red) !important}
-.blue{color:var(--blue) !important}.amber{color:var(--amber) !important}.purple{color:var(--purple) !important}
+.blue{color:var(--blue) !important}.amber{color:var(--amber) !important}.purple{color:var(--purple) !important}.dim{color:var(--dim) !important}
 
 /* State pill */
 .state-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;font-family:var(--mono)}
@@ -300,6 +929,14 @@ tr:hover td{background:var(--hover)}
 .tag.hedged{background:#3fb95018;color:var(--green)}
 .tag.orphan{background:#f8514918;color:var(--red)}
 .tag.unwound{background:#d2992218;color:var(--amber)}
+.tag.allow,.tag.executed,.tag.closed{background:#3fb95018;color:var(--green)}
+.tag.shadow,.tag.open{background:#58a6ff20;color:var(--blue)}
+.tag.block,.tag.filtered{background:#f8514918;color:var(--red)}
+.tag.unknown{background:#484f5820;color:var(--dim)}
+.tag.active{background:#d2992218;color:var(--amber)}
+.kv{display:grid;gap:6px}
+.kv div{display:flex;justify-content:space-between;gap:12px}
+.kv .label{color:var(--dim);font-size:12px}
 .empty{text-align:center;padding:20px;color:var(--dim);font-size:12px}
 
 /* Momentum */
@@ -400,7 +1037,47 @@ footer{text-align:center;padding:16px 0;color:var(--dim);font-size:10px;margin-t
   </div>
 </div>
 
-<footer>Lagbot &mdash; Polymarket Accumulator</footer>
+<!-- Row 5: Evidence + Trades -->
+<div class="grid g2">
+  <div class="card">
+    <div class="card-title">BTC Pipeline Watchdog</div>
+    <div id="pipeline-container"><p class="empty">Loading...</p></div>
+  </div>
+  <div class="card">
+    <div class="card-title">BTC 5m Evidence</div>
+    <div id="evidence-container"><p class="empty">Loading...</p></div>
+  </div>
+</div>
+
+<!-- Row 6: Trades + Filters -->
+<div class="grid g2">
+  <div class="card">
+    <div class="card-title">Recent Trades</div>
+    <div id="recent-trades-container"><p class="empty">Loading...</p></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Why Signals Were Rejected</div>
+    <div id="filters-container"><p class="empty">Loading...</p></div>
+  </div>
+</div>
+
+<!-- Row 7: Recent Error Stream -->
+<div class="grid g1">
+  <div class="card">
+    <div class="card-title">Recent Error Stream</div>
+    <div id="errors-container"><p class="empty">Loading...</p></div>
+  </div>
+</div>
+
+<!-- Row 8: Recent Signals -->
+<div class="grid g1">
+  <div class="card">
+    <div class="card-title">Recent Signal Decisions</div>
+    <div id="recent-signals-container"><p class="empty">Loading...</p></div>
+  </div>
+</div>
+
+<footer>Lagbot Live Observability</footer>
 </div>
 
 <script>
@@ -425,6 +1102,29 @@ function fmtTimestamp(ts) {
   if (!ts) return '--';
   const d = new Date(ts * 1000);
   return d.toLocaleString('en-US',{timeZone:'UTC',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
+}
+function fmtAgo(ts) {
+  if(!ts) return 'never';
+  const secs = Math.max(0, Math.floor(Date.now()/1000 - ts));
+  if(secs < 60) return secs+'s ago';
+  if(secs < 3600) return (secs/60).toFixed(1)+'m ago';
+  return (secs/3600).toFixed(1)+'h ago';
+}
+function tagCls(value) {
+  const v = (value || 'unknown').toLowerCase();
+  if(v.includes('filtered')) return 'block';
+  if(['allow','executed','closed'].includes(v)) return 'allow';
+  if(['shadow','open'].includes(v)) return 'shadow';
+  if(['block','filtered'].includes(v)) return 'block';
+  if(['active'].includes(v)) return 'active';
+  if(['healthy'].includes(v)) return 'allow';
+  if(['guard_blocked','stalled','starved','execution_gap','trade_silent'].includes(v)) return 'block';
+  return 'unknown';
+}
+function clipReason(text, maxLen=72) {
+  if(!text) return '--';
+  const base = text.split('|')[0].trim();
+  return base.length > maxLen ? base.slice(0, maxLen-1) + '…' : base;
 }
 
 function toggleTheme(){
@@ -470,13 +1170,19 @@ function updateChartColors(){
 
 async function fetchAll(){
   try{
-    const [status,balance,momentum,accum,gabagool,tuning] = await Promise.all([
+    const [status,balance,momentum,accum,gabagool,tuning,signals,evidence,trades,filters,errors,pipeline] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/balance').then(r=>r.json()),
       fetch('/api/momentum').then(r=>r.json()),
       fetch('/api/accumulator').then(r=>r.json()),
       fetch('/api/gabagool').then(r=>r.json()).catch(()=>({enabled:false})),
       fetch('/api/accumulator/tuning').then(r=>r.json()).catch(()=>({enabled:false})),
+      fetch('/api/signals').then(r=>r.json()).catch(()=>({enabled:false,signals:[]})),
+      fetch('/api/evidence').then(r=>r.json()).catch(()=>({enabled:false,verdict_counts:{},reason_counts:[],recent:[]})),
+      fetch('/api/trades').then(r=>r.json()).catch(()=>({enabled:false,trades:[]})),
+      fetch('/api/filters').then(r=>r.json()).catch(()=>({enabled:false,filtered_signals:0,reason_counts:[],price_buckets:[],time_buckets:[],recent:[]})),
+      fetch('/api/errors').then(r=>r.json()).catch(()=>({enabled:false,unit:'unknown',errors:[]})),
+      fetch('/api/pipeline').then(r=>r.json()).catch(()=>({enabled:false,stage:'unknown',headline:'Pipeline unavailable',summary:'No pipeline data'})),
     ]);
 
     // Status
@@ -675,6 +1381,197 @@ async function fetchAll(){
       tCont.innerHTML = oh;
     } else if(tCont) {
       tCont.innerHTML = '<p class="empty">Tuner disabled</p>';
+    }
+
+    // Pipeline watchdog
+    const pCont = $('pipeline-container');
+    if(pCont){
+      const counts = pipeline.counts || {};
+      const blockers = pipeline.blockers || [];
+      const passes = pipeline.recent_passes || [];
+      const retrySkips = pipeline.retry_skip_reasons || [];
+      const stageStops = pipeline.stage_stops || [];
+      let ph = '<div class="kv">'
+        +'<div><span class="label">Stage</span><span><span class="tag '+tagCls(pipeline.stage)+'">'+(pipeline.stage||'unknown')+'</span></span></div>'
+        +'<div><span class="label">Headline</span><span>'+(pipeline.headline || '--')+'</span></div>'
+        +'<div><span class="label">Summary</span><span>'+(pipeline.summary || '--')+'</span></div>'
+        +'<div><span class="label">Last BTC decision</span><span>'+fmtAgo(pipeline.last_btc_decision_ts)+'</span></div>'
+        +'<div><span class="label">Last BTC momentum signal</span><span>'+fmtAgo(pipeline.last_btc_momentum_ts)+'</span></div>'
+        +'<div><span class="label">Last BTC guard pass</span><span>'+fmtAgo(pipeline.last_btc_pass_ts)+'</span></div>'
+        +'<div><span class="label">Last BTC trade</span><span>'+fmtAgo(pipeline.last_trade_ts)+'</span></div>'
+        +'<div><span class="label">Passed BTC candidates</span><span>'+(pipeline.passed_btc_candidates||0)+'</span></div>'
+        +'<div><span class="label">Placement failures</span><span>'+(pipeline.placement_failures||0)+'</span></div>'
+        +'<div><span class="label">Fill timeouts</span><span>'+(pipeline.fill_timeouts||0)+'</span></div>'
+        +'<div><span class="label">Retry recovered</span><span>'+(pipeline.retry_recovered||0)+'</span></div>'
+        +'<div><span class="label">Decisions 15m / 1h</span><span>'+(counts.decisions_15m||0)+' / '+(counts.decisions_1h||0)+'</span></div>'
+        +'<div><span class="label">Momentum 1h</span><span>'+(counts.momentum_1h||0)+'</span></div>'
+        +'<div><span class="label">Passed 1h / 6h</span><span>'+(counts.passed_1h||0)+' / '+(counts.passed_6h||0)+'</span></div>'
+        +'<div><span class="label">Trades 1h / 6h</span><span>'+(counts.trades_1h||0)+' / '+(counts.trades_6h||0)+'</span></div>'
+        +'</div>';
+      if(blockers.length){
+        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Top BTC Guard Blockers (6h)</div>';
+        for(const row of blockers){
+          ph += '<div class="row"><span class="lbl">'+clipReason(row.reason, 46)+'</span><span class="val">'+row.count+'</span></div>';
+        }
+        ph += '</div>';
+      }
+      if(passes.length){
+        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Recent Passed BTC Signals</div><table><tr><th>Time</th><th>Price</th><th>Left</th></tr>';
+        for(const row of passes){
+          ph += '<tr><td>'+slugTime(row.slug||'')+'</td><td>'+(row.midpoint!=null?'$'+fmt(row.midpoint,3):'--')+'</td><td>'+(row.time_remaining_secs!=null?row.time_remaining_secs+'s':'--')+'</td></tr>';
+        }
+        ph += '</table></div>';
+      }
+      if(retrySkips.length){
+        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Retry Skip Reasons</div>';
+        for(const row of retrySkips){
+          ph += '<div class="row"><span class="lbl">'+clipReason(row.reason, 46)+'</span><span class="val">'+row.count+'</span></div>';
+        }
+        ph += '</div>';
+      }
+      if(stageStops.length){
+        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Pipeline Stage Mix (6h)</div>';
+        for(const row of stageStops){
+          ph += '<div class="row"><span class="lbl">'+clipReason((row.stage||'unknown')+' / '+(row.status||'unknown'), 46)+'</span><span class="val">'+row.n+'</span></div>';
+        }
+        ph += '</div>';
+      }
+      pCont.innerHTML = ph;
+    }
+
+    // Evidence summary
+    const eCont = $('evidence-container');
+    if(eCont){
+      const verdicts = evidence.verdict_counts || {};
+      const recentVerdicts = evidence.recent || [];
+      const reasons = evidence.reason_counts || [];
+      const counts = Object.keys(verdicts).length
+        ? Object.entries(verdicts).map(([k,v]) => '<span class="tag '+tagCls(k)+'">'+k+': '+v+'</span>').join(' ')
+        : '<span class="dim">no verdicts yet</span>';
+      let eh = '<div class="kv">'
+        +'<div><span class="label">Mode</span><span>'+(evidence.enabled ? 'shadow' : 'disabled')+'</span></div>'
+        +'<div><span class="label">Signals (24h)</span><span>'+ (evidence.signals_scanned || 0) +'</span></div>'
+        +'<div><span class="label">Verdicts</span><span>'+counts+'</span></div>'
+        +'</div>';
+      if(reasons.length){
+        eh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Top Reasons</div>';
+        for(const item of reasons){
+          eh += '<div class="row"><span class="lbl">'+clipReason(item.reason, 44)+'</span><span class="val">'+item.count+'</span></div>';
+        }
+        eh += '</div>';
+      }
+      if(recentVerdicts.length){
+        eh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Recent Verdicts</div>'
+          +'<table><tr><th>Time</th><th>Verdict</th><th>R8</th><th>Reason</th></tr>';
+        for(const row of recentVerdicts){
+          eh += '<tr><td>'+slugTime(row.slug)+'</td>'
+            +'<td><span class="tag '+tagCls(row.evidence_verdict)+'">'+(row.evidence_verdict||'--')+'</span></td>'
+            +'<td>'+(row.evidence_r8_label||'--')+'</td>'
+            +'<td>'+clipReason(row.evidence_reason, 52)+'</td></tr>';
+        }
+        eh += '</table></div>';
+      }
+      eCont.innerHTML = eh;
+    }
+
+    // Recent trades
+    const trCont = $('recent-trades-container');
+    if(trCont){
+      const rows = trades.trades || [];
+      if(!rows.length){
+        trCont.innerHTML = '<p class="empty">No recent trades</p>';
+      } else {
+        let h = '<table><tr><th>Entry</th><th>Market</th><th>Source</th><th>Status</th><th>P&amp;L</th></tr>';
+        for(const row of rows.slice(0, 12)){
+          const status = row.open ? 'open' : 'closed';
+          const reason = row.open ? 'open' : (row.exit_reason || 'closed');
+          h += '<tr><td>'+fmtTimestamp(row.entry_time)+'</td>'
+            +'<td>'+slugTime(row.slug||'')+'</td>'
+            +'<td>'+(row.source || '--')+'</td>'
+            +'<td><span class="tag '+tagCls(status)+'">'+reason+'</span></td>'
+            +'<td class="'+((row.pnl||0)>=0?'green':'red')+'">'+(row.pnl != null ? pnlSign(row.pnl) : '--')+'</td></tr>';
+        }
+        h += '</table>';
+        trCont.innerHTML = h;
+      }
+    }
+
+    // Filter reasons / rejection panel
+    const fCont = $('filters-container');
+    if(fCont){
+      const reasons = filters.reason_counts || [];
+      const priceBuckets = filters.price_buckets || [];
+      const timeBuckets = filters.time_buckets || [];
+      const recentFiltered = filters.recent || [];
+      let fh = '<div class="kv">'
+        +'<div><span class="label">Filtered signals (24h)</span><span>'+(filters.filtered_signals || 0)+'</span></div>'
+        +'<div><span class="label">Top price buckets</span><span>'+(priceBuckets.length ? priceBuckets.map(b=>b.bucket+': '+b.count).join(', ') : '--')+'</span></div>'
+        +'<div><span class="label">Top time buckets</span><span>'+(timeBuckets.length ? timeBuckets.map(b=>b.bucket+': '+b.count).join(', ') : '--')+'</span></div>'
+        +'</div>';
+      if(reasons.length){
+        fh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Top Rejection Reasons</div>';
+        for(const item of reasons){
+          fh += '<div class="row"><span class="lbl">'+item.reason+'</span><span class="val">'+item.count+'</span></div>';
+        }
+        fh += '</div>';
+      }
+      if(recentFiltered.length){
+        fh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Recent Filtered Signals</div>'
+          +'<table><tr><th>Time</th><th>Source</th><th>Outcome</th><th>Bucket</th><th>Reason</th></tr>';
+        for(const row of recentFiltered.slice(0,8)){
+          fh += '<tr><td>'+slugTime(row.slug||'')+'</td>'
+            +'<td>'+(row.source || '--')+'</td>'
+            +'<td><span class="tag '+tagCls(row.outcome || 'filtered')+'">'+(row.outcome || 'filtered')+'</span></td>'
+            +'<td>'+row.price_bucket+' / '+row.time_bucket+'</td>'
+            +'<td>'+clipReason(row.guard_reasons, 46)+'</td></tr>';
+        }
+        fh += '</table></div>';
+      }
+      fCont.innerHTML = fh;
+    }
+
+    // Recent error stream
+    const erCont = $('errors-container');
+    if(erCont){
+      const rows = errors.errors || [];
+      if(!rows.length){
+        erCont.innerHTML = '<div class="kv"><div><span class="label">Unit</span><span>'+(errors.unit || '--')+'</span></div></div><p class="empty">No recent error lines</p>';
+      } else {
+        let eh = '<div class="kv"><div><span class="label">Unit</span><span>'+(errors.unit || '--')+'</span></div></div>'
+          +'<div style="margin-top:10px"><table><tr><th>Recent Error Lines</th></tr>';
+        for(const line of rows.slice().reverse()){
+          eh += '<tr><td style="white-space:normal;word-break:break-word;font-family:var(--mono)">'+line.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')+'</td></tr>';
+        }
+        eh += '</table></div>';
+        erCont.innerHTML = eh;
+      }
+    }
+
+    // Recent signals
+    const sigCont = $('recent-signals-container');
+    if(sigCont){
+      const rows = signals.signals || [];
+      if(!rows.length){
+        sigCont.innerHTML = '<p class="empty">No signal history available</p>';
+      } else {
+        let h = '<table><tr><th>Time</th><th>Asset</th><th>Source</th><th>Outcome</th><th>Price</th><th>Left</th><th>Evidence</th><th>Reason</th></tr>';
+        for(const row of rows.slice(0, 14)){
+          const price = row.entry_price != null ? row.entry_price : row.midpoint;
+          const outcomeTag = row.outcome || 'unknown';
+          const evidenceTag = row.evidence_verdict || '--';
+          const reason = row.evidence_reason || row.guard_reasons || '--';
+          h += '<tr><td>'+slugTime(row.slug||'')+'</td>'
+            +'<td>'+(row.asset || '--')+'</td>'
+            +'<td>'+(row.source || '--')+'</td>'
+            +'<td><span class="tag '+tagCls(outcomeTag)+'">'+outcomeTag+'</span></td>'
+            +'<td>'+(price != null ? '$'+fmt(price,3) : '--')+'</td>'
+            +'<td>'+(row.time_remaining_secs != null ? row.time_remaining_secs+'s' : '--')+'</td>'
+            +'<td>'+(row.evidence_verdict ? '<span class="tag '+tagCls(evidenceTag)+'">'+evidenceTag+'</span>' : '--')+'</td>'
+            +'<td>'+clipReason(reason, 54)+'</td></tr>';
+        }
+        h += '</table>';
+        sigCont.innerHTML = h;
+      }
     }
 
     lastUpdate = Date.now();
