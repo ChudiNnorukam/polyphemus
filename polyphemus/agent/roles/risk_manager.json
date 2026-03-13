@@ -22,5 +22,12 @@
     "negative_live_pnl",
     "trade_cap"
   ],
-  "required_citations": 2
+  "required_citations": 2,
+  "activation_required": true,
+  "handoff_required": true,
+  "role_switch_triggers": [
+    "no_go_gate",
+    "audit_unknown",
+    "live_safety_question"
+  ]
 }

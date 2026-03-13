@@ -1,0 +1,24 @@
+{
+  "actionable_lessons": [
+    "Use service_hardening_status as current-state evidence before making any live recommendation."
+  ],
+  "anti_patterns": [
+    "Do not treat runtime snapshots as permanent truth; they must be refreshed."
+  ],
+  "body": "{\n  \"checks\": [\n    {\n      \"actual\": \"true\",\n      \"directive\": \"NoNewPrivileges\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"PrivateTmp\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"PrivateDevices\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"ProtectControlGroups\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"ProtectKernelModules\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"ProtectKernelTunables\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"ProtectHostname\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"ProtectClock\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"ProtectHome\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"RestrictSUIDSGID\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"LockPersonality\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"MemoryDenyWriteExecute\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"true\",\n      \"directive\": \"RestrictRealtime\",\n      \"expected\": \"true\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"native\",\n      \"directive\": \"SystemCallArchitectures\",\n      \"expected\": \"native\",\n      \"present\": true\n    },\n    {\n      \"actual\": \"0077\",\n      \"directive\": \"UMask\",\n      \"expected\": \"0077\",\n      \"present\": true\n    }\n  ],\n  \"generated_at\": \"2026-03-13T05:03:18.090543+00:00\",\n  \"missing_controls\": [],\n  \"service_name\": \"polyphemus.service\",\n  \"service_path\": \"/Users/chudinnorukam/Projects/business/polyphemus/polyphemus.service\",\n  \"verdict\": \"pass\"\n}",
+  "citation": "service_hardening_status",
+  "id": "runtime-service_hardening_status",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_runtime",
+  "source_path": "kb/internal/runtime/service_hardening_status.json",
+  "source_url": "",
+  "summary": "{\"checks\": [{\"actual\": \"true\", \"directive\": \"NoNewPrivileges\", \"expected\": \"true\", \"present\": true}, {\"actual\": \"true\", \"directive\": \"PrivateTmp\", \"expected\": \"true\", \"present\": true}, {\"actual\": \"true\", \"directive\": \"PrivateDevices\", \"expected\": \"true\", \"present\": true}, {\"actual\": \"true\", \"directive\": \"ProtectControlGroups\", \"expected\": \"true\", \"present\": true}, {\"actual\": \"true\", \"directive\": \"ProtectKernelModules\", \"expected\": \"true\", \"present\": true}, {\"actual\": \"true\", \"directive\": \"Protec",
+  "title": "Service Hardening Status",
+  "topics": [
+    "runtime",
+    "current-state"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T05:10:03.867708+00:00"
+}

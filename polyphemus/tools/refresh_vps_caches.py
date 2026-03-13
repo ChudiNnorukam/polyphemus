@@ -25,12 +25,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def scp_artifact(remote: str, local: Path) -> dict:
-    local.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["scp", "-q", remote, str(local)],
-        capture_output=True,
-        text=True,
-    )
+    result = backtester.scp_fetch(remote, local)
     ok = result.returncode == 0 and local.exists() and local.stat().st_size > 0
     return {
         "remote": remote,

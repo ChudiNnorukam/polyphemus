@@ -22,5 +22,13 @@
     "retry_skip_reasons",
     "polymarket_error_codes"
   ],
-  "required_citations": 2
+  "required_citations": 2,
+  "activation_required": true,
+  "handoff_required": true,
+  "role_switch_triggers": [
+    "audit_mismatch",
+    "placement_failures",
+    "fill_timeouts",
+    "pipeline_stall_windows"
+  ]
 }

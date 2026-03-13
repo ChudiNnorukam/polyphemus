@@ -4,24 +4,62 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 try:
+    from . import backtester
+    from . import dependency_audit_status
     from . import strategy_shadow_scan as shadow_scan
+    from . import emmanuel_audit_mismatch_check as audit_check
+    from . import security_best_practices_report
+    from . import service_hardening_status
 except ImportError:  # pragma: no cover - direct script execution
+    import backtester
+    import dependency_audit_status
     import strategy_shadow_scan as shadow_scan
+    import emmanuel_audit_mismatch_check as audit_check
+    import security_best_practices_report
+    import service_hardening_status
 
 
 ROOT = Path(__file__).resolve().parent
 CACHE_DIR = ROOT / ".backtest_cache"
 PROJECT_ROOT = ROOT.parent
 DEFAULT_CONFIG_LABEL = "btc5m_shadow_lab_v3"
+RESEARCH_ALIGNMENT_KEYS = [
+    "CONFIG_LABEL",
+    "ASSET_FILTER",
+    "SHADOW_ASSETS",
+    "MARKET_WINDOW_SECS",
+    "MIN_ENTRY_PRICE",
+    "MAX_ENTRY_PRICE",
+    "MOMENTUM_TRIGGER_PCT",
+    "MOMENTUM_WINDOW_SECS",
+    "MOMENTUM_MAX_EPOCH_ELAPSED_SECS",
+    "WHIPSAW_MAX_RATIO",
+    "ENTRY_MODE",
+    "SIGNAL_MODE",
+    "ENABLE_WINDOW_DELTA",
+    "WINDOW_DELTA_SHADOW",
+    "WINDOW_DELTA_MAX_PRICE",
+    "WINDOW_DELTA_LEAD_SECS",
+    "ENABLE_RESOLUTION_SNIPE",
+    "SNIPE_DRY_RUN",
+    "ENABLE_BTC5M_EVIDENCE_VERDICTS",
+    "BTC5M_EVIDENCE_MODE",
+    "ENABLE_BTC5M_ENSEMBLE_SHADOW",
+    "BTC5M_ENSEMBLE_MODE",
+    "BTC5M_ENSEMBLE_ADMISSION_ENABLED",
+    "BTC5M_ENSEMBLE_ADMISSION_MODE",
+]
 
 
 @dataclass
@@ -108,6 +146,12 @@ def choose_planned_trade_cap(env_values: Dict[str, str]) -> float:
     return min(caps)
 
 
+def compute_research_alignment_fingerprint(env_values: Dict[str, str]) -> str:
+    payload = {key.lower(): env_values.get(key, "") for key in RESEARCH_ALIGNMENT_KEYS}
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
 def get_db_path(instance: str) -> Path:
     return CACHE_DIR / instance / "signals.db"
 
@@ -190,6 +234,82 @@ def get_common_config_era(instances: Iterable[str], config_label: str) -> str:
     if not common:
         return ""
     return max(common, key=lambda era: min(eras.get(era, 0) for eras in era_sets))
+
+
+def get_instance_latest_config_era(instance: str, config_label: str) -> str:
+    db_path = get_db_path(instance)
+    if not db_path.exists():
+        return ""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        coverage_columns = {row[1] for row in conn.execute("PRAGMA table_info(epoch_coverage)").fetchall()}
+        if "config_era" in coverage_columns:
+            config_label_expr = "COALESCE(config_label, '')" if "config_label" in coverage_columns else "''"
+            row = conn.execute(
+                f"""
+                SELECT COALESCE(config_era, '')
+                FROM epoch_coverage
+                WHERE asset = 'BTC' AND window_secs = 300
+                  AND {config_label_expr} = ?
+                  AND COALESCE(config_era, '') != ''
+                ORDER BY epoch DESC
+                LIMIT 1
+                """,
+                (config_label,),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+        signal_columns = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+        if "config_era" not in signal_columns:
+            return ""
+        config_label_expr = "COALESCE(config_label, '')" if "config_label" in signal_columns else "''"
+        row = conn.execute(
+            f"""
+            SELECT COALESCE(config_era, '')
+            FROM signals
+            WHERE asset = 'BTC' AND market_window_secs = 300
+              AND {config_label_expr} = ?
+              AND COALESCE(config_era, '') != ''
+            ORDER BY epoch DESC
+            LIMIT 1
+            """,
+            (config_label,),
+        ).fetchone()
+        return str(row[0]) if row and row[0] else ""
+    finally:
+        conn.close()
+
+
+def get_research_alignment_context(instances: Iterable[str], config_label: str) -> dict:
+    env_fingerprints: Dict[str, str] = {}
+    instance_eras: Dict[str, str] = {}
+    for instance in instances:
+        env_values = read_env_file(CACHE_DIR / instance / ".env")
+        if not env_values:
+            return {
+                "shared_research_era": "",
+                "instance_config_eras": {},
+                "reason": f"missing cached .env for {instance}",
+            }
+        env_fingerprints[instance] = compute_research_alignment_fingerprint(env_values)
+        instance_eras[instance] = get_instance_latest_config_era(instance, config_label)
+    if len(set(env_fingerprints.values())) != 1:
+        return {
+            "shared_research_era": "",
+            "instance_config_eras": instance_eras,
+            "reason": "research-relevant .env settings differ across instances",
+        }
+    if any(not era for era in instance_eras.values()):
+        return {
+            "shared_research_era": "",
+            "instance_config_eras": instance_eras,
+            "reason": "one or more instances have no logged config_era for the requested config_label",
+        }
+    return {
+        "shared_research_era": next(iter(env_fingerprints.values())),
+        "instance_config_eras": instance_eras,
+        "reason": "",
+    }
 
 
 def expected_epoch_count(start_epoch: int, end_epoch: int) -> int:
@@ -347,7 +467,57 @@ def get_dashboard_field_support() -> bool:
     return all(field in text for field in required)
 
 
+def detect_journal_clean() -> tuple[str, str]:
+    cmd = [
+        "ssh",
+        *backtester.ssh_transport_args(),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "root@82.24.19.114",
+        "journalctl -u lagbot@emmanuel --since '6 hours ago' --no-pager | grep -E '\\[ERROR\\]|\\[CRITICAL\\]|Traceback|Exception' | tail -n 20",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return "unknown", result.stderr.strip() or "ssh/journal access failed"
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if lines:
+        return "no", lines[-1]
+    return "yes", "no recent error or traceback lines in last 6h"
+
+
+def detect_config_drift_clean(config_label: str, instance_eras: Dict[str, str]) -> tuple[str, str]:
+    env_values = read_env_file(CACHE_DIR / "emmanuel" / ".env")
+    if not env_values:
+        return "unknown", "missing cached emmanuel .env"
+    if env_values.get("CONFIG_LABEL", "") not in {"", config_label}:
+        return "no", f"cached emmanuel CONFIG_LABEL={env_values.get('CONFIG_LABEL')} != {config_label}"
+    if not instance_eras.get("emmanuel"):
+        return "no", "emmanuel has no logged config_era for the requested config label"
+    required_keys = [
+        "ASSET_FILTER",
+        "MARKET_WINDOW_SECS",
+        "SIGNAL_MODE",
+        "MAX_ENTRY_PRICE",
+        "MOMENTUM_MAX_EPOCH_ELAPSED_SECS",
+    ]
+    missing = [key for key in required_keys if key not in env_values]
+    if missing:
+        return "no", f"cached emmanuel .env missing keys: {', '.join(missing)}"
+    return "yes", "cached emmanuel .env matches the requested config label and required strategy keys"
+
+
 def detect_emmanuel_audit_clean(progress_path: Path) -> tuple[bool, str]:
+    try:
+        status = audit_check.main_for_status()
+    except Exception:
+        status = None
+    if status:
+        if status.get("state") == "pass":
+            return True, "live_audit_pass"
+        if status.get("state") == "fail":
+            return False, "live_audit_fail"
     if not progress_path.exists():
         return False, "progress_file_missing"
     text = progress_path.read_text(encoding="utf-8")
@@ -461,8 +631,10 @@ def evaluate_gates(
     audit_reason: str,
     journal_clean: str,
     config_drift_clean: str,
-    open_crit_count: int,
     dashboard_fields_supported: bool,
+    security_status: dict,
+    dependency_status: dict,
+    service_status: dict,
 ) -> List[str]:
     blockers: List[str] = []
     coverage_rates = [item.epoch_coverage_rate for item in instances]
@@ -524,10 +696,14 @@ def evaluate_gates(
         blockers.append(f"journal check: {journal_clean}")
     if config_drift_clean != "yes":
         blockers.append(f"config drift check: {config_drift_clean}")
-    if open_crit_count != 0:
-        blockers.append(f"open CRIT count: {open_crit_count}")
     if not dashboard_fields_supported:
         blockers.append("dashboard missing required pipeline fields")
+    if security_status.get("verdict") != "pass":
+        blockers.append("security audit has unresolved critical/high findings")
+    if dependency_status.get("verdict") != "pass":
+        blockers.append("dependency audit has unresolved blocking findings")
+    if service_status.get("verdict") != "pass":
+        blockers.append("service hardening baseline is incomplete")
     return blockers
 
 
@@ -547,8 +723,10 @@ def build_report(
     audit_reason: str,
     journal_clean: str,
     config_drift_clean: str,
-    open_crit_count: int,
     dashboard_fields_supported: bool,
+    security_status: dict,
+    dependency_status: dict,
+    service_status: dict,
 ) -> str:
     coverage_rates = [item.epoch_coverage_rate for item in instances]
     drift = (max(coverage_rates) - min(coverage_rates)) if coverage_rates else 0.0
@@ -558,7 +736,7 @@ def build_report(
         "",
         f"- Generated: `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}`",
         f"- Config label: `{config_label}`",
-        f"- Config era: `{config_era or 'unknown'}`",
+        f"- Research-aligned era: `{config_era or 'unknown'}`",
         f"- Overlap window: `{iso_ts(overlap_start)}` -> `{iso_ts(overlap_end)}`",
         f"- Planned live spend assumption: `{format_money(trade_cap)}` per trade (derived from cached hard caps)",
         f"- MAX_DAILY_LOSS assumption: `{format_money(max_daily_loss)}`",
@@ -615,9 +793,14 @@ def build_report(
         f"- Emmanuel audit clean: `{audit_clean}` ({audit_reason})",
         f"- Journal clean verified: `{journal_clean}`",
         f"- Config drift verified: `{config_drift_clean}`",
-        f"- Open CRIT count: `{open_crit_count}`",
         f"- Dashboard pipeline fields present in code: `{dashboard_fields_supported}`",
         f"- Retry-shadow skip reasons: `not persisted by config_era yet; use live dashboard for current process counters`",
+        "",
+        "## Security Readiness",
+        "",
+        f"- Security audit verdict: `{security_status.get('verdict', 'unknown')}`",
+        f"- Dependency audit verdict: `{dependency_status.get('verdict', 'unknown')}`",
+        f"- Service hardening verdict: `{service_status.get('verdict', 'unknown')}`",
         "",
         "## Decision",
         "",
@@ -648,7 +831,7 @@ def build_no_data_report(config_label: str, reason: str) -> str:
             "",
             "## Interpretation",
             "",
-            "- The cached local data does not yet contain a shared post-fix aligned `config_era` for both instances.",
+            "- The cached local data does not yet contain a research-aligned post-fix window for both instances.",
             "- That means the gate cannot legally evaluate the promotion window yet.",
             "- Next action: refresh the local caches from both instances after the aligned post-fix shadow window has accumulated enough data.",
         ]
@@ -667,7 +850,8 @@ def build_no_data_status(config_label: str, reason: str) -> dict:
             "sensor_integrity": {"status": "blocked", "reason": reason},
             "strategy_performance": {"status": "blocked", "reason": "no aligned data"},
             "execution_readiness": {"status": "blocked", "reason": "no aligned data"},
-            "operational": {"status": "blocked", "reason": "no aligned data"},
+            "operational_readiness": {"status": "blocked", "reason": "no aligned data"},
+            "security_readiness": {"status": "blocked", "reason": "no aligned data"},
         },
     }
 
@@ -688,8 +872,10 @@ def build_gate_status(
     audit_reason: str,
     journal_clean: str,
     config_drift_clean: str,
-    open_crit_count: int,
     dashboard_fields_supported: bool,
+    security_status: dict,
+    dependency_status: dict,
+    service_status: dict,
 ) -> dict:
     emmanuel = next((item for item in instances if item.instance == "emmanuel"), None)
     sensor_ok = all(
@@ -728,8 +914,12 @@ def build_gate_status(
         audit_clean
         and journal_clean == "yes"
         and config_drift_clean == "yes"
-        and open_crit_count == 0
         and dashboard_fields_supported
+    )
+    security_ok = (
+        security_status.get("verdict") == "pass"
+        and dependency_status.get("verdict") == "pass"
+        and service_status.get("verdict") == "pass"
     )
     return {
         "verdict": "GO" if not blockers else "NO-GO",
@@ -784,22 +974,41 @@ def build_gate_status(
             "sensor_integrity": {"status": "pass" if sensor_ok else "fail"},
             "strategy_performance": {"status": "pass" if strategy_ok else "fail"},
             "execution_readiness": {"status": "pass" if execution_ok else "fail"},
-            "operational": {
+            "operational_readiness": {
                 "status": "pass" if operational_ok else "fail",
                 "audit_clean": audit_clean,
                 "audit_reason": audit_reason,
                 "journal_clean": journal_clean,
                 "config_drift_clean": config_drift_clean,
-                "open_crit_count": open_crit_count,
                 "dashboard_fields_supported": dashboard_fields_supported,
             },
+            "security_readiness": {
+                "status": "pass" if security_ok else "fail",
+                "security_audit_verdict": security_status.get("verdict", "unknown"),
+                "dependency_audit_verdict": dependency_status.get("verdict", "unknown"),
+                "service_hardening_verdict": service_status.get("verdict", "unknown"),
+                "critical_blockers": security_status.get("critical_blockers", []),
+                "dependency_blockers": dependency_status.get("blocking_findings", []),
+                "service_missing_controls": service_status.get("missing_controls", []),
+            },
         },
+        "security_audit_status": security_status,
+        "dependency_audit_status": dependency_status,
+        "service_hardening_status": service_status,
     }
 
 
 def main() -> int:
     args = parse_args()
-    config_era = args.config_era or get_common_config_era(args.instances, args.config_label)
+    if args.config_era:
+        config_era = args.config_era
+        instance_eras = {instance: args.config_era for instance in args.instances}
+        no_data_reason = ""
+    else:
+        alignment = get_research_alignment_context(args.instances, args.config_label)
+        config_era = alignment["shared_research_era"]
+        instance_eras = alignment["instance_config_eras"]
+        no_data_reason = alignment["reason"] or "no aligned research era found for the requested instances/config_label"
     output_path = args.output
     if output_path is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -811,10 +1020,10 @@ def main() -> int:
     if not config_era:
         status = build_no_data_status(
             args.config_label,
-            "no common config_era found for the requested instances/config_label",
+            no_data_reason,
         )
         output_path.write_text(
-            build_no_data_report(args.config_label, "no common config_era found for the requested instances/config_label"),
+            build_no_data_report(args.config_label, no_data_reason),
             encoding="utf-8",
         )
         json_out.write_text(json.dumps(status, indent=2, sort_keys=True), encoding="utf-8")
@@ -823,14 +1032,17 @@ def main() -> int:
         print(output_path)
         return 0
 
-    epoch_sets = {instance: get_epochs(instance, args.config_label, config_era) for instance in args.instances}
+    epoch_sets = {
+        instance: get_epochs(instance, args.config_label, instance_eras[instance])
+        for instance in args.instances
+    }
     if any(not epochs for epochs in epoch_sets.values()):
         status = build_no_data_status(
             args.config_label,
-            "one or more instances have no BTC epoch_coverage rows for the selected config_era",
+            "one or more instances have no BTC epoch_coverage rows for the selected research-aligned era",
         )
         output_path.write_text(
-            build_no_data_report(args.config_label, "one or more instances have no BTC epoch_coverage rows for the selected config_era"),
+            build_no_data_report(args.config_label, "one or more instances have no BTC epoch_coverage rows for the selected research-aligned era"),
             encoding="utf-8",
         )
         json_out.write_text(json.dumps(status, indent=2, sort_keys=True), encoding="utf-8")
@@ -857,14 +1069,14 @@ def main() -> int:
 
     all_candidates: List[shadow_scan.Candidate] = []
     for instance in args.instances:
-        all_candidates.extend(shadow_scan.load_candidates(instance))
-    candidates = [
-        candidate
-        for candidate in all_candidates
-        if candidate.config_label == args.config_label
-        and candidate.config_era == config_era
-        and overlap_start <= candidate.epoch <= overlap_end
-    ]
+        all_candidates.extend(
+            candidate
+            for candidate in shadow_scan.load_candidates(instance)
+            if candidate.config_label == args.config_label
+            and candidate.config_era == instance_eras[instance]
+            and overlap_start <= candidate.epoch <= overlap_end
+        )
+    candidates = all_candidates
     resolutions = shadow_scan.resolve_outcomes(candidate.slug for candidate in candidates)
     candidates = [candidate for candidate in candidates if candidate.slug in resolutions]
 
@@ -888,13 +1100,22 @@ def main() -> int:
     benchmark_metrics = scale_result_to_live(guarded_result, trade_cap)
 
     audit_clean, audit_reason = detect_emmanuel_audit_clean(args.progress_path)
+    journal_clean, journal_reason = detect_journal_clean() if args.journal_clean == "unknown" else (args.journal_clean, "cli_override")
+    config_drift_clean, config_drift_reason = (
+        detect_config_drift_clean(args.config_label, instance_eras)
+        if args.config_drift_clean == "unknown"
+        else (args.config_drift_clean, "cli_override")
+    )
+    security_status = security_best_practices_report.build_status(PROJECT_ROOT / "security_best_practices_report.md")
+    dependency_status = dependency_audit_status.build_status()
+    service_status = service_hardening_status.build_status()
     dashboard_fields_supported = get_dashboard_field_support()
 
     instance_stats = [
         build_instance_stats(
             instance,
             args.config_label,
-            config_era,
+            instance_eras[instance],
             overlap_start,
             overlap_end,
             resolutions,
@@ -910,10 +1131,12 @@ def main() -> int:
         max_daily_loss=max_daily_loss,
         audit_clean=audit_clean,
         audit_reason=audit_reason,
-        journal_clean=args.journal_clean,
-        config_drift_clean=args.config_drift_clean,
-        open_crit_count=args.open_crit_count,
+        journal_clean=journal_clean,
+        config_drift_clean=config_drift_clean,
         dashboard_fields_supported=dashboard_fields_supported,
+        security_status=security_status,
+        dependency_status=dependency_status,
+        service_status=service_status,
     )
 
     report = build_report(
@@ -929,10 +1152,12 @@ def main() -> int:
         blockers=blockers,
         audit_clean=audit_clean,
         audit_reason=audit_reason,
-        journal_clean=args.journal_clean,
-        config_drift_clean=args.config_drift_clean,
-        open_crit_count=args.open_crit_count,
+        journal_clean=f"{journal_clean} ({journal_reason})",
+        config_drift_clean=f"{config_drift_clean} ({config_drift_reason})",
         dashboard_fields_supported=dashboard_fields_supported,
+        security_status=security_status,
+        dependency_status=dependency_status,
+        service_status=service_status,
     )
     status = build_gate_status(
         config_label=args.config_label,
@@ -947,10 +1172,12 @@ def main() -> int:
         blockers=blockers,
         audit_clean=audit_clean,
         audit_reason=audit_reason,
-        journal_clean=args.journal_clean,
-        config_drift_clean=args.config_drift_clean,
-        open_crit_count=args.open_crit_count,
+        journal_clean=journal_clean,
+        config_drift_clean=config_drift_clean,
         dashboard_fields_supported=dashboard_fields_supported,
+        security_status=security_status,
+        dependency_status=dependency_status,
+        service_status=service_status,
     )
 
     output_path.write_text(report, encoding="utf-8")

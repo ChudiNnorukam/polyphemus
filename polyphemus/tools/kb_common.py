@@ -18,9 +18,13 @@ EXTERNAL_PRIMARY_DOCS = EXTERNAL_PRIMARY_ROOT / "docs"
 INTERNAL_REPORT_ROOT = KB_ROOT / "internal" / "reports"
 INTERNAL_REPORT_DOCS = INTERNAL_REPORT_ROOT / "docs"
 INTERNAL_RUNTIME_ROOT = KB_ROOT / "internal" / "runtime"
+INTERNAL_RUNTIME_CURRENT_ROOT = INTERNAL_RUNTIME_ROOT / "current"
 PLAYBOOK_ROOT = KB_ROOT / "playbooks"
 INDEX_ROOT = KB_ROOT / "index"
 INDEX_PATH = INDEX_ROOT / "kb_index.json"
+AGENT_ROOT = PROJECT_ROOT / "agent"
+AGENT_CONTRACT_ROOT = AGENT_ROOT / "contract"
+AGENT_HANDOFF_ROOT = AGENT_ROOT / "handoff"
 
 SOURCE_CLASS_PRIORITY = {
     "internal_runtime": 4.0,
@@ -70,8 +74,11 @@ def ensure_kb_dirs() -> None:
         INTERNAL_REPORT_ROOT,
         INTERNAL_REPORT_DOCS,
         INTERNAL_RUNTIME_ROOT,
+        INTERNAL_RUNTIME_CURRENT_ROOT,
         PLAYBOOK_ROOT,
         INDEX_ROOT,
+        AGENT_CONTRACT_ROOT,
+        AGENT_HANDOFF_ROOT,
     ]:
         path.mkdir(parents=True, exist_ok=True)
 

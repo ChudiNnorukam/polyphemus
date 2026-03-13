@@ -1,0 +1,9 @@
+{
+  "cached_recent_db_order_hashes_24h": 0,
+  "generated_at": "2026-03-13T05:02:05.995078+00:00",
+  "latest_evidence": "Mar 12 17:18:11 54716.example.com python[1293374]: 2026-03-12 17:18:11 [INFO] polyphemus.bot: CLOB\u2194DB trade audit: No trades in last 24h (CLOB=0, DB=0)",
+  "probable_cause": "recent CLOB and DB order hashes are aligned",
+  "recommended_next_step": "continue monitoring",
+  "ssh_ok": true,
+  "state": "pass"
+}

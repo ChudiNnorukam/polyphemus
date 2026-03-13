@@ -21,5 +21,12 @@
     "shadow_window_status",
     "recent_live_pnl"
   ],
-  "required_citations": 2
+  "required_citations": 2,
+  "activation_required": true,
+  "handoff_required": true,
+  "role_switch_triggers": [
+    "shadow_window_maturity",
+    "strategy_comparison",
+    "coverage_gap_analysis"
+  ]
 }

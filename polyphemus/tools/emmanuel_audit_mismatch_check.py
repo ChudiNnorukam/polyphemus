@@ -19,8 +19,13 @@ except ImportError:  # pragma: no cover - direct script execution
 
 JOURNAL_CMD = [
     "ssh",
+    *backtester.ssh_transport_args(),
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
     "root@82.24.19.114",
-    "journalctl -u lagbot@emmanuel --since '7 days ago' --no-pager",
+    "journalctl -u lagbot@emmanuel --since '7 days ago' --no-pager | grep 'CLOB↔DB trade audit' | tail -n 20",
 ]
 
 

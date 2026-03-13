@@ -27,11 +27,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_shadow_status(args: argparse.Namespace) -> dict:
-    config_era = shadow_window_status.gate.get_common_config_era(args.instances, args.config_label)
+    alignment = shadow_window_status.gate.get_research_alignment_context(args.instances, args.config_label)
+    config_era = alignment["shared_research_era"]
+    instance_eras = alignment["instance_config_eras"]
     status = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "config_label": args.config_label,
         "shared_config_era": config_era,
+        "instance_config_eras": instance_eras,
         "elapsed_hours": 0.0,
         "window_start": None,
         "window_end": None,
@@ -45,7 +48,7 @@ def build_shadow_status(args: argparse.Namespace) -> dict:
     }
     if config_era:
         epoch_sets = {
-            instance: shadow_window_status.gate.get_epochs(instance, args.config_label, config_era)
+            instance: shadow_window_status.gate.get_epochs(instance, args.config_label, instance_eras.get(instance, ""))
             for instance in args.instances
         }
         if all(epoch_sets.values()):
@@ -63,7 +66,7 @@ def build_shadow_status(args: argparse.Namespace) -> dict:
                 signal_count = shadow_window_status.gate.count_signals(
                     instance,
                     args.config_label,
-                    config_era,
+                    instance_eras.get(instance, ""),
                     overlap_start,
                     overlap_end,
                 )

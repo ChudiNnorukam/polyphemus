@@ -1,0 +1,32 @@
+{
+  "blocked_actions": [
+    "Recommend or enable live trading while the gate is NO-GO.",
+    "Recommend or enable live trading while security or dependency status is not pass.",
+    "Mutate live VPS config without explicit user approval.",
+    "Assume stale memory overrides the current runtime bundle."
+  ],
+  "from_agent": "codex_or_claude",
+  "generated_at": "2026-03-13T05:10:04.020656+00:00",
+  "latest_evidence_paths": [
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050337.md",
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050247.md",
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050246.md",
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050225.md",
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050321.md"
+  ],
+  "next_step": "Keep the aligned shadow window running and refresh caches again later.",
+  "recommended_role": "quant_researcher",
+  "required_reads": [
+    "/Users/chudinnorukam/Projects/business/polyphemus/agent/contract/repo_agent_contract.json",
+    "/Users/chudinnorukam/Projects/business/polyphemus/agent/handoff/current_state.json",
+    "/Users/chudinnorukam/Projects/business/polyphemus/agent/policy/live_trading_policy.md"
+  ],
+  "to_agent": "codex_or_claude",
+  "unknowns": [],
+  "verified_facts": [
+    "Shared research-aligned era is 727771dc4073.",
+    "Audit status is pass.",
+    "Current gate verdict is NO-GO.",
+    "Security audit verdict is pass."
+  ]
+}

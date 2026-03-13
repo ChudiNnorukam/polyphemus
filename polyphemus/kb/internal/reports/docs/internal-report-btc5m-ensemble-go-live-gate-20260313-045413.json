@@ -1,0 +1,27 @@
+{
+  "actionable_lessons": [
+    "Generated: `2026-03-13 04:57:59 UTC`",
+    "Config label: `btc5m_shadow_lab_v3`",
+    "Research-aligned era: `727771dc4073`",
+    "Overlap window: `2026-03-12T08:40:00+00:00` -> `2026-03-13T01:20:00+00:00`"
+  ],
+  "anti_patterns": [
+    "Do not treat a historical report as fresher than current runtime status."
+  ],
+  "body": "# BTC 5m Ensemble-Selected Go-Live Gate\n\n- Generated: `2026-03-13 04:57:59 UTC`\n- Config label: `btc5m_shadow_lab_v3`\n- Research-aligned era: `727771dc4073`\n- Overlap window: `2026-03-12T08:40:00+00:00` -> `2026-03-13T01:20:00+00:00`\n- Planned live spend assumption: `$20.000` per trade (derived from cached hard caps)\n- MAX_DAILY_LOSS assumption: `$50.000`\n\n## Instance Integrity\n\n### emmanuel\n- Runtime window: `16.7h`\n- Epoch coverage: `201/201` = `100.0%`\n- Longest epoch gap: `0.00h`\n- BTC tagged signals: `51`\n- Resolved ensemble-selected rows: `10`\n- Passed ensemble-selected BTC candidates: `1`\n- Placement failures: `0`\n- Fill timeouts: `0`\n- Pipeline stall windows (>60m with coverage but no BTC signals): `38`\n- Recent BTC trades in overlap window: `0`\n\n### polyphemus\n- Runtime window: `16.7h`\n- Epoch coverage: `201/201` = `100.0%`\n- Longest epoch gap: `0.00h`\n- BTC tagged signals: `88`\n- Resolved ensemble-selected rows: `8`\n- Passed ensemble-selected BTC candidates: `1`\n- Placement failures: `0`\n- Fill timeouts: `0`\n- Pipeline stall windows (>60m with coverage but no BTC signals): `5`\n- Recent BTC trades in overlap window: `0`\n\n- Cross-instance epoch coverage drift: `0.0%`\n\n## Strategy Comparison\n\n| Slice | Trades | WR | Avg Net (1 share) | Live Avg Net | Live ROI | Live Max DD | Live Worst Rolling 5 | R8 |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| ensemble_selected_live_v1 | 10 | 70.0% | $0.048 | $1.162 | 5.8% | $32.332 | $7.666 | ANECDOTAL n=10 |\n| current_guarded | 5 | 40.0% | $-0.181 | $-6.638 | -33.2% | $60.117 | $33.189 | ANECDOTAL n=5 |\n\n## Execution Readiness\n\n- Promoted slice: `BTC / 5m / binance_momentum / shadow_ensemble_selected=1`\n- Emmanuel audit clean: `True` (live_audit_pass)\n- Journal clean verified: `yes (no recent error or traceback lines in last 6h)`\n- Config drift verified: `yes (cached emmanuel .env matches the requested config label and required strategy keys)`\n- Dashboard pipeline fields present in code: `True`\n- Retry-shadow skip reasons: `not persisted by config_era yet; use live dashboard for current process counters`\n\n## Security Readiness\n\n- Security audit verdict: `pass`\n- Dependency audit verdict: `pass`\n- Service hardening verdict: `pass`\n\n## Decision\n\n- Verdict: `NO-GO`\n- Blockers:\n  - `emmanuel: runtime 16.7h < 48.0h`\n  - `emmanuel: unexplained pipeline stall windows 38 > 1`\n  - `polyphemus: runtime 16.7h < 48.0h`\n  - `polyphemus: resolved ensemble rows 8 < 10`\n  - `polyphemus: unexplained pipeline stall windows 5 > 1`\n  - `ensemble_selected_live_v1: sample size 10 < 30`\n  - `emmanuel: passed ensemble-selected BTC candidates 1 < 10`",
+  "citation": "btc5m_ensemble_go_live_gate_20260313_045413.md",
+  "id": "internal-report-btc5m-ensemble-go-live-gate-20260313-045413",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_report",
+  "source_path": "dario_output/btc5m_ensemble_go_live_gate_20260313_045413.md",
+  "source_url": "",
+  "summary": "# BTC 5m Ensemble-Selected Go-Live Gate - Generated: `2026-03-13 04:57:59 UTC` - Config label: `btc5m_shadow_lab_v3`",
+  "title": "BTC 5m Ensemble-Selected Go-Live Gate",
+  "topics": [
+    "internal-report",
+    "analysis"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T05:10:03.838169+00:00"
+}

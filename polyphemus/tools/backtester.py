@@ -16,6 +16,7 @@ import csv
 import itertools
 import json
 import math
+import os
 import sqlite3
 import subprocess
 import sys
@@ -55,6 +56,44 @@ FILTER_GRID_REDUCED = {
     "post_loss_cooldown": [0, 900],
     "max_consec_losses": [3, 999],
 }
+
+
+def resolve_ssh_key() -> Optional[Path]:
+    """Return the preferred SSH key for QuantVPS access if one exists."""
+    configured = os.environ.get("LAGBOT_SSH_KEY", "").strip()
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path("~/.ssh/oracle_polymarket").expanduser(),
+        Path("~/.ssh/id_ed25519").expanduser(),
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    return None
+
+
+def ssh_transport_args() -> List[str]:
+    """Build deterministic SSH/SCP transport flags for VPS access."""
+    args = [
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ]
+    key_path = resolve_ssh_key()
+    if key_path:
+        args.extend(["-i", str(key_path)])
+    return args
+
+
+def scp_fetch(remote: str, local: Path) -> subprocess.CompletedProcess[str]:
+    """Copy a remote artifact using the preferred SSH identity."""
+    local.parent.mkdir(parents=True, exist_ok=True)
+    return subprocess.run(
+        ["scp", *ssh_transport_args(), "-q", remote, str(local)],
+        capture_output=True,
+        text=True,
+    )
 
 
 @dataclass
@@ -203,11 +242,7 @@ def download_dbs(instance: str) -> Tuple[Optional[Path], Optional[Path]]:
     for db_name in ["signals.db", "performance.db"]:
         remote = f"{VPS_HOST}:{remote_base}/{db_name}"
         local = local_dir / db_name
-        result = subprocess.run(
-            ["scp", "-q", remote, str(local)],
-            capture_output=True,
-            text=True,
-        )
+        result = scp_fetch(remote, local)
         if result.returncode == 0 and local.exists() and local.stat().st_size > 0:
             files[db_name] = local
         else:

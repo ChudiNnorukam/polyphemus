@@ -4,12 +4,14 @@ This policy is the anti-hallucination layer for any agent using the Polyphemus K
 
 ## Hard rules
 
+- Run the agent bootstrap before strategy or live-trading advice.
 - No live trading recommendation without current gate evidence.
 - Replay-only results are never enough for live promotion.
 - Negative live P&L overrides narrative confidence.
 - If sources disagree, prefer current internal runtime evidence plus primary docs over commentary.
 - Audit mismatch or unknown audit state blocks any live recommendation.
 - Missing shared aligned `config_era` blocks strategy promotion claims.
+- Unknown or stale bootstrap state is a blocker, not a pass.
 
 ## Safe defaults
 

@@ -26,11 +26,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    config_era = gate.get_common_config_era(args.instances, args.config_label)
+    alignment = gate.get_research_alignment_context(args.instances, args.config_label)
+    config_era = alignment["shared_research_era"]
+    instance_eras = alignment["instance_config_eras"]
     status = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "config_label": args.config_label,
         "shared_config_era": config_era,
+        "instance_config_eras": instance_eras,
         "elapsed_hours": 0.0,
         "window_start": None,
         "window_end": None,
@@ -43,7 +46,10 @@ def main() -> int:
         },
     }
     if config_era:
-        epoch_sets = {instance: gate.get_epochs(instance, args.config_label, config_era) for instance in args.instances}
+        epoch_sets = {
+            instance: gate.get_epochs(instance, args.config_label, instance_eras[instance])
+            for instance in args.instances
+        }
         if all(epoch_sets.values()):
             overlap_start = max(min(epochs) for epochs in epoch_sets.values())
             overlap_end = min(max(epochs) for epochs in epoch_sets.values())
@@ -56,7 +62,7 @@ def main() -> int:
             for instance, epochs in epoch_sets.items():
                 observed = len([epoch for epoch in epochs if overlap_start <= epoch <= overlap_end])
                 coverage_rate = (observed / expected) if expected else 0.0
-                signal_count = gate.count_signals(instance, args.config_label, config_era, overlap_start, overlap_end)
+                signal_count = gate.count_signals(instance, args.config_label, instance_eras[instance], overlap_start, overlap_end)
                 status["signal_counts_by_instance"][instance] = signal_count
                 status["epoch_coverage_by_instance"][instance] = {
                     "observed_epochs": observed,

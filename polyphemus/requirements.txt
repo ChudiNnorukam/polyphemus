@@ -1,7 +1,1 @@
-py_clob_client>=0.0.1
-py-builder-relayer-client>=0.0.1
-aiohttp>=3.9.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
-web3>=7.0.0
+-r requirements-lock.txt

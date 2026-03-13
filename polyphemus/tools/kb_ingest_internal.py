@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,6 +14,7 @@ try:
     from .kb_common import (
         INTERNAL_REPORT_DOCS,
         INTERNAL_REPORT_ROOT,
+        INTERNAL_RUNTIME_CURRENT_ROOT,
         INTERNAL_RUNTIME_ROOT,
         PROJECT_ROOT,
         build_document,
@@ -26,6 +28,7 @@ except ImportError:  # pragma: no cover - script execution fallback
     from kb_common import (
         INTERNAL_REPORT_DOCS,
         INTERNAL_REPORT_ROOT,
+        INTERNAL_RUNTIME_CURRENT_ROOT,
         INTERNAL_RUNTIME_ROOT,
         PROJECT_ROOT,
         build_document,
@@ -61,7 +64,7 @@ def run_json_script(script_name: str) -> dict:
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
         json_path = Path(handle.name)
     cmd = [
-        "python3",
+        sys.executable,
         str(PROJECT_ROOT / "tools" / script_name),
         "--json-out",
         str(json_path),
@@ -69,6 +72,16 @@ def run_json_script(script_name: str) -> dict:
     ]
     subprocess.run(cmd, cwd=str(PROJECT_ROOT.parent), capture_output=True, text=True, check=True)
     return json.loads(json_path.read_text(encoding="utf-8"))
+
+
+def runtime_payload(script_name: str, snapshot_name: str) -> dict:
+    current_path = INTERNAL_RUNTIME_CURRENT_ROOT / f"{snapshot_name}.json"
+    if current_path.exists():
+        try:
+            return json.loads(current_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    return run_json_script(script_name)
 
 
 def ingest_internal(report_dir: Path) -> dict:
@@ -123,10 +136,13 @@ def ingest_internal(report_dir: Path) -> dict:
         report_docs.append(document["id"])
 
     runtime_payloads = {
-        "shadow_window_status": run_json_script("shadow_window_status.py"),
-        "shadow_window_checklist": run_json_script("shadow_window_checklist.py"),
-        "go_live_gate_status": run_json_script("btc5m_ensemble_go_live_gate.py"),
-        "audit_mismatch_status": run_json_script("emmanuel_audit_mismatch_check.py"),
+        "shadow_window_status": runtime_payload("shadow_window_status.py", "shadow_window_status"),
+        "shadow_window_checklist": runtime_payload("shadow_window_checklist.py", "shadow_window_checklist"),
+        "go_live_gate_status": runtime_payload("btc5m_ensemble_go_live_gate.py", "go_live_gate_status"),
+        "audit_mismatch_status": runtime_payload("emmanuel_audit_mismatch_check.py", "audit_mismatch_status"),
+        "security_audit_status": runtime_payload("security_best_practices_report.py", "security_audit_status"),
+        "dependency_audit_status": runtime_payload("dependency_audit_status.py", "dependency_audit_status"),
+        "service_hardening_status": runtime_payload("service_hardening_status.py", "service_hardening_status"),
     }
     for name, payload in runtime_payloads.items():
         doc = build_document(
@@ -144,6 +160,7 @@ def ingest_internal(report_dir: Path) -> dict:
             citation=name,
         )
         dump_json(INTERNAL_RUNTIME_ROOT / f"{name}.json", doc)
+        dump_json(INTERNAL_RUNTIME_CURRENT_ROOT / f"{name}.json", payload)
 
     bundle = {
         "generated_at": now_iso(),

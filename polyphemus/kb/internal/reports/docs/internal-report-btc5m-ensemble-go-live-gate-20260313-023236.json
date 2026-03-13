@@ -1,0 +1,27 @@
+{
+  "actionable_lessons": [
+    "Generated: `2026-03-13 02:32:36 UTC`",
+    "Config label: `btc5m_shadow_lab_v3`",
+    "Verdict: `NO-GO`",
+    "Blockers:"
+  ],
+  "anti_patterns": [
+    "Do not treat a historical report as fresher than current runtime status."
+  ],
+  "body": "# BTC 5m Ensemble-Selected Go-Live Gate\n\n- Generated: `2026-03-13 02:32:36 UTC`\n- Config label: `btc5m_shadow_lab_v3`\n\n## Decision\n\n- Verdict: `NO-GO`\n- Blockers:\n  - `no common config_era found for the requested instances/config_label`\n\n## Interpretation\n\n- The cached local data does not yet contain a shared post-fix aligned `config_era` for both instances.\n- That means the gate cannot legally evaluate the promotion window yet.\n- Next action: refresh the local caches from both instances after the aligned post-fix shadow window has accumulated enough data.",
+  "citation": "btc5m_ensemble_go_live_gate_20260313_023236.md",
+  "id": "internal-report-btc5m-ensemble-go-live-gate-20260313-023236",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_report",
+  "source_path": "dario_output/btc5m_ensemble_go_live_gate_20260313_023236.md",
+  "source_url": "",
+  "summary": "# BTC 5m Ensemble-Selected Go-Live Gate - Generated: `2026-03-13 02:32:36 UTC` - Config label: `btc5m_shadow_lab_v3`",
+  "title": "BTC 5m Ensemble-Selected Go-Live Gate",
+  "topics": [
+    "internal-report",
+    "analysis"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T05:10:03.832851+00:00"
+}

@@ -22,5 +22,12 @@
     "live_pnl",
     "execution_readiness"
   ],
-  "required_citations": 2
+  "required_citations": 2,
+  "activation_required": true,
+  "handoff_required": true,
+  "role_switch_triggers": [
+    "gate_go",
+    "promotion_review",
+    "capital_allocation_question"
+  ]
 }
