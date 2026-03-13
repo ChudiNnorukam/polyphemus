@@ -157,6 +157,7 @@ class TelegramApprover:
     async def _send_approval_message(self, signal: dict, approval_id: str) -> None:
         city = signal.get("weather_city", "?")
         question = signal.get("market_title", "")[:70]
+        outcome = signal.get("outcome", "Yes")
         noaa = signal.get("noaa_prob", 0.0)
         edge = signal.get("edge", 0.0)
         price = signal.get("price", 0.0)
@@ -187,6 +188,7 @@ class TelegramApprover:
         text = (
             f"🌤 *Weather Signal — Approve?*\n\n"
             f"📍 *{city}*\n"
+            f"🎲 *Buy {outcome}*\n"
             f"_{question}_\n\n"
             f"{forecast_line}\n"
             f"{noaa_line}\n"

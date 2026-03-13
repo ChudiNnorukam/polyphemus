@@ -104,7 +104,15 @@ class SignalLogger:
                 pipeline_stage TEXT,
                 pipeline_status TEXT,
                 pipeline_detail TEXT,
-                noise_flags TEXT
+                noise_flags TEXT,
+                config_label TEXT,
+                config_era TEXT,
+                instance_name TEXT,
+                shadow_current_guarded INTEGER,
+                shadow_ensemble_candidate INTEGER,
+                shadow_ensemble_selected INTEGER,
+                shadow_ensemble_score REAL,
+                shadow_ensemble_reason TEXT
             )
         """)
         self._conn.execute("""
@@ -137,6 +145,9 @@ class SignalLogger:
                 binance_delta_pct REAL,
                 bot_saw_signal INTEGER DEFAULT 0,
                 bot_signal_source TEXT,
+                instance_name TEXT,
+                config_label TEXT,
+                config_era TEXT,
                 resolved_outcome TEXT,
                 resolved_price REAL,
                 timestamp TEXT NOT NULL,
@@ -149,6 +160,17 @@ class SignalLogger:
         self._conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_epoch_coverage_asset ON epoch_coverage(asset)
         """)
+        self._conn.commit()
+        _epoch_cols = [
+            ("instance_name", "TEXT"),
+            ("config_label", "TEXT"),
+            ("config_era", "TEXT"),
+        ]
+        for col_name, col_def in _epoch_cols:
+            try:
+                self._conn.execute(f"ALTER TABLE epoch_coverage ADD COLUMN {col_name} {col_def}")
+            except sqlite3.OperationalError:
+                pass
         self._conn.commit()
 
         # Additive migrations — try/except pattern (ALTER TABLE IF NOT EXISTS not valid in SQLite)
@@ -164,6 +186,13 @@ class SignalLogger:
             ("evidence_match_level", "TEXT"),
             ("pipeline_stage", "TEXT"), ("pipeline_status", "TEXT"),
             ("pipeline_detail", "TEXT"), ("noise_flags", "TEXT"),
+            ("config_label", "TEXT"), ("config_era", "TEXT"),
+            ("instance_name", "TEXT"),
+            ("shadow_current_guarded", "INTEGER"),
+            ("shadow_ensemble_candidate", "INTEGER"),
+            ("shadow_ensemble_selected", "INTEGER"),
+            ("shadow_ensemble_score", "REAL"),
+            ("shadow_ensemble_reason", "TEXT"),
         ]
         for col_name, col_def in _migration_cols:
             try:
@@ -287,17 +316,19 @@ class SignalLogger:
 
     def log_epoch(self, epoch: int, asset: str, window_secs: int = 300,
                   oracle_open: float = None, binance_open: float = None,
-                  bot_saw_signal: bool = False, bot_signal_source: str = None):
+                  bot_saw_signal: bool = False, bot_signal_source: str = None,
+                  instance_name: str = None, config_label: str = None,
+                  config_era: str = None):
         """Log the start of a new epoch for coverage analysis."""
         now = datetime.now(timezone.utc)
         try:
             self._conn.execute("""
                 INSERT OR IGNORE INTO epoch_coverage
                     (epoch, asset, window_secs, oracle_open_price, binance_open_price,
-                     bot_saw_signal, bot_signal_source, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     bot_saw_signal, bot_signal_source, instance_name, config_label, config_era, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (epoch, asset, window_secs, oracle_open, binance_open,
-                  1 if bot_saw_signal else 0, bot_signal_source, now.isoformat()))
+                  1 if bot_saw_signal else 0, bot_signal_source, instance_name, config_label, config_era, now.isoformat()))
             self._conn.commit()
         except Exception as e:
             self._logger.error(f"Failed to log epoch {epoch}/{asset}: {e}")

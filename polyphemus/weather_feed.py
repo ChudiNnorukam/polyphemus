@@ -262,6 +262,7 @@ class WeatherFeed:
         question = market.get("question") or market.get("title") or ""
         slug = market.get("slug") or market.get("marketSlug") or ""
         condition_id = market.get("conditionId", "")
+        price_tick_size = self._extract_price_tick(market)
 
         if not slug or slug in self._entered_slugs:
             return
@@ -288,6 +289,7 @@ class WeatherFeed:
         try:
             token_ids = json.loads(market.get("clobTokenIds", "[]"))
             outcomes = json.loads(market.get("outcomes", '["Yes","No"]'))
+            outcome_prices = json.loads(market.get("outcomePrices", "[]"))
         except (json.JSONDecodeError, TypeError):
             return
         if not token_ids:
@@ -301,17 +303,22 @@ class WeatherFeed:
         if yes_idx >= len(token_ids):
             return
         yes_token_id = token_ids[yes_idx]
+        no_idx = next(
+            (i for i, o in enumerate(outcomes) if str(o).lower() in ("no", "false", "0")),
+            None,
+        )
+        no_token_id = token_ids[no_idx] if no_idx is not None and no_idx < len(token_ids) else None
 
-        # Use outcomePrices from event data for initial scan (avoids per-market API call).
-        # Only fetch live midpoint when signal is about to fire.
-        try:
-            outcome_prices = json.loads(market.get("outcomePrices", "[]"))
-            market_price = float(outcome_prices[yes_idx]) if outcome_prices else 0.0
-        except (json.JSONDecodeError, TypeError, IndexError, ValueError):
-            market_price = 0.0
+        def _outcome_price(idx: Optional[int], fallback: float = 0.0) -> float:
+            if idx is None or idx >= len(outcome_prices):
+                return fallback
+            try:
+                return float(outcome_prices[idx])
+            except (TypeError, ValueError):
+                return fallback
 
-        if market_price <= 0 or market_price >= self._config.weather_entry_max_price:
-            return
+        yes_market_price = _outcome_price(yes_idx)
+        no_market_price = _outcome_price(no_idx, max(0.0, 1.0 - yes_market_price))
 
         # Parse temperature condition — prefer groupItemTitle, fall back to question text
         group_title = market.get("groupItemTitle", "")
@@ -320,24 +327,56 @@ class WeatherFeed:
             return
 
         # Get NOAA/Open-Meteo forecast probability (sigma scales with hours_left)
-        noaa_prob = await self._get_forecast_probability(city, end_dt, temp_cond, hours_left)
-        if noaa_prob is None:
+        yes_prob = await self._get_forecast_probability(city, end_dt, temp_cond, hours_left)
+        if yes_prob is None:
             return
 
-        edge = noaa_prob - market_price
+        candidates = []
+        if 0 < yes_market_price < self._config.weather_entry_max_price:
+            candidates.append({
+                "outcome": "Yes",
+                "token_id": yes_token_id,
+                "market_price": yes_market_price,
+                "model_prob": yes_prob,
+            })
+        if (
+            self._config.weather_allow_complement
+            and no_token_id
+            and 0 < no_market_price < self._config.weather_entry_max_price
+        ):
+            candidates.append({
+                "outcome": "No",
+                "token_id": no_token_id,
+                "market_price": no_market_price,
+                "model_prob": 1.0 - yes_prob,
+            })
+        if not candidates:
+            return
+
+        for candidate in candidates:
+            candidate["edge"] = candidate["model_prob"] - candidate["market_price"]
+
         self._logger.debug(
             f"Weather check: {question[:70]} | "
             f"city={city} | cond={temp_cond} | "
-            f"mkt={market_price:.3f} | noaa={noaa_prob:.3f} | edge={edge:+.3f}"
+            f"yes={yes_market_price:.3f}@{yes_prob:.3f} | "
+            f"no={no_market_price:.3f}@{1.0 - yes_prob:.3f}"
         )
 
-        # Entry filter: all three conditions must pass
-        if not (
-            market_price <= self._config.weather_entry_max_price
-            and noaa_prob >= self._config.weather_noaa_min_prob
-            and edge >= self._config.weather_min_edge
-        ):
+        viable = [
+            candidate for candidate in candidates
+            if candidate["model_prob"] >= self._config.weather_noaa_min_prob
+            and candidate["edge"] >= self._config.weather_min_edge
+        ]
+        if not viable:
             return
+        candidate = max(viable, key=lambda item: (item["edge"], item["model_prob"]))
+
+        outcome = candidate["outcome"]
+        token_id = candidate["token_id"]
+        market_price = candidate["market_price"]
+        model_prob = candidate["model_prob"]
+        edge = candidate["edge"]
 
         # Pre-bet sanity: log ensemble context before every entry
         forecast_meta: dict = {}
@@ -349,16 +388,16 @@ class WeatherFeed:
             if _fc_pb and "member_highs" in _fc_pb:
                 _mean_pb = _fc_pb["ensemble_mean"]
                 _n_pb = _fc_pb["n_members"]
-                _in_pb = round(noaa_prob * _n_pb)
+                _in_pb = round(model_prob * _n_pb)
                 _btype = (
-                    "CENTERED" if noaa_prob >= 0.25
-                    else "FRINGE" if noaa_prob >= 0.15
+                    "CENTERED" if model_prob >= 0.25
+                    else "FRINGE" if model_prob >= 0.15
                     else "TAIL"
                 )
                 self._logger.info(
-                    f"Pre-bet [{_btype}] {city} | ensemble_mean={_mean_pb:.1f}°F | "
-                    f"{_in_pb}/{_n_pb} members in bucket | "
-                    f"prob={noaa_prob:.1%} mkt={market_price:.3f} edge={edge:+.3f}"
+                    f"Pre-bet [{_btype}] {city} {outcome} | ensemble_mean={_mean_pb:.1f}°F | "
+                    f"{_in_pb}/{_n_pb} members onside | "
+                    f"prob={model_prob:.1%} mkt={market_price:.3f} edge={edge:+.3f}"
                 )
                 # Bucket center for Telegram delta display
                 if temp_cond["kind"] == "range":
@@ -370,20 +409,23 @@ class WeatherFeed:
                     "bucket_center_f": _center_f,
                     "bet_type": _btype,
                     "members_str": f"{_in_pb}/{_n_pb}",
+                    "weather_yes_prob": yes_prob,
                 }
 
         self.opportunities_found += 1
         await self._emit_signal(
-            token_id=yes_token_id,
+            token_id=token_id,
             market_price=market_price,
             slug=slug,
             question=question,
             city=city,
-            noaa_prob=noaa_prob,
+            outcome=outcome,
+            model_prob=model_prob,
             edge=edge,
             end_dt=end_dt,
             condition_id=condition_id,
             hours_left=hours_left,
+            price_tick_size=price_tick_size,
             forecast_meta=forecast_meta,
         )
 
@@ -394,11 +436,13 @@ class WeatherFeed:
         slug: str,
         question: str,
         city: str,
-        noaa_prob: float,
+        outcome: str,
+        model_prob: float,
         edge: float,
         end_dt: datetime,
         condition_id: str,
         hours_left: float,
+        price_tick_size: float,
         forecast_meta: dict = None,
     ) -> None:
         """Build and emit (or dry-log) a BUY signal for a mispriced weather market."""
@@ -414,12 +458,12 @@ class WeatherFeed:
             "market_title": question,
             "usdc_size": ref_size,     # realistic size (conviction check bypassed for is_weather)
             "direction": "BUY",
-            "outcome": "Yes",          # weather markets are YES/NO, not Up/Down
+            "outcome": outcome,        # weather markets are YES/NO, not Up/Down
             "asset": "WEATHER",
             "tx_hash": f"weather-{slug}-{int(time.time())}",
             "timestamp": time.time(),
             "source": "noaa_weather",
-            "noaa_prob": noaa_prob,
+            "noaa_prob": model_prob,
             "edge": edge,
             "kelly_fraction": kelly,
             "time_remaining_secs": int(hours_left * 3600),
@@ -434,67 +478,81 @@ class WeatherFeed:
                 "weather_max_hold_hours": self._config.weather_max_hold_hours,
                 "weather_market_end_ts": end_dt.timestamp(),
                 "condition_id": condition_id,
-                "noaa_prob": noaa_prob,
+                "noaa_prob": model_prob,
                 "edge": edge,
+                "price_tick_size": price_tick_size,
                 **(forecast_meta or {}),
             },
         }
 
         tag = "[DRY] " if self._config.weather_dry_run else ""
         self._logger.info(
-            f"{tag}Weather signal: {question[:65]} | "
+            f"{tag}Weather signal: {outcome} {question[:65]} | "
             f"city={city} | mkt={market_price:.3f} | "
-            f"noaa={noaa_prob:.3f} | edge={edge:+.3f} | "
+            f"prob={model_prob:.3f} | edge={edge:+.3f} | "
             f"kelly={kelly:.3f} | {hours_left:.1f}h left"
         )
 
         if self._config.weather_dry_run:
             return  # don't lock the slug in dry-run mode
 
-        # Fetch live CLOB order book. We check edge and size against the BEST ASK,
-        # not the midpoint — because maker orders on thin weather books never fill
-        # and taker always pays the ask. Checking midpoint was the bug that let Miami
-        # through at 2.5% real edge (below 3% min) after the taker fill at 3.3x midpoint.
+        # Fetch live CLOB order book and update the execution price to the real
+        # taker ask or the top-of-book maker quote for sub-cent weather markets.
         order_book = await self._clob.get_order_book(token_id)
         asks = order_book.get("asks", [])
+        bids = order_book.get("bids", [])
+        best_ask = float(asks[0]["price"]) if asks else 0.0
+        best_bid = float(bids[0]["price"]) if bids else 0.0
+        maker_target_price = self._compute_maker_target_price(
+            best_bid=best_bid,
+            best_ask=best_ask,
+            price_tick_size=price_tick_size,
+            fallback_price=market_price,
+        )
 
-        if not asks:
-            # No sellers in the book — can't buy, and stale Gamma price is unreliable
-            self._logger.debug(f"No asks in order book for {token_id[:16]}... skipping")
+        if self._config.entry_mode == "maker":
+            live_price = maker_target_price
+            live_label = "maker"
+        else:
+            live_price = best_ask
+            live_label = "ask"
+
+        if live_price <= 0:
+            self._logger.debug(f"No usable live price for {token_id[:16]}... skipping")
             return
 
-        best_ask = float(asks[0]["price"])
-
-        if best_ask > 0.005:
-            if best_ask >= self._config.weather_entry_max_price:
-                self._logger.info(
-                    f"Weather signal cancelled (ask too high): "
-                    f"ask={best_ask:.4f} entry_max={self._config.weather_entry_max_price}"
-                )
-                return
-            live_edge = noaa_prob - best_ask
-            if live_edge < self._config.weather_min_edge:
-                self._logger.info(
-                    f"Weather signal cancelled (edge at ask below min): "
-                    f"ask={best_ask:.4f} noaa={noaa_prob:.4f} "
-                    f"edge={live_edge:+.4f} min={self._config.weather_min_edge}"
-                )
-                return
-            if abs(best_ask - market_price) > 0.005:
-                self._logger.info(
-                    f"Weather price updated to live ask: "
-                    f"{market_price:.4f} -> {best_ask:.4f}"
-                )
-            market_price = best_ask
-            edge = live_edge
-            kelly = (edge / max(1 - market_price, 0.01)) * 0.25
-            kelly = max(self._config.weather_base_bet_pct, min(kelly, self._config.weather_max_bet_pct))
-            ref_size = round(kelly * 100, 2)
-            signal["price"] = market_price
-            signal["edge"] = edge
-            signal["kelly_fraction"] = kelly
-            signal["usdc_size"] = ref_size
-            signal["metadata"]["edge"] = edge
+        if live_price >= self._config.weather_entry_max_price:
+            self._logger.info(
+                f"Weather signal cancelled ({live_label} too high): "
+                f"{live_label}={live_price:.4f} entry_max={self._config.weather_entry_max_price}"
+            )
+            return
+        live_edge = model_prob - live_price
+        if live_edge < self._config.weather_min_edge:
+            self._logger.info(
+                f"Weather signal cancelled ({live_label} edge below min): "
+                f"{live_label}={live_price:.4f} prob={model_prob:.4f} "
+                f"edge={live_edge:+.4f} min={self._config.weather_min_edge}"
+            )
+            return
+        if abs(live_price - market_price) > max(price_tick_size, 0.001):
+            self._logger.info(
+                f"Weather price updated to live {live_label}: "
+                f"{market_price:.4f} -> {live_price:.4f}"
+            )
+        market_price = live_price
+        edge = live_edge
+        kelly = (edge / max(1 - market_price, 0.01)) * 0.25
+        kelly = max(self._config.weather_base_bet_pct, min(kelly, self._config.weather_max_bet_pct))
+        ref_size = round(kelly * 100, 2)
+        signal["price"] = market_price
+        signal["edge"] = edge
+        signal["kelly_fraction"] = kelly
+        signal["usdc_size"] = ref_size
+        signal["metadata"]["edge"] = edge
+        signal["metadata"]["maker_target_price"] = maker_target_price
+        signal["metadata"]["best_bid"] = best_bid
+        signal["metadata"]["best_ask"] = best_ask
 
         self.signals_generated += 1
         await self._on_signal(signal)
@@ -850,3 +908,34 @@ class WeatherFeed:
                 pass
 
         return None
+
+    def _extract_price_tick(self, market: dict) -> float:
+        """Read the exchange tick size from market metadata."""
+        raw = market.get("orderPriceMinTickSize", 0.01)
+        try:
+            tick = float(raw)
+        except (TypeError, ValueError):
+            tick = 0.01
+        return tick if tick > 0 else 0.01
+
+    def _compute_maker_target_price(
+        self,
+        best_bid: float,
+        best_ask: float,
+        price_tick_size: float,
+        fallback_price: float,
+    ) -> float:
+        """Return a post-only buy price that fits the current book."""
+        tick = price_tick_size if price_tick_size > 0 else 0.01
+        if best_bid > 0 and best_ask > 0:
+            improved = best_bid + tick
+            if improved < best_ask:
+                return round(improved, 6)
+            return round(best_bid, 6)
+        if best_bid > 0:
+            return round(best_bid, 6)
+        if best_ask > tick:
+            return round(max(best_ask - tick, tick), 6)
+        if fallback_price > 0:
+            return round(max(fallback_price, tick), 6)
+        return 0.0

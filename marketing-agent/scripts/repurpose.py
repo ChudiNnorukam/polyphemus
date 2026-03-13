@@ -38,6 +38,26 @@ FORBIDDEN_PHRASES = [
     'Moreover',
 ]
 
+LINKEDIN_CHAR_LIMIT = 1200
+LINKEDIN_TARGET_CHARS = 1150
+LINKEDIN_MAX_HASHTAGS = 3
+LINKEDIN_COMMENT_PATTERNS = [
+    r'\bin the comments\b',
+    r'\bin comments\b',
+    r'\bfirst comment\b',
+    r'\bdropping it in the comments\b',
+]
+LINKEDIN_VOICE_BRIEF = """Voice goals:
+- Sound like a mid-to-senior practitioner thinking in public, not a guru or marketer
+- Warm, exploratory, and peer-to-peer
+- Use concrete mechanisms, tradeoffs, failure modes, and architecture layers when relevant
+- Applied LLM / harness engineering / systems design framing is welcome when it fits the topic
+- Prefer \"I keep noticing\", \"my current model is\", or similarly curious framing over absolute claims
+- Name what changed your thinking, not just the conclusion
+- Avoid hype, certainty theater, hustle language, and sweeping statements about what \"everyone\" should do
+- No em dashes
+"""
+
 
 def _load_env():
     for path in [
@@ -124,6 +144,108 @@ def check_and_fix_voice(client: Anthropic, text: str, platform: str) -> str:
     return text
 
 
+def extract_hashtags(text: str) -> list[str]:
+    return re.findall(r'(?<!\w)#[A-Za-z0-9_]+', text)
+
+
+def linkedin_issues(text: str) -> list[str]:
+    issues = []
+    if len(text) > LINKEDIN_CHAR_LIMIT:
+        issues.append(f'length {len(text)} exceeds {LINKEDIN_CHAR_LIMIT}')
+    if len(extract_hashtags(text)) > LINKEDIN_MAX_HASHTAGS:
+        issues.append(f'more than {LINKEDIN_MAX_HASHTAGS} hashtags')
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in LINKEDIN_COMMENT_PATTERNS):
+        issues.append('mentions comments or first comment')
+    if '\u2014' in text:
+        issues.append('contains em dash')
+    if '---' in text:
+        issues.append('contains divider line')
+    return issues
+
+
+def fallback_linkedin_cleanup(text: str) -> str:
+    cleaned = text.replace('\r\n', '\n').strip()
+    cleaned = re.sub(r'\n?---\n?', '\n\n', cleaned)
+
+    kept_lines = []
+    hashtag_lines = []
+    for raw_line in cleaned.split('\n'):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in LINKEDIN_COMMENT_PATTERNS):
+            continue
+        if line.startswith('#'):
+            hashtag_lines.extend(extract_hashtags(line))
+            continue
+        kept_lines.append(line)
+
+    hashtags = []
+    for tag in hashtag_lines:
+        if tag not in hashtags:
+            hashtags.append(tag)
+        if len(hashtags) >= LINKEDIN_MAX_HASHTAGS:
+            break
+
+    result = '\n\n'.join(kept_lines).strip()
+    if hashtags:
+        result = f"{result}\n\n{' '.join(hashtags[:LINKEDIN_MAX_HASHTAGS])}"
+
+    if len(result) <= LINKEDIN_CHAR_LIMIT:
+        return result
+
+    tag_block = ''
+    if hashtags:
+        tag_block = f"\n\n{' '.join(hashtags[:LINKEDIN_MAX_HASHTAGS])}"
+    budget = LINKEDIN_TARGET_CHARS - len(tag_block)
+    budget = max(200, budget)
+    trimmed = result[:budget].rstrip()
+    last_break = max(trimmed.rfind('\n\n'), trimmed.rfind('. '))
+    if last_break > 200:
+        trimmed = trimmed[:last_break].rstrip()
+    return f"{trimmed}{tag_block}".strip()
+
+
+def normalize_linkedin_post(client: Anthropic | None, text: str, title: str = '') -> str:
+    normalized = text.strip()
+    for _ in range(3):
+        issues = linkedin_issues(normalized)
+        if not issues:
+            return normalized
+        if client is None:
+            break
+        prompt = f"""Rewrite this LinkedIn post so it meets every constraint.
+
+Title: {title or 'LinkedIn post'}
+
+{LINKEDIN_VOICE_BRIEF}
+
+Constraints:
+- Keep the same core hook, insight, and exploratory tone
+- Maximum {LINKEDIN_TARGET_CHARS} characters total
+- Maximum {LINKEDIN_MAX_HASHTAGS} hashtags
+- No mention of comments, first comment, or "dropping it in the comments"
+- No em dashes
+- No divider line like ---
+- End with either one practical takeaway or one narrow discussion question
+- If the post makes a technical point, ground it in mechanism or architecture instead of broad advice
+- Return only the rewritten post text
+
+Issues to fix: {', '.join(issues)}
+
+Current post:
+{normalized}
+"""
+        response = client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=500,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        normalized = response.content[0].text.strip()
+
+    return fallback_linkedin_cleanup(normalized)
+
+
 def generate_linkedin(client: Anthropic, title: str, body: str, tags: str) -> str:
     prompt = f"""Write a LinkedIn post (800-1200 characters) based on this blog post.
 
@@ -132,13 +254,19 @@ Tags: {tags}
 Content:
 {body[:2000]}
 
+{LINKEDIN_VOICE_BRIEF}
+
 Rules:
-- Hook in first line (no "I" opener, no question as opener)
-- Share a specific insight or story, not a summary
-- End with one practical takeaway
+- Open with either a sharp observed pattern, a concrete failure, or a specific story beat
+- Share a specific insight or story, not a summary of the article
+- Sound like someone building real systems and revising their thinking in public
+- Senior signal should come from tradeoffs, mechanisms, and judgment, not jargon or certainty
+- If the topic touches AI, software, or productivity, talk about the control surface around the work: context, routing, verification, memory, handoffs, constraints, or observability when relevant
+- End with one practical takeaway or one narrow discussion question
 - No hashtags in the text (save for end, max 3)
 - No em dashes, no "leverage", no "robust", no "game-changer"
-- Sound like a practitioner, not a marketer
+- No mention of comments, first comment, or "dropping it in the comments"
+- Avoid sweeping declarations like "this is why everyone should" or "99% of people"
 - Return only the post text."""
 
     response = client.messages.create(
@@ -254,6 +382,8 @@ def repurpose_file(filepath: str, client: Anthropic, conn) -> int:
         pinterest_content = check_and_fix_voice(client, pinterest_content, 'pinterest')
         # Twitter is JSON array — check the raw string
         twitter_content = check_and_fix_voice(client, twitter_content, 'twitter')
+
+    linkedin_content = normalize_linkedin_post(client, linkedin_content, title)
 
     # Scheduled times
     linkedin_at = next_weekday_at(0, 10)   # Monday 10am PST

@@ -47,6 +47,7 @@ from .telegram_approver import TelegramApprover
 from .slack_notifier import SlackNotifier
 from .chainlink_feed import ChainlinkFeed
 from .market_maker import MarketMaker
+from .ensemble_shadow import BTC5MEnsembleShadow
 from .signal_pipeline import (
     build_entry_metadata,
     build_signal_log_features,
@@ -111,6 +112,9 @@ class SignalBot:
         self._logger = setup_logger("polyphemus.bot")
         self._db_path = os.path.join(config.lagbot_data_dir, "performance.db")
         self._tuning_state_path = os.path.join(config.lagbot_data_dir, "tuning_state.json")
+        self._config_label = config.config_label or ""
+        self._config_era = config.get_config_era_tag()
+        self._instance_name = config.get_instance_name()
 
         # 1. Position store
         self._store = PositionStore()
@@ -371,6 +375,7 @@ class SignalBot:
         # 13b. Data science modules (all optional, graceful degradation)
         self._signal_logger = None
         self._btc5m_evidence = None
+        self._btc5m_ensemble_shadow = None
         self._signal_scorer = None
         self._fill_optimizer = None
         self._regime_detector = None
@@ -387,6 +392,12 @@ class SignalBot:
                     "BTC5MEvidenceEngine ENABLED (mode=%s, min_samples=%s)",
                     config.btc5m_evidence_mode,
                     config.btc5m_evidence_min_samples,
+                )
+            if config.enable_btc5m_ensemble_shadow:
+                self._btc5m_ensemble_shadow = BTC5MEnsembleShadow(logger=self._logger)
+                self._logger.info(
+                    "BTC5MEnsembleShadow ENABLED (mode=%s)",
+                    config.btc5m_ensemble_mode,
                 )
 
         if config.enable_regime_detection:
@@ -799,10 +810,10 @@ class SignalBot:
         *,
         market_context: dict,
         regime,
-    ) -> int:
+    ) -> tuple[int, object | None]:
         """Log the normalized signal once, then attach evidence annotations."""
         if not self._signal_logger:
-            return -1
+            return -1, None
 
         signal_id = self._signal_logger.log_signal(
             build_signal_log_features(
@@ -810,10 +821,28 @@ class SignalBot:
                 guard_result,
                 market_context=market_context,
                 regime=regime,
+                config_label=getattr(self, "_config_label", ""),
+                config_era=getattr(self, "_config_era", ""),
+                instance_name=getattr(self, "_instance_name", ""),
             )
         )
         if signal_id <= 0:
-            return signal_id
+            return signal_id, None
+
+        slug = signal.get("slug", "")
+        parts = slug.rsplit("-", 1) if slug else []
+        if len(parts) == 2 and parts[1].isdigit():
+            epoch = int(parts[1])
+            try:
+                self._signal_logger.update_epoch_outcome(
+                    epoch=epoch,
+                    asset=signal.get("asset", ""),
+                    window_secs=int(signal.get("market_window_secs") or 0),
+                    bot_saw_signal=True,
+                    bot_signal_source=signal.get("source", ""),
+                )
+            except Exception:
+                pass
 
         evidence_engine = getattr(self, "_btc5m_evidence", None)
         if evidence_engine:
@@ -829,7 +858,32 @@ class SignalBot:
                     signal.get("slug", "unknown"),
                     evidence_verdict.reason,
                 )
-        return signal_id
+        ensemble_shadow = getattr(self, "_btc5m_ensemble_shadow", None)
+        ensemble_verdict = None
+        if ensemble_shadow:
+            ensemble_verdict = ensemble_shadow.evaluate(
+                signal,
+                signal_id,
+                signal_logger=self._signal_logger,
+            )
+            if ensemble_verdict:
+                self._signal_logger.update_signal(signal_id, ensemble_verdict.as_signal_updates())
+        return signal_id, ensemble_verdict
+
+    def _ensemble_admission_enabled(self) -> bool:
+        return bool(getattr(self._config, "btc5m_ensemble_admission_enabled", False))
+
+    def _should_apply_ensemble_admission(self, signal: dict) -> bool:
+        return (
+            self._ensemble_admission_enabled()
+            and signal.get("asset") == "BTC"
+            and int(signal.get("market_window_secs") or 0) == 300
+            and signal.get("source") == "binance_momentum"
+            and not signal.get("shadow")
+        )
+
+    def _ensemble_admission_passed(self, ensemble_verdict) -> bool:
+        return bool(ensemble_verdict and getattr(ensemble_verdict, "ensemble_selected", False))
 
     def _prepare_entry_signal(self, signal: dict) -> dict:
         """Attach stable metadata before handoff to the executor."""
@@ -882,18 +936,20 @@ class SignalBot:
             result = self._guard.check(signal)
             signal_id = -1
             if self._signal_logger:
-                signal_id = self._log_signal_observation(
+                signal_id, ensemble_verdict = self._log_signal_observation(
                     signal,
                     result,
                     market_context=market_context,
                     regime=regime,
                 )
-                self._mark_signal_stage(
-                    signal_id,
-                    "guard",
-                    "passed" if result.passed else "filtered",
-                    ",".join(result.reasons) if result.reasons else "guard_passed",
-                )
+            else:
+                ensemble_verdict = None
+            self._mark_signal_stage(
+                signal_id,
+                "guard",
+                "passed" if result.passed else "filtered",
+                ",".join(result.reasons) if result.reasons else "guard_passed",
+            )
 
             # Shadow mode: log signal but don't execute
             if signal.get("shadow"):
@@ -925,6 +981,25 @@ class SignalBot:
                     f"Reasons: {reason_text}"
                 )
                 return
+
+            if self._should_apply_ensemble_admission(signal):
+                if not self._ensemble_admission_passed(ensemble_verdict):
+                    detail = "shadow_ensemble_selected=0"
+                    if self._signal_logger and signal_id > 0:
+                        self._signal_logger.update_signal(signal_id, {"outcome": "ensemble_filtered"})
+                    self._mark_signal_stage(signal_id, "ensemble_admission", "filtered", detail)
+                    self._logger.info(
+                        "BTC5m ensemble admission filtered: %s | %s",
+                        signal.get("slug", "unknown"),
+                        detail,
+                    )
+                    return
+                self._mark_signal_stage(
+                    signal_id,
+                    "ensemble_admission",
+                    "passed",
+                    "shadow_ensemble_selected=1",
+                )
 
             # 2. Binance momentum confirmation (skip if signal IS from momentum feed)
             asset = signal.get('asset', '')

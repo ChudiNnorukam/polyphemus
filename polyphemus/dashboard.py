@@ -306,7 +306,13 @@ class Dashboard:
                     {expr("evidence_verdict", "''")},
                     {expr("evidence_r8_label", "''")},
                     {expr("evidence_reason", "''")},
-                    {expr("evidence_match_level", "''")}
+                    {expr("evidence_match_level", "''")},
+                    {expr("shadow_current_guarded", "0")},
+                    {expr("shadow_ensemble_candidate", "0")},
+                    {expr("shadow_ensemble_selected", "0")},
+                    {expr("shadow_ensemble_score", "0")},
+                    {expr("shadow_ensemble_reason", "''")},
+                    {expr("config_era", "''")}
                 FROM signals
                 ORDER BY epoch DESC
                 LIMIT ?
@@ -614,6 +620,34 @@ class Dashboard:
                     """,
                     (cutoff,),
                 ) or 0)
+                if "shadow_ensemble_selected" in signal_columns:
+                    counts[f"ensemble_selected_{label}"] = int(query_scalar(
+                        sig_conn,
+                        """
+                        SELECT COUNT(*)
+                        FROM signals
+                        WHERE asset = 'BTC' AND market_window_secs = 300
+                          AND epoch >= ?
+                          AND COALESCE(shadow_ensemble_selected, 0) = 1
+                        """,
+                        (cutoff,),
+                    ) or 0)
+                else:
+                    counts[f"ensemble_selected_{label}"] = 0
+                if "shadow_current_guarded" in signal_columns:
+                    counts[f"current_guarded_{label}"] = int(query_scalar(
+                        sig_conn,
+                        """
+                        SELECT COUNT(*)
+                        FROM signals
+                        WHERE asset = 'BTC' AND market_window_secs = 300
+                          AND epoch >= ?
+                          AND COALESCE(shadow_current_guarded, 0) = 1
+                        """,
+                        (cutoff,),
+                    ) or 0)
+                else:
+                    counts[f"current_guarded_{label}"] = 0
 
             last_btc_decision = query_scalar(
                 sig_conn,
@@ -1406,6 +1440,8 @@ async function fetchAll(){
         +'<div><span class="label">Decisions 15m / 1h</span><span>'+(counts.decisions_15m||0)+' / '+(counts.decisions_1h||0)+'</span></div>'
         +'<div><span class="label">Momentum 1h</span><span>'+(counts.momentum_1h||0)+'</span></div>'
         +'<div><span class="label">Passed 1h / 6h</span><span>'+(counts.passed_1h||0)+' / '+(counts.passed_6h||0)+'</span></div>'
+        +'<div><span class="label">Current Guarded 1h / 6h</span><span>'+(counts.current_guarded_1h||0)+' / '+(counts.current_guarded_6h||0)+'</span></div>'
+        +'<div><span class="label">Ensemble Selected 1h / 6h</span><span>'+(counts.ensemble_selected_1h||0)+' / '+(counts.ensemble_selected_6h||0)+'</span></div>'
         +'<div><span class="label">Trades 1h / 6h</span><span>'+(counts.trades_1h||0)+' / '+(counts.trades_6h||0)+'</span></div>'
         +'</div>';
       if(blockers.length){

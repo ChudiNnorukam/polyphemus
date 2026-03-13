@@ -9,6 +9,7 @@ import pytest
 from polyphemus.signal_bot import SignalBot
 from polyphemus.signal_logger import SignalLogger
 from polyphemus.signal_pipeline import normalize_signal
+from polyphemus.ensemble_shadow import BTC5MEnsembleShadow
 from polyphemus.types import FilterResult
 
 
@@ -115,3 +116,138 @@ async def test_signal_bot_logs_pipeline_stage_for_guard_rejection(tmp_path: Path
     assert row[5] == "filtered"
     assert "derived_asset" in row[6]
     assert "derived_market_window" in row[6]
+
+
+@pytest.mark.asyncio
+async def test_signal_bot_filters_non_selected_ensemble_live_candidate(tmp_path: Path):
+    logger = SignalLogger(str(tmp_path / "signals.db"))
+    bot = SignalBot.__new__(SignalBot)
+    bot._config = SimpleNamespace(
+        market_context_path=str(tmp_path / "missing_context.json"),
+        btc5m_ensemble_admission_enabled=True,
+    )
+    bot._logger = MagicMock()
+    bot._regime_detector = None
+    bot._signal_logger = logger
+    bot._btc5m_evidence = None
+    bot._btc5m_ensemble_shadow = MagicMock()
+    bot._btc5m_ensemble_shadow.evaluate.return_value = SimpleNamespace(
+        ensemble_selected=False,
+        as_signal_updates=lambda: {"shadow_ensemble_selected": 0},
+    )
+    bot._guard = MagicMock()
+    bot._guard.check.return_value = FilterResult(passed=True, reasons=[], context={})
+    bot._health = MagicMock()
+    bot._binance_feed = None
+    bot._signal_scorer = None
+    bot._trading_halted = False
+    bot._circuit_breaker = MagicMock()
+    bot._balance = MagicMock()
+    bot._executor = MagicMock()
+    bot._dry_run = False
+    bot._telegram = SimpleNamespace(enabled=False)
+
+    epoch = int(time.time()) - 15
+    await SignalBot._on_signal(
+        bot,
+        {
+            "slug": f"btc-updown-5m-{epoch}",
+            "midpoint": 0.74,
+            "outcome": "up",
+            "source": "binance_momentum",
+            "token_id": "token-1",
+        },
+    )
+
+    row = logger._conn.execute(
+        """
+        SELECT outcome, pipeline_stage, pipeline_status, shadow_ensemble_selected
+        FROM signals
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    logger.close()
+
+    assert row == ("ensemble_filtered", "ensemble_admission", "filtered", 0)
+
+
+def test_signal_logger_log_epoch_persists_config_tags(tmp_path: Path):
+    logger = SignalLogger(str(tmp_path / "signals.db"))
+    logger.log_epoch(
+        epoch=1773300000,
+        asset="BTC",
+        window_secs=300,
+        bot_saw_signal=True,
+        bot_signal_source="binance_momentum",
+        instance_name="emmanuel",
+        config_label="shadow_lab",
+        config_era="abc123def456",
+    )
+
+    row = logger._conn.execute(
+        """
+        SELECT bot_saw_signal, bot_signal_source, instance_name, config_label, config_era
+        FROM epoch_coverage
+        WHERE epoch = 1773300000 AND asset = 'BTC' AND window_secs = 300
+        """
+    ).fetchone()
+    logger.close()
+    assert row == (1, "binance_momentum", "emmanuel", "shadow_lab", "abc123def456")
+
+
+def test_ensemble_shadow_reselects_higher_scoring_candidate(tmp_path: Path):
+    logger = SignalLogger(str(tmp_path / "signals.db"))
+    first_id = logger.log_signal(
+        {"slug": "btc-updown-5m-1773300300", "asset": "BTC", "direction": "Up"}
+    )
+    second_id = logger.log_signal(
+        {"slug": "btc-updown-5m-1773300300", "asset": "BTC", "direction": "Up"}
+    )
+    engine = BTC5MEnsembleShadow()
+
+    first = engine.evaluate(
+        {
+            "slug": "btc-updown-5m-1773300300",
+            "asset": "BTC",
+            "market_window_secs": 300,
+            "source": "binance_momentum",
+            "outcome": "Up",
+            "price": 0.79,
+            "time_remaining_secs": 220,
+            "momentum_pct": 0.002,
+            "regime": "trending",
+        },
+        first_id,
+        signal_logger=logger,
+    )
+    second = engine.evaluate(
+        {
+            "slug": "btc-updown-5m-1773300300",
+            "asset": "BTC",
+            "market_window_secs": 300,
+            "source": "window_delta",
+            "outcome": "Up",
+            "price": 0.61,
+            "time_remaining_secs": 90,
+            "momentum_pct": 0.004,
+            "regime": "volatile",
+        },
+        second_id,
+        signal_logger=logger,
+    )
+
+    row_first = logger._conn.execute(
+        "SELECT shadow_ensemble_selected FROM signals WHERE id = ?",
+        (first_id,),
+    ).fetchone()
+    row_second = logger._conn.execute(
+        "SELECT shadow_ensemble_selected, shadow_ensemble_candidate FROM signals WHERE id = ?",
+        (second_id,),
+    ).fetchone()
+    logger.close()
+
+    assert first is not None and first.ensemble_selected
+    assert second is not None and second.ensemble_selected
+    assert row_first == (0,)
+    assert row_second == (1, 1)

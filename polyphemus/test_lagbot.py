@@ -946,6 +946,12 @@ class TestBinanceMomentumFeed:
             dual_window_assets="",
             min_secs_remaining=60,
             entry_mode="maker",
+            enable_window_delta=False,
+            window_delta_shadow=True,
+            window_delta_lead_secs=10,
+            window_delta_min_pct=0.001,
+            window_delta_assets="",
+            window_delta_max_price=0.95,
         )
         config_defaults.update(config_overrides)
         config = make_config(**config_defaults)
@@ -1205,6 +1211,46 @@ class TestBinanceMomentumFeed:
         assert BINANCE_TO_ASSET["ethusdt"] == "ETH"
         assert BINANCE_TO_ASSET["solusdt"] == "SOL"
         assert BINANCE_TO_ASSET["xrpusdt"] == "XRP"
+
+    def test_window_open_price_uses_first_buffer_price_in_epoch(self):
+        feed, _, _ = self._make_feed(enable_window_delta=True)
+        epoch = 1_773_320_400
+        feed._price_buffers["btcusdt"].extend([
+            (epoch - 1, 99.0),
+            (epoch + 1, 100.0),
+            (epoch + 20, 100.3),
+        ])
+
+        open_price = feed._get_window_open_price("btcusdt", epoch)
+
+        assert open_price == 100.0
+
+    @pytest.mark.asyncio
+    async def test_window_delta_uses_buffer_open_even_when_checked_late(self):
+        feed, _, _ = self._make_feed(
+            enable_window_delta=True,
+            window_delta_lead_secs=60,
+            window_delta_min_pct=0.001,
+        )
+        feed._generate_delta_signal = AsyncMock()
+        epoch = 1_773_320_400
+        now = epoch + 242  # 58s left
+        feed._price_buffers["btcusdt"].extend([
+            (epoch + 1, 100.0),
+            (epoch + 120, 100.05),
+            (now, 100.12),
+        ])
+        feed._window_open_prices[("BTC", epoch)] = 99.5  # stale/mis-seeded cache should be ignored
+
+        await feed._check_window_delta("btcusdt", now, 100.12)
+
+        feed._generate_delta_signal.assert_awaited_once()
+        args = feed._generate_delta_signal.await_args.args
+        assert args[0] == "BTC"
+        assert args[1] == "UP"
+        assert args[2] == f"btc-updown-5m-{epoch}"
+        assert args[3] == pytest.approx((100.12 - 100.0) / 100.0)
+        assert args[4] == pytest.approx(58.0)
 
     @pytest.mark.asyncio
     async def test_regime_detector_updated(self):

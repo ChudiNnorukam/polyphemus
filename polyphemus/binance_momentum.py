@@ -42,6 +42,9 @@ class BinanceMomentumFeed:
         self._on_signal = on_signal  # async callback
         self._signal_logger = signal_logger  # for dry-run signal tracking
         self._logger = setup_logger("polyphemus.momentum")
+        self._config_label = config.config_label or ""
+        self._config_era = config.get_config_era_tag()
+        self._instance_name = config.get_instance_name()
 
         # State persistence (prevents duplicate signals on restart)
         self._state_store = StateStore(data_dir=config.lagbot_data_dir, default_ttl_secs=3600)
@@ -69,6 +72,7 @@ class BinanceMomentumFeed:
 
         # Window Delta: track open prices per (asset, window_epoch)
         self._window_open_prices: Dict[tuple, float] = {}
+        self._last_epoch_coverage_logged: Dict[tuple, int] = {}
         self._delta_fired: Set[str] = set()  # slugs already fired for delta
         self._snipe_fired: Set[str] = set()  # slugs already fired for resolution snipe
         self._near_res_fired: Set[str] = set()  # epochs already fired for near-res pair arb
@@ -331,6 +335,8 @@ class BinanceMomentumFeed:
             self._market_prefetch_loop(),
             self._watch_new_markets(),
         ]
+        if self._config.enable_window_delta:
+            tasks.append(self._window_delta_loop())
         if self._config.coinbase_premium_enabled:
             tasks.append(self._coinbase_premium_loop())
         if self._config.enable_resolution_snipe:
@@ -421,15 +427,15 @@ class BinanceMomentumFeed:
                 now = time.time()
                 self._price_buffers[symbol].append((now, price))
                 self._sharp_buffers[symbol].append((now, price))
+                asset = BINANCE_TO_ASSET.get(symbol)
+                if asset:
+                    self._maybe_log_epoch_transition(asset, now, window=300)
                 if self._regime_detector:
-                    asset = BINANCE_TO_ASSET.get(symbol)
                     if asset:
                         self._regime_detector.update(asset, price, now)
                 await self._check_momentum(symbol, now, price)
                 if self._config.enable_sharp_move:
                     await self._check_sharp_move(symbol, now, price)
-                if self._config.enable_window_delta:
-                    await self._check_window_delta(symbol, now, price)
 
     async def _process_binance_update(self, data: dict) -> None:
         """Process a Binance kline or aggTrade update."""
@@ -454,10 +460,12 @@ class BinanceMomentumFeed:
         now = time.time()
         self._price_buffers[symbol].append((now, price))
         self._sharp_buffers[symbol].append((now, price))
+        asset = BINANCE_TO_ASSET.get(symbol)
+        if asset:
+            self._maybe_log_epoch_transition(asset, now, window=300)
 
         # Feed regime detector with every price tick
         if self._regime_detector:
-            asset = BINANCE_TO_ASSET.get(symbol)
             if asset:
                 self._regime_detector.update(asset, price, now)
 
@@ -467,10 +475,6 @@ class BinanceMomentumFeed:
         # Check sharp move (15s sub-window)
         if self._config.enable_sharp_move:
             await self._check_sharp_move(symbol, now, price)
-
-        # Check window delta (T-10 late entry)
-        if self._config.enable_window_delta:
-            await self._check_window_delta(symbol, now, price)
 
     def _process_aggtrade(self, data: dict) -> None:
         """Accumulate taker buy/sell volume from aggTrade events."""
@@ -1101,6 +1105,18 @@ class BinanceMomentumFeed:
     # Window Delta: Buy winning side at T-N seconds before 5m window close
     # ========================================================================
 
+    def _get_window_open_price(self, symbol: str, epoch: int) -> Optional[float]:
+        """Derive the epoch open from buffered prices instead of first-check timing."""
+        buffer = self._price_buffers.get(symbol)
+        if buffer:
+            for ts, price in buffer:
+                if ts >= epoch and price > 0:
+                    return price
+        asset = BINANCE_TO_ASSET.get(symbol)
+        if not asset:
+            return None
+        return self._window_open_prices.get((asset, epoch))
+
     async def _check_window_delta(self, symbol: str, now: float, current_price: float) -> None:
         """At T-lead_secs before each 5m window close, buy the likely winner."""
         asset = BINANCE_TO_ASSET.get(symbol)
@@ -1121,11 +1137,12 @@ class BinanceMomentumFeed:
         window_end = current_epoch + window
         secs_to_end = window_end - now
 
-        # Record open price at start of each window (first tick after epoch boundary)
+        open_price = self._get_window_open_price(symbol, current_epoch)
         key = (asset, current_epoch)
-        if key not in self._window_open_prices:
+        if open_price is None or open_price <= 0:
             self._window_open_prices[key] = current_price
             return
+        self._window_open_prices[key] = open_price
 
         # Check if we're in the firing window
         lead = self._config.window_delta_lead_secs
@@ -1138,9 +1155,6 @@ class BinanceMomentumFeed:
             return
 
         # Check price direction
-        open_price = self._window_open_prices[key]
-        if open_price <= 0:
-            return
         pct_change = (current_price - open_price) / open_price
 
         if abs(pct_change) < self._config.window_delta_min_pct:
@@ -1157,6 +1171,35 @@ class BinanceMomentumFeed:
         )
 
         await self._generate_delta_signal(asset, direction, delta_slug, pct_change, secs_to_end, shadow=is_shadow)
+
+    async def _window_delta_loop(self) -> None:
+        """Evaluate window_delta on a fixed cadence instead of raw tick timing.
+
+        This keeps different instances from drifting just because one happened
+        to receive its first usable tick later in the final minute.
+        """
+        self._logger.info(
+            "Window delta loop started | lead=%ss | min_pct=%.3f%% | max_price=%.3f",
+            self._config.window_delta_lead_secs,
+            self._config.window_delta_min_pct * 100,
+            self._config.window_delta_max_price,
+        )
+        while True:
+            try:
+                now = time.time()
+                for symbol in BINANCE_SYMBOLS:
+                    asset = BINANCE_TO_ASSET.get(symbol)
+                    if not asset:
+                        continue
+                    price = self.get_latest_price(asset)
+                    if price is None or price <= 0:
+                        continue
+                    await self._check_window_delta(symbol, now, price)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._logger.warning(f"Window delta loop error: {e}")
+            await asyncio.sleep(1.0)
 
     async def _generate_delta_signal(self, asset: str, direction: str, slug: str,
                                       pct_change: float, secs_left: float,
@@ -2052,7 +2095,7 @@ class BinanceMomentumFeed:
 
     def _log_epoch_coverage(self, asset: str, current_epoch: int, prev_epoch: int, window: int) -> None:
         """Log epoch start and update previous epoch outcome for coverage analysis."""
-        if not self._signal_logger:
+        if not self._signal_logger or window != 300:
             return
         try:
             # Log new epoch with open prices
@@ -2061,13 +2104,16 @@ class BinanceMomentumFeed:
                 oracle_open = self._chainlink.get_window_open_price(current_epoch, window, asset)
             binance_symbol = ASSET_TO_BINANCE.get(asset)
             binance_open = None
-            if binance_symbol and binance_symbol in self._window_open_prices:
-                key = (asset, current_epoch)
-                binance_open = self._window_open_prices.get(key)
+            key = (asset, current_epoch)
+            if binance_symbol:
+                binance_open = self._get_window_open_price(binance_symbol, current_epoch) or self._window_open_prices.get(key)
 
             self._signal_logger.log_epoch(
                 epoch=current_epoch, asset=asset, window_secs=window,
                 oracle_open=oracle_open, binance_open=binance_open,
+                instance_name=self._instance_name,
+                config_label=self._config_label,
+                config_era=self._config_era,
             )
 
             # Update previous epoch with close data and outcome
@@ -2098,6 +2144,19 @@ class BinanceMomentumFeed:
             )
         except Exception as e:
             self._logger.debug(f"Epoch coverage log failed (non-fatal): {e}")
+
+    def _maybe_log_epoch_transition(self, asset: str, now: float, window: int = 300) -> None:
+        """Record BTC 5m epoch coverage from the always-on price path."""
+        if not self._signal_logger or window != 300:
+            return
+        current_epoch = (int(now) // window) * window
+        key = (asset.upper(), window)
+        if self._last_epoch_coverage_logged.get(key) == current_epoch:
+            return
+        prev_epoch = current_epoch - window
+        self._last_epoch_coverage_logged[key] = current_epoch
+        self._record_epoch_outcome(asset.upper(), prev_epoch, window)
+        self._log_epoch_coverage(asset.upper(), current_epoch, prev_epoch, window)
 
     # -----------------------------------------------------------------------
     # Build 6: Lag signal execution
@@ -2294,7 +2353,12 @@ class BinanceMomentumFeed:
         now = time.time()
         current_epoch = (int(now) // window) * window
         key = (asset.upper(), current_epoch)
-        open_price = self._window_open_prices.get(key)
+        symbol = ASSET_TO_BINANCE.get(asset.upper())
+        open_price = self._get_window_open_price(symbol, current_epoch) if symbol else None
+        if open_price:
+            self._window_open_prices[key] = open_price
+        else:
+            open_price = self._window_open_prices.get(key)
         if not open_price or open_price <= 0:
             return None
 

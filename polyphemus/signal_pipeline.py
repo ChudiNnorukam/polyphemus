@@ -143,6 +143,9 @@ def build_signal_log_features(
     *,
     market_context: Dict[str, Any] | None = None,
     regime=None,
+    config_label: str = "",
+    config_era: str = "",
+    instance_name: str = "",
 ) -> Dict[str, Any]:
     """Build a schema-compatible signal logger payload from a normalized signal."""
     market_context = market_context or {}
@@ -172,6 +175,9 @@ def build_signal_log_features(
         "pipeline_status": "passed" if guard_result.passed else "filtered",
         "pipeline_detail": ",".join(guard_result.reasons) if guard_result.reasons else "guard_passed",
         "noise_flags": ",".join(signal.get("noise_flags", [])),
+        "config_label": config_label,
+        "config_era": config_era,
+        "instance_name": instance_name,
     }
     if regime is not None:
         features["regime"] = getattr(regime, "regime", "")

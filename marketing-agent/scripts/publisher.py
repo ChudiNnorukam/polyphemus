@@ -12,7 +12,8 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -56,6 +57,10 @@ PINTEREST_ACCESS_TOKEN = os.environ.get('PINTEREST_ACCESS_TOKEN', '')
 PINTEREST_BOARD_ID = os.environ.get('PINTEREST_BOARD_ID', '')
 SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN', '')
 SLACK_CHANNEL_ID = os.environ.get('SLACK_CHANNEL_ID', '')
+LOCAL_TZ = ZoneInfo('America/Los_Angeles')
+LINKEDIN_ALLOWED_WEEKDAYS = {0, 1, 2, 3}  # Mon-Thu in local time
+LINKEDIN_POST_HOUR_LOCAL = 10
+LINKEDIN_POST_MINUTE_LOCAL = 0
 
 
 def get_db():
@@ -65,6 +70,80 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def parse_db_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def format_db_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def local_date_from_db_utc(value: str | None):
+    dt = parse_db_utc(value)
+    return dt.astimezone(LOCAL_TZ).date() if dt else None
+
+
+def next_linkedin_slot_local(start_date, occupied_dates: set):
+    candidate = start_date
+    while True:
+        if candidate.weekday() in LINKEDIN_ALLOWED_WEEKDAYS and candidate not in occupied_dates:
+            return candidate
+        candidate += timedelta(days=1)
+
+
+def normalize_linkedin_schedule(conn):
+    """Keep LinkedIn posting to one slot per local Mon-Thu day."""
+    rows = conn.execute("""
+        SELECT id, status, scheduled_at
+        FROM social_posts
+        WHERE platform='linkedin'
+          AND status IN ('approved', 'posted')
+        ORDER BY scheduled_at ASC, id ASC
+    """).fetchall()
+
+    occupied_dates = set()
+    updates = []
+    now_local_date = datetime.now(timezone.utc).astimezone(LOCAL_TZ).date()
+
+    for row in rows:
+        local_date = local_date_from_db_utc(row['scheduled_at'])
+        if local_date is None:
+            continue
+
+        if row['status'] == 'posted':
+            occupied_dates.add(local_date)
+            continue
+
+        if local_date.weekday() in LINKEDIN_ALLOWED_WEEKDAYS and local_date not in occupied_dates:
+            occupied_dates.add(local_date)
+            continue
+
+        start_date = max(local_date, now_local_date)
+        new_local_date = next_linkedin_slot_local(start_date, occupied_dates)
+        new_local_dt = datetime.combine(
+            new_local_date,
+            dt_time(LINKEDIN_POST_HOUR_LOCAL, LINKEDIN_POST_MINUTE_LOCAL),
+            tzinfo=LOCAL_TZ,
+        )
+        new_utc = format_db_utc(new_local_dt.astimezone(timezone.utc))
+        updates.append((new_utc, f'auto-rescheduled to {new_local_date.isoformat()} (Mon-Thu guard)', row['id']))
+        occupied_dates.add(new_local_date)
+
+    for scheduled_at, error_msg, row_id in updates:
+        conn.execute("""
+            UPDATE social_posts
+            SET scheduled_at=?, error=?
+            WHERE id=?
+        """, (scheduled_at, error_msg, row_id))
+
+    return updates
 
 
 def send_slack(msg: str):
@@ -271,6 +350,11 @@ def main():
 
     conn = get_db()
 
+    schedule_updates = normalize_linkedin_schedule(conn)
+    if schedule_updates:
+        conn.commit()
+        print(f"Rescheduled {len(schedule_updates)} LinkedIn post(s) onto Mon-Thu slots.")
+
     due_posts = conn.execute("""
         SELECT * FROM social_posts
         WHERE status = 'approved'
@@ -295,6 +379,10 @@ def main():
         platform_post_id, error = dispatch_post(dict(post))
 
         if platform_post_id and not error:
+            if DRY_RUN:
+                published_slugs.append(f"{post['platform']}:{post['source_slug']}")
+                print(f"    Dry run only. DB not updated.")
+                continue
             conn.execute("""
                 UPDATE social_posts
                 SET status='posted', platform_post_id=?, posted_at=?

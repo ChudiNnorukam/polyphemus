@@ -5,6 +5,7 @@ All operations are async and include proper timeout handling via ClobWrapper.
 """
 
 import asyncio
+import math
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -118,6 +119,29 @@ class PositionExecutor:
             "status_code=none",
         )
         return any(needle in text for needle in needles)
+
+    def _get_price_tick(self, signal: dict) -> float:
+        """Use exchange-provided tick size when available."""
+        meta = signal.get("metadata", {}) or {}
+        raw = meta.get("price_tick_size") or signal.get("price_tick_size") or 0.01
+        try:
+            tick = float(raw)
+        except (TypeError, ValueError):
+            tick = 0.01
+        return tick if tick > 0 else 0.01
+
+    def _quantize_price(self, price: float, tick: float, mode: str) -> float:
+        """Round prices to the market tick size instead of forcing 1-cent steps."""
+        tick = tick if tick > 0 else 0.01
+        units = price / tick
+        if mode == "down":
+            quantized = math.floor(units + 1e-9) * tick
+        elif mode == "up":
+            quantized = math.ceil(units - 1e-9) * tick
+        else:
+            quantized = round(units) * tick
+        quantized = round(quantized, 6)
+        return min(max(quantized, tick), 0.99)
 
     async def _build_btc5m_retry_plan(
         self,
@@ -288,6 +312,7 @@ class PositionExecutor:
         window = parse_window_from_slug(slug)
         retry_candidate = self._is_btc5m_retry_candidate(signal, window)
         use_maker = self._config.entry_mode == "maker"
+        price_tick = self._get_price_tick(signal)
 
         # Override: use taker on 5m markets (NOTE: 5m taker fees active since Feb 12 2026)
         if self._config.taker_on_5m and window <= 300:
@@ -369,22 +394,30 @@ class PositionExecutor:
             return fill_result
 
         if use_maker:
-            # Maker mode: place below midpoint to sit on the book (post-only)
-            live_midpoint = await self._clob.get_midpoint(token_id)
-            if live_midpoint <= 0:
-                msg = f"No midpoint for maker order: {slug}"
-                self._logger.warning(msg)
-                return ExecutionResult(success=False, error=msg)
-            offset = self._config.maker_offset
-            if self._fill_optimizer:
-                offset = self._fill_optimizer.select_offset()
-            maker_offset_used = offset
-            buy_price = round(live_midpoint - offset, 2)
-            buy_price = max(buy_price, 0.01)  # floor
-            self._logger.info(
-                f"Maker order: midpoint={live_midpoint:.4f}, "
-                f"offset={offset}, buy_price={buy_price}"
-            )
+            maker_override = sig_meta.get("maker_target_price")
+            if maker_override:
+                live_midpoint = signal.get("price", 0.0)
+                buy_price = self._quantize_price(float(maker_override), price_tick, mode="down")
+                self._logger.info(
+                    f"Maker order override: target={float(maker_override):.4f}, "
+                    f"tick={price_tick:.4f}, buy_price={buy_price:.4f}"
+                )
+            else:
+                # Maker mode: place below midpoint to sit on the book (post-only)
+                live_midpoint = await self._clob.get_midpoint(token_id)
+                if live_midpoint <= 0:
+                    msg = f"No midpoint for maker order: {slug}"
+                    self._logger.warning(msg)
+                    return ExecutionResult(success=False, error=msg)
+                offset = self._config.maker_offset
+                if self._fill_optimizer:
+                    offset = self._fill_optimizer.select_offset()
+                maker_offset_used = offset
+                buy_price = self._quantize_price(live_midpoint - offset, price_tick, mode="down")
+                self._logger.info(
+                    f"Maker order: midpoint={live_midpoint:.4f}, "
+                    f"offset={offset}, tick={price_tick:.4f}, buy_price={buy_price:.4f}"
+                )
             placement_result = await self._clob.place_order(
                 token_id=token_id,
                 price=buy_price,
@@ -402,13 +435,24 @@ class PositionExecutor:
             base_price = max(price, live_midpoint) if live_midpoint > 0 else price
             if is_snipe:
                 # Snipe: tight slippage — +$0.01 max, every cent matters at 0.90+
-                buy_price = round(min(price + 0.01, 0.99), 2)
+                buy_price = self._quantize_price(min(price + 0.01, 0.99), price_tick, mode="up")
+            elif sig_meta.get("is_weather"):
+                weather_slippage = max(price_tick * 2, 0.002)
+                buy_price = self._quantize_price(
+                    min(base_price + weather_slippage, price + weather_slippage, 0.99),
+                    price_tick,
+                    mode="up",
+                )
             else:
                 # +$0.02 on top of live price, but cap total overpay at $0.05 from signal
-                buy_price = round(min(base_price + 0.02, price + 0.05, 0.99), 2)
+                buy_price = self._quantize_price(
+                    min(base_price + 0.02, price + 0.05, 0.99),
+                    price_tick,
+                    mode="up",
+                )
             self._logger.info(
                 f"{'Snipe' if is_snipe else 'Smart'} slippage: signal={price}, "
-                f"midpoint={live_midpoint:.4f}, buy_price={buy_price} "
+                f"midpoint={live_midpoint:.4f}, tick={price_tick:.4f}, buy_price={buy_price} "
                 f"(max overpay ${0.01 if is_snipe else 0.05})"
             )
             placement_result = await self._clob.place_order(

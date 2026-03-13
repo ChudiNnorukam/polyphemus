@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import List
@@ -162,6 +164,7 @@ class Settings(BaseSettings):
     weather_exit_min_price: float = 0.45      # sell when price corrects to >= this
     weather_noaa_min_prob: float = 0.70       # min NOAA forecast probability to enter
     weather_min_edge: float = 0.08            # min edge (noaa_prob - market_price) to enter
+    weather_allow_complement: bool = False    # allow buying NO when the complement leg is mispriced
     weather_cities: str = "NYC,Chicago,Seattle,Atlanta,Dallas,Miami"
     weather_base_bet_pct: float = 0.015       # base position size (1.5% of balance)
     weather_max_bet_pct: float = 0.02         # max position size (2% of balance)
@@ -437,6 +440,12 @@ class Settings(BaseSettings):
 
     # Data science modules (all optional, graceful degradation)
     enable_signal_logging: bool = True    # Log ALL signals to SQLite for ML training
+    instance_name: str = ""
+    config_label: str = ""
+    enable_btc5m_ensemble_shadow: bool = False  # Compare a ranked BTC 5m shadow strategy against the live path
+    btc5m_ensemble_mode: str = "shadow"   # "shadow" only in first pass
+    btc5m_ensemble_admission_enabled: bool = False  # Narrow future live gate: only trade BTC 5m momentum when ensemble-selected
+    btc5m_ensemble_admission_mode: str = "shadow"   # "shadow" reserved for report-only planning, "active" blocks execution
     enable_btc5m_evidence_verdicts: bool = False  # Read-only BTC 5m cohort verdict logging
     btc5m_evidence_mode: str = "shadow"   # Reserved for future active gating, first pass is log-only
     btc5m_evidence_min_samples: int = 30  # Minimum comparable executed trades for non-anecdotal verdicts
@@ -548,6 +557,49 @@ class Settings(BaseSettings):
 
     def get_arb_assets(self) -> List[str]:
         return [a.strip() for a in self.arb_assets.split(',')]
+
+    def get_instance_name(self) -> str:
+        """Return an instance label for logging/reporting."""
+        if self.instance_name.strip():
+            return self.instance_name.strip()
+        data_dir = Path(self.lagbot_data_dir)
+        if data_dir.name and data_dir.name != "data":
+            return data_dir.name
+        return "default"
+
+    def get_config_era_tag(self) -> str:
+        """Return a stable hash of strategy-relevant settings for later replay."""
+        payload = {
+            "asset_filter": self.asset_filter,
+            "shadow_assets": self.shadow_assets,
+            "market_window_secs": self.market_window_secs,
+            "min_entry_price": self.min_entry_price,
+            "max_entry_price": self.max_entry_price,
+            "momentum_trigger_pct": self.momentum_trigger_pct,
+            "momentum_window_secs": self.momentum_window_secs,
+            "momentum_max_epoch_elapsed_secs": self.momentum_max_epoch_elapsed_secs,
+            "whipsaw_max_ratio": self.whipsaw_max_ratio,
+            "entry_mode": self.entry_mode,
+            "base_bet_pct": self.base_bet_pct,
+            "max_bet": self.max_bet,
+            "max_trade_amount": self.max_trade_amount,
+            "signal_mode": self.signal_mode,
+            "enable_window_delta": self.enable_window_delta,
+            "window_delta_shadow": self.window_delta_shadow,
+            "window_delta_max_price": self.window_delta_max_price,
+            "enable_resolution_snipe": self.enable_resolution_snipe,
+            "snipe_dry_run": self.snipe_dry_run,
+            "enable_btc5m_evidence_verdicts": self.enable_btc5m_evidence_verdicts,
+            "btc5m_evidence_mode": self.btc5m_evidence_mode,
+            "enable_btc5m_ensemble_shadow": self.enable_btc5m_ensemble_shadow,
+            "btc5m_ensemble_mode": self.btc5m_ensemble_mode,
+            "btc5m_ensemble_admission_enabled": self.btc5m_ensemble_admission_enabled,
+            "btc5m_ensemble_admission_mode": self.btc5m_ensemble_admission_mode,
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return digest[:12]
 
 
 

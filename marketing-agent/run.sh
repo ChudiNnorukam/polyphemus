@@ -39,6 +39,7 @@ if [ -z "$SCRIPT" ]; then
     echo "  social_analytics   -- Pull Pinterest pin analytics (--days N)"
     echo "  social_resolve     -- Print social media stats"
     echo "  social_review      -- Review pending posts before they go live (--list|--platform|--slug)"
+    echo "  linkedin_schedule_audit -- Verify Mon-Thu LinkedIn schedule (--limit N)"
     echo ""
     echo "Wing 4 (Digital Product Funnel):"
     echo "  funnel_webhook     -- Start webhook server (Gumroad + Stripe)"
