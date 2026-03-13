@@ -1,0 +1,29 @@
+{
+  "actionable_lessons": [
+    "Use execution-aware simulation instead of midpoint-only replay when judging strategy viability.",
+    "Model queue and fill uncertainty directly."
+  ],
+  "anti_patterns": [
+    "This does not mean a full LOB simulator is required before every decision.",
+    "Do not overfit on simulated microstructure without validating against real fills."
+  ],
+  "body": "Actionable lessons:\n- Use execution-aware simulation instead of midpoint-only replay when judging strategy viability.\n- Model queue and fill uncertainty directly.\n\nWhat it does not justify:\n- This does not mean a full LOB simulator is required before every decision.\n- Do not overfit on simulated microstructure without validating against real fills.",
+  "citation": "Simulating and Analyzing Order Book Data: The Queue-Reactive Model (https://arxiv.org/abs/1312.0563)",
+  "id": "queue-reactive-model",
+  "metadata": {
+    "source_type": "primary_paper"
+  },
+  "published_at": "2013-12-02",
+  "source_class": "external_primary",
+  "source_path": "kb/external/primary/source_manifest.json",
+  "source_url": "https://arxiv.org/abs/1312.0563",
+  "summary": "Order-book simulation framework focused on queue dynamics and local market-state evolution.",
+  "title": "Simulating and Analyzing Order Book Data: The Queue-Reactive Model",
+  "topics": [
+    "microstructure",
+    "orderbook",
+    "simulation"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:22:39.044260+00:00"
+}

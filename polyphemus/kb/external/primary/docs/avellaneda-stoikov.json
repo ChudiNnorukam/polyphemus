@@ -1,0 +1,29 @@
+{
+  "actionable_lessons": [
+    "Execution quality and inventory control are part of the strategy, not separate concerns.",
+    "Model late-entry and adverse-selection risk explicitly."
+  ],
+  "anti_patterns": [
+    "This paper is not a blueprint for blindly market making in Polymarket.",
+    "Do not import continuous-market assumptions without adaptation."
+  ],
+  "body": "Actionable lessons:\n- Execution quality and inventory control are part of the strategy, not separate concerns.\n- Model late-entry and adverse-selection risk explicitly.\n\nWhat it does not justify:\n- This paper is not a blueprint for blindly market making in Polymarket.\n- Do not import continuous-market assumptions without adaptation.",
+  "citation": "High-frequency Trading in a Limit Order Book (https://www.tandfonline.com/doi/abs/10.1080/14697680701381228)",
+  "id": "avellaneda-stoikov",
+  "metadata": {
+    "source_type": "primary_paper"
+  },
+  "published_at": "2008-01-01",
+  "source_class": "external_primary",
+  "source_path": "kb/external/primary/source_manifest.json",
+  "source_url": "https://www.tandfonline.com/doi/abs/10.1080/14697680701381228",
+  "summary": "Canonical paper on high-frequency execution, inventory risk, and quoting in limit-order-book markets.",
+  "title": "High-frequency Trading in a Limit Order Book",
+  "topics": [
+    "microstructure",
+    "execution",
+    "inventory"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:22:39.043035+00:00"
+}

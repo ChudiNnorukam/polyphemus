@@ -1,0 +1,24 @@
+{
+  "actionable_lessons": [
+    "Use audit_mismatch_status as current-state evidence before making any live recommendation."
+  ],
+  "anti_patterns": [
+    "Do not treat runtime snapshots as permanent truth; they must be refreshed."
+  ],
+  "body": "{\n  \"cached_recent_db_order_hashes_24h\": 0,\n  \"generated_at\": \"2026-03-13T02:21:32.101820+00:00\",\n  \"latest_evidence\": \"Permission denied, please try again.\\nPermission denied, please try again.\\nroot@82.24.19.114: Permission denied (publickey,password).\",\n  \"probable_cause\": \"no recent audit line found or SSH/journal access failed\",\n  \"recommended_next_step\": \"refresh caches and inspect recent CLOB order ids vs DB entry/exit hashes\",\n  \"ssh_ok\": false,\n  \"state\": \"unknown\"\n}",
+  "citation": "audit_mismatch_status",
+  "id": "runtime-audit_mismatch_status",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_runtime",
+  "source_path": "kb/internal/runtime/audit_mismatch_status.json",
+  "source_url": "",
+  "summary": "{\"cached_recent_db_order_hashes_24h\": 0, \"generated_at\": \"2026-03-13T02:21:32.101820+00:00\", \"latest_evidence\": \"Permission denied, please try again.\\nPermission denied, please try again.\\nroot@82.24.19.114: Permission denied (publickey,password).\", \"probable_cause\": \"no recent audit line found or SSH/journal access failed\", \"recommended_next_step\": \"refresh caches and inspect recent CLOB order ids vs DB entry/exit hashes\", \"ssh_ok\": false, \"state\": \"unknown\"}",
+  "title": "Audit Mismatch Status",
+  "topics": [
+    "runtime",
+    "current-state"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:21:32.123644+00:00"
+}

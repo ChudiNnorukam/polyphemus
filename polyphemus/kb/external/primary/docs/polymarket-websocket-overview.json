@@ -1,0 +1,29 @@
+{
+  "actionable_lessons": [
+    "Use the official stream model when reasoning about signal freshness and market-state observability.",
+    "Ground reconnect and stale-data handling in the actual WebSocket contract."
+  ],
+  "anti_patterns": [
+    "Streaming availability does not imply the local bot is consuming every event correctly.",
+    "This does not justify assuming no data loss."
+  ],
+  "body": "Actionable lessons:\n- Use the official stream model when reasoning about signal freshness and market-state observability.\n- Ground reconnect and stale-data handling in the actual WebSocket contract.\n\nWhat it does not justify:\n- Streaming availability does not imply the local bot is consuming every event correctly.\n- This does not justify assuming no data loss.",
+  "citation": "Polymarket WebSocket Overview (https://docs.polymarket.com/market-data/websocket/overview)",
+  "id": "polymarket-websocket-overview",
+  "metadata": {
+    "source_type": "official_docs"
+  },
+  "published_at": "",
+  "source_class": "external_primary",
+  "source_path": "kb/external/primary/source_manifest.json",
+  "source_url": "https://docs.polymarket.com/market-data/websocket/overview",
+  "summary": "Primary documentation for streaming Polymarket market data over WebSockets.",
+  "title": "Polymarket WebSocket Overview",
+  "topics": [
+    "polymarket",
+    "websocket",
+    "market-data"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:22:39.039068+00:00"
+}

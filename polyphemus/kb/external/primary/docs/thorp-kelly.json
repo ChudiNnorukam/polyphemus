@@ -1,0 +1,29 @@
+{
+  "actionable_lessons": [
+    "Use fractional sizing and survival-first logic when edge and variance are not stable.",
+    "Treat bankroll preservation as a first-order objective."
+  ],
+  "anti_patterns": [
+    "This does not justify running an unproven strategy live just because size is small.",
+    "Sizing discipline cannot rescue a negative expectancy process."
+  ],
+  "body": "Actionable lessons:\n- Use fractional sizing and survival-first logic when edge and variance are not stable.\n- Treat bankroll preservation as a first-order objective.\n\nWhat it does not justify:\n- This does not justify running an unproven strategy live just because size is small.\n- Sizing discipline cannot rescue a negative expectancy process.",
+  "citation": "The Kelly Criterion in Blackjack, Sports Betting, and the Stock Market (https://www.edwardothorp.com/books/kelly-capital-growth-investment-criterion/)",
+  "id": "thorp-kelly",
+  "metadata": {
+    "source_type": "primary_practitioner_reference"
+  },
+  "published_at": "",
+  "source_class": "external_primary",
+  "source_path": "kb/external/primary/source_manifest.json",
+  "source_url": "https://www.edwardothorp.com/books/kelly-capital-growth-investment-criterion/",
+  "summary": "Edward Thorp's practitioner reference on applying Kelly-style sizing under uncertainty.",
+  "title": "The Kelly Criterion in Blackjack, Sports Betting, and the Stock Market",
+  "topics": [
+    "risk",
+    "sizing",
+    "thorp"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:22:39.041929+00:00"
+}

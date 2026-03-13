@@ -1,0 +1,27 @@
+{
+  "actionable_lessons": [
+    "Generated: `2026-03-12 08:14:35 UTC`",
+    "Candidates scanned: `0`",
+    "Resolved epochs available: `0`",
+    "Date range: `unknown` -> `unknown`"
+  ],
+  "anti_patterns": [
+    "Do not treat a historical report as fresher than current runtime status."
+  ],
+  "body": "# BTC 5m Multi-Strategy Shadow Scan\n\n- Generated: `2026-03-12 08:14:35 UTC`\n- Candidates scanned: `0`\n- Resolved epochs available: `0`\n- Date range: `unknown` -> `unknown`\n- Simulation style: `1 share per chosen epoch, hold to resolution, gross PnL only`\n- Note: `No fees, slippage, partial fills, or opposite-side price reconstruction included`\n\n## Strategy Grid\n\n| Strategy | Principle | Trades | Win Rate | Avg PnL | Total PnL | ROI on Cost | Max DD | Trades/Day | Median Price | Median Time Left | R8 |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| baseline_binance_all | Raw trend-following baseline | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| current_guarded_shadow | Cost and timing discipline | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| early_quality_momentum | Trend strength plus early entry | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| microstructure_confirmed | Order-flow confirmation | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| trend_regime_only | Regime-aware trend trading | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| discount_window_delta | Late-entry value hunting | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| ensemble_ranked | Cross-source quality ranking | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| late_certainty_snipe | High-certainty late entry | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n\n## Best Candidates\n\n### baseline_binance_all\n- Principle: `Raw trend-following baseline`\n- Description: All BTC 5m binance_momentum candidates, no cost or timing discipline.\n- Result: `0` trades, `0.0%` WR, `$0.000` total gross PnL, `0.0%` ROI on deployed cost\n- Trade mix: `none`\n- Price buckets: `none`\n- Original statuses: `none`\n\n### current_guarded_shadow\n- Principle: `Cost and timing discipline`\n- Description: Binance momentum with price <= 0.80 and at least 210s remaining.\n- Result: `0` trades, `0.0%` WR, `$0.000` total gross PnL, `0.0%` ROI on deployed cost\n- Trade mix: `none`\n- Price buckets: `none`\n- Original statuses: `none`\n\n### early_quality_momentum\n- Principle: `Trend strength plus early entry`\n- Description: Binance momentum with >=0.30% momentum, price <= 0.75, and at least 240s remaining.\n- Result: `0` trades, `0.0%` WR, `$0.000` total gross PnL, `0.0%` ROI on deployed cost\n- Trade mix: `none`\n- Price buckets: `none`\n- Original statuses: `none`\n\n## Dataset Gaps\n\n- `epoch_coverage` is absent in both live snapshots, so this scan cannot score truly missed BTC 5m epochs that produced no logged signal at all.\n- Gross PnL only: shadow candidates do not include real fill quality, fees, cancellations, or slippage.\n- Opposite-side prices are not stored per signal, so this scan cannot fairly simulate mean-reversion or side-flip strategies off the same order book.\n- There is no single terminal decision state per candidate across the whole history, so strategy attribution still depends on `status` plus stage logs rather than one canonical decision enum.\n- Config-era tagging is still incomplete, so this scan blends multiple live rule eras unless you filter by time range.\n\n## Recommendation\n\nPromote the top 1-2 strategies to a dedicated shadow comparison first. Do not treat the best gross backtest as production-ready until it survives fee-aware replay and current live shadow observation.",
+  "citation": "btc5m_strategy_shadow_scan_20260312_081435.md",
+  "id": "internal-report-btc5m-strategy-shadow-scan-20260312-081435",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_report",
+  "source_path": "dario_output/btc5m_strategy_shadow_scan_20260312_081435.md",
+  "source_url": "",
+  "summary": "# BTC 5m Multi-Strategy Shadow Scan - Generated: `2026-03-12 08:14:35 UTC` - Candidates scanned: `0`",
+  "title": "BTC 5m Multi-Strategy Shadow Scan",
+  "topics": [
+    "internal-report",
+    "analysis"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:21:24.350752+00:00"
+}

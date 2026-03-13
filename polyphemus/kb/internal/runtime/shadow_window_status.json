@@ -1,0 +1,24 @@
+{
+  "actionable_lessons": [
+    "Use shadow_window_status as current-state evidence before making any live recommendation."
+  ],
+  "anti_patterns": [
+    "Do not treat runtime snapshots as permanent truth; they must be refreshed."
+  ],
+  "body": "{\n  \"config_label\": \"btc5m_shadow_lab_v3\",\n  \"elapsed_hours\": 0.0,\n  \"epoch_coverage_by_instance\": {},\n  \"generated_at\": \"2026-03-13T02:21:24.505938+00:00\",\n  \"shared_config_era\": \"\",\n  \"signal_counts_by_instance\": {},\n  \"thresholds_met\": {\n    \"runtime_hours\": false,\n    \"shared_config_era\": false,\n    \"signal_count\": false\n  },\n  \"window_end\": null,\n  \"window_start\": null\n}",
+  "citation": "shadow_window_status",
+  "id": "runtime-shadow_window_status",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_runtime",
+  "source_path": "kb/internal/runtime/shadow_window_status.json",
+  "source_url": "",
+  "summary": "{\"config_label\": \"btc5m_shadow_lab_v3\", \"elapsed_hours\": 0.0, \"epoch_coverage_by_instance\": {}, \"generated_at\": \"2026-03-13T02:21:24.505938+00:00\", \"shared_config_era\": \"\", \"signal_counts_by_instance\": {}, \"thresholds_met\": {\"runtime_hours\": false, \"shared_config_era\": false, \"signal_count\": false}, \"window_end\": null, \"window_start\": null}",
+  "title": "Shadow Window Status",
+  "topics": [
+    "runtime",
+    "current-state"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:21:32.120807+00:00"
+}

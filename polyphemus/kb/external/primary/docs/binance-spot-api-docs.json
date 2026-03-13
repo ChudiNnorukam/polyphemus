@@ -1,0 +1,29 @@
+{
+  "actionable_lessons": [
+    "Ground signal-feed parsing and stream assumptions in the official Binance schema.",
+    "Use this source to validate delta windows, stream payloads, and reconnect semantics."
+  ],
+  "anti_patterns": [
+    "This does not prove Binance momentum predicts Polymarket resolution.",
+    "Do not confuse clean feed integration with alpha."
+  ],
+  "body": "Actionable lessons:\n- Ground signal-feed parsing and stream assumptions in the official Binance schema.\n- Use this source to validate delta windows, stream payloads, and reconnect semantics.\n\nWhat it does not justify:\n- This does not prove Binance momentum predicts Polymarket resolution.\n- Do not confuse clean feed integration with alpha.",
+  "citation": "Binance Spot API Documentation (https://github.com/binance/binance-spot-api-docs)",
+  "id": "binance-spot-api-docs",
+  "metadata": {
+    "source_type": "official_docs"
+  },
+  "published_at": "",
+  "source_class": "external_primary",
+  "source_path": "kb/external/primary/source_manifest.json",
+  "source_url": "https://github.com/binance/binance-spot-api-docs",
+  "summary": "Official Binance Spot API repository covering REST and WebSocket market-data contracts.",
+  "title": "Binance Spot API Documentation",
+  "topics": [
+    "binance",
+    "market-data",
+    "websocket"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:22:39.040560+00:00"
+}

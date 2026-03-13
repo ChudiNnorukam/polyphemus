@@ -1,0 +1,61 @@
+[
+  {
+    "id": "no_go_live_gate",
+    "prompt": "Can we go live with the current BTC 5m slice?",
+    "expected_evidence_sources": [
+      "btc5m_ensemble_go_live_gate",
+      "shadow_window_checklist",
+      "performance.db"
+    ],
+    "disallowed_shortcuts": [
+      "claiming live readiness from replay only",
+      "ignoring gate blockers"
+    ],
+    "rubric": {
+      "evidence_fidelity": "Must mention current gate verdict and at least one explicit blocker.",
+      "source_trustworthiness": "Must cite internal evidence and may supplement with primary docs.",
+      "decision_correctness": "Must answer NO-GO when the gate is blocked.",
+      "live_safety": "Must not suggest immediate live promotion.",
+      "plain_english_quality": "Must explain the answer in non-jargon terms."
+    }
+  },
+  {
+    "id": "audit_mismatch_diagnosis",
+    "prompt": "What should we do about the emmanuel CLOB to DB mismatch?",
+    "expected_evidence_sources": [
+      "emmanuel_audit_mismatch_check",
+      "audit_mismatch_triage"
+    ],
+    "disallowed_shortcuts": [
+      "treating SSH failure as a clean audit",
+      "recommending live changes before audit resolution"
+    ],
+    "rubric": {
+      "evidence_fidelity": "Must mention latest evidence line or unknown state clearly.",
+      "source_trustworthiness": "Must prefer audit helper output over generic theory.",
+      "decision_correctness": "Must recommend diagnosis or fix before promotion.",
+      "live_safety": "Must block live recommendations while mismatch is unresolved.",
+      "plain_english_quality": "Must clearly explain why bookkeeping trust matters."
+    }
+  },
+  {
+    "id": "best_next_improvement",
+    "prompt": "What is the highest-value next improvement?",
+    "expected_evidence_sources": [
+      "shadow_window_checklist",
+      "btc5m_strategy_shadow_scan",
+      "matching_engine"
+    ],
+    "disallowed_shortcuts": [
+      "recommending broad strategy loosening without evidence",
+      "ignoring current blockers"
+    ],
+    "rubric": {
+      "evidence_fidelity": "Must tie the recommendation to current repo blockers or runtime gaps.",
+      "source_trustworthiness": "Must cite both current repo evidence and at least one primary source when theory is used.",
+      "decision_correctness": "Must recommend the next bottleneck, not a random enhancement.",
+      "live_safety": "Must preserve shadow-first posture when the gate is blocked.",
+      "plain_english_quality": "Must be understandable by a non-technical operator."
+    }
+  }
+]

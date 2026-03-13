@@ -1,0 +1,29 @@
+{
+  "actionable_lessons": [
+    "Separate market-data, Gamma, and trading assumptions when building retrieval or execution workflows.",
+    "Use this as the canonical reference for API scope and integration boundaries."
+  ],
+  "anti_patterns": [
+    "An API introduction does not define exchange-state edge cases by itself.",
+    "Do not infer latency or fill quality from interface descriptions."
+  ],
+  "body": "Actionable lessons:\n- Separate market-data, Gamma, and trading assumptions when building retrieval or execution workflows.\n- Use this as the canonical reference for API scope and integration boundaries.\n\nWhat it does not justify:\n- An API introduction does not define exchange-state edge cases by itself.\n- Do not infer latency or fill quality from interface descriptions.",
+  "citation": "Polymarket API Introduction (https://docs.polymarket.com/api-reference/introduction)",
+  "id": "polymarket-api-introduction",
+  "metadata": {
+    "source_type": "official_docs"
+  },
+  "published_at": "",
+  "source_class": "external_primary",
+  "source_path": "kb/external/primary/source_manifest.json",
+  "source_url": "https://docs.polymarket.com/api-reference/introduction",
+  "summary": "Introduction to Polymarket APIs and service boundaries across market data and trading.",
+  "title": "Polymarket API Introduction",
+  "topics": [
+    "polymarket",
+    "api",
+    "rest"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:22:39.037309+00:00"
+}

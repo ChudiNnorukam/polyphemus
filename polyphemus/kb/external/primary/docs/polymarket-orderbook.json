@@ -1,0 +1,29 @@
+{
+  "actionable_lessons": [
+    "Use orderbook definitions to evaluate midpoint, best bid/ask, and safe price-cap logic.",
+    "Map execution assumptions to actual book mechanics before relaxing guards."
+  ],
+  "anti_patterns": [
+    "Orderbook semantics do not prove you can fill at midpoint.",
+    "Do not treat book snapshots as guaranteed executable prices."
+  ],
+  "body": "Actionable lessons:\n- Use orderbook definitions to evaluate midpoint, best bid/ask, and safe price-cap logic.\n- Map execution assumptions to actual book mechanics before relaxing guards.\n\nWhat it does not justify:\n- Orderbook semantics do not prove you can fill at midpoint.\n- Do not treat book snapshots as guaranteed executable prices.",
+  "citation": "Polymarket Orderbook (https://docs.polymarket.com/trading/orderbook)",
+  "id": "polymarket-orderbook",
+  "metadata": {
+    "source_type": "official_docs"
+  },
+  "published_at": "",
+  "source_class": "external_primary",
+  "source_path": "kb/external/primary/source_manifest.json",
+  "source_url": "https://docs.polymarket.com/trading/orderbook",
+  "summary": "Official documentation for orderbook behavior and trading primitives.",
+  "title": "Polymarket Orderbook",
+  "topics": [
+    "polymarket",
+    "orderbook",
+    "execution"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:22:39.039415+00:00"
+}

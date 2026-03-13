@@ -632,3 +632,71 @@
     - `../bot-dashboard/frontend/dist/Polyphemus Operator-0.1.0-arm64-mac.zip`
 - Current limitation:
   - the audit helper reports `unknown` when SSH credentials to `82.24.19.114` are unavailable locally, and the UI now surfaces that as a blocker rather than a clean pass
+
+## 2026-03-12 Principal-Grade Agent KB + RAG Training Stack
+
+- Added a repo-local KB structure:
+  - `kb/external/primary/`
+  - `kb/internal/reports/`
+  - `kb/internal/runtime/`
+  - `kb/playbooks/`
+- Pinned 20 first-degree external sources in:
+  - `kb/external/primary/source_manifest.json`
+- Added playbooks:
+  - `kb/playbooks/go_live_gating.md`
+  - `kb/playbooks/audit_mismatch_triage.md`
+  - `kb/playbooks/execution_failure_diagnosis.md`
+  - `kb/playbooks/signal_starvation_diagnosis.md`
+  - `kb/playbooks/strategy_promotion_review.md`
+- Added role packs and live-safety policy:
+  - `agent/roles/*.json`
+  - `agent/policy/live_trading_policy.md`
+- Added eval cases:
+  - `agent/evals/cases.json`
+- Added KB/RAG toolchain:
+  - `tools/kb_common.py`
+  - `tools/kb_ingest_external.py`
+  - `tools/kb_ingest_internal.py`
+  - `tools/kb_build_index.py`
+  - `tools/kb_query.py`
+  - `tools/kb_research_brief.py`
+  - `tools/kb_decision_memo.py`
+  - `tools/run_agent_evals.py`
+- Added focused KB tests:
+  - `tests/test_kb_tools.py`
+- Integrated KB surfaces into the desktop app:
+  - `../bot-dashboard/frontend/src/app/page.tsx`
+  - `../bot-dashboard/frontend/src/lib/desktop.ts`
+  - `../bot-dashboard/frontend/electron/main.js`
+  - `../bot-dashboard/frontend/electron/preload.js`
+- Desktop app now shows:
+  - `Research Brief`
+  - `Why Not Live Yet?`
+  - `Knowledge Sources`
+  - `Decision Memo`
+- Important implementation fixes:
+  - KB tools now support both script execution and package import
+  - KB runtime wrappers use temp `--json-out` files so mixed stdout tools still parse cleanly
+  - eval harness no longer falsely fails `NO-GO` responses just because the summary contains the token `NO-GO`
+- Generated/verified KB artifacts:
+  - external ingest bundle under `kb/external/primary/docs/`
+  - internal normalized docs under `kb/internal/reports/docs/`
+  - runtime snapshots under `kb/internal/runtime/`
+  - lexical index at `kb/index/kb_index.json`
+- Verification:
+  - `python3 -m py_compile` passed for the KB tools
+  - `kb_ingest_external.py --print-json` succeeded
+  - `kb_ingest_internal.py --print-json` succeeded
+  - `kb_build_index.py --print-json` succeeded
+  - `kb_query.py` returned internal evidence ahead of generic theory for live-status queries
+  - `kb_research_brief.py --print-json` succeeded
+  - `kb_decision_memo.py --print-json` succeeded
+  - `run_agent_evals.py` passed against a real generated decision memo JSON
+  - direct focused Python verification passed for:
+    - retrieval priority
+    - conservative `NO-GO` memo generation
+    - eval failure on unsafe live claims
+  - `npm run build` passed in `../bot-dashboard/frontend`
+- Current result:
+  - the training stack is live in-repo and in the desktop app
+  - it remains conservative by design and does not authorize live trading while the gate is still `NO-GO`

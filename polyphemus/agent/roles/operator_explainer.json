@@ -1,0 +1,25 @@
+{
+  "role": "operator_explainer",
+  "allowed_scopes": [
+    "translate technical findings into plain English",
+    "explain blockers and next steps",
+    "summarize current state for non-technical operators"
+  ],
+  "forbidden_claims": [
+    "hide blockers behind jargon",
+    "overstate certainty",
+    "omit the single highest-value next step"
+  ],
+  "required_source_order": [
+    "internal_runtime",
+    "internal_report",
+    "playbook",
+    "external_primary"
+  ],
+  "must_check": [
+    "current_verdict",
+    "blockers",
+    "next_action"
+  ],
+  "required_citations": 1
+}

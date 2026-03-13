@@ -1,0 +1,24 @@
+{
+  "actionable_lessons": [
+    "Use go_live_gate_status as current-state evidence before making any live recommendation."
+  ],
+  "anti_patterns": [
+    "Do not treat runtime snapshots as permanent truth; they must be refreshed."
+  ],
+  "body": "{\n  \"blockers\": [\n    \"no common config_era found for the requested instances/config_label\"\n  ],\n  \"config_era\": \"\",\n  \"config_label\": \"btc5m_shadow_lab_v3\",\n  \"gates\": {\n    \"execution_readiness\": {\n      \"reason\": \"no aligned data\",\n      \"status\": \"blocked\"\n    },\n    \"operational\": {\n      \"reason\": \"no aligned data\",\n      \"status\": \"blocked\"\n    },\n    \"sensor_integrity\": {\n      \"reason\": \"no common config_era found for the requested instances/config_label\",\n      \"status\": \"blocked\"\n    },\n    \"strategy_performance\": {\n      \"reason\": \"no aligned data\",\n      \"status\": \"blocked\"\n    }\n  },\n  \"verdict\": \"NO-GO\",\n  \"window_end\": null,\n  \"window_start\": null\n}",
+  "citation": "go_live_gate_status",
+  "id": "runtime-go_live_gate_status",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_runtime",
+  "source_path": "kb/internal/runtime/go_live_gate_status.json",
+  "source_url": "",
+  "summary": "{\"blockers\": [\"no common config_era found for the requested instances/config_label\"], \"config_era\": \"\", \"config_label\": \"btc5m_shadow_lab_v3\", \"gates\": {\"execution_readiness\": {\"reason\": \"no aligned data\", \"status\": \"blocked\"}, \"operational\": {\"reason\": \"no aligned data\", \"status\": \"blocked\"}, \"sensor_integrity\": {\"reason\": \"no common config_era found for the requested instances/config_label\", \"status\": \"blocked\"}, \"strategy_performance\": {\"reason\": \"no aligned data\", \"status\": \"blocked\"}}, \"ver",
+  "title": "Go Live Gate Status",
+  "topics": [
+    "runtime",
+    "current-state"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:21:32.123085+00:00"
+}

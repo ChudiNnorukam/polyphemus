@@ -1,0 +1,27 @@
+{
+  "actionable_lessons": [
+    "Generated: `2026-03-12 08:40:12 UTC`",
+    "Candidates scanned: `1361`",
+    "Resolved epochs available: `889`",
+    "Date range: `2026-02-26T00:22:54.170105+00:00` -> `2026-03-12T00:09:30.136777+00:00`"
+  ],
+  "anti_patterns": [
+    "Do not treat a historical report as fresher than current runtime status."
+  ],
+  "body": "# BTC 5m Multi-Strategy Shadow Scan\n\n- Generated: `2026-03-12 08:40:12 UTC`\n- Candidates scanned: `1361`\n- Resolved epochs available: `889`\n- Date range: `2026-02-26T00:22:54.170105+00:00` -> `2026-03-12T00:09:30.136777+00:00`\n- Simulation style: `1 share per chosen epoch, hold to resolution`\n- Net replay assumption: `0.10% fee on cost plus small per-source slippage penalty (window_delta/snipe > momentum)`\n- Note: `Still no partial fills, cancellation risk, or opposite-side price reconstruction included`\n\n## Strategy Grid\n\n| Strategy | Principle | Trades | Win Rate | Avg Net | Total Net | Net ROI | Total Gross | Gross ROI | Max DD | Trades/Day | Median Price | Median Time Left | R8 |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| discount_window_delta | Late-entry value hunting | 20 | 75.0% | $0.225 | $4.509 | 43.2% | $4.559 | 43.7% | $0.565 | 3.5 | 0.627 | 27s | ANECDOTAL n=20 |\n| ensemble_ranked | Cross-source quality ranking | 134 | 72.4% | $0.067 | $8.921 | 10.1% | $9.075 | 10.3% | $3.904 | 9.9 | 0.685 | 248s | MODERATE n=134 |\n| current_guarded_shadow | Cost and timing discipline | 92 | 68.5% | $0.035 | $3.224 | 5.4% | $3.330 | 5.6% | $3.904 | 6.8 | 0.685 | 271s | LOW n=92 |\n| baseline_binance_all | Raw trend-following baseline | 257 | 81.7% | $0.035 | $9.034 | 4.5% | $9.434 | 4.7% | $5.813 | 18.7 | 0.810 | 218s | MODERATE n=257 |\n| trend_regime_only | Regime-aware trend trading | 89 | 66.3% | $0.024 | $2.139 | 3.8% | $2.240 | 3.9% | $4.940 | 6.6 | 0.675 | 268s | LOW n=89 |\n| early_quality_momentum | Trend strength plus early entry | 65 | 63.1% | $0.011 | $0.717 | 1.8% | $0.790 | 2.0% | $4.616 | 5.0 | 0.655 | 282s | LOW n=65 |\n| microstructure_confirmed | Order-flow confirmation | 0 | 0.0% | $0.000 | $0.000 | 0.0% | $0.000 | 0.0% | $0.000 | 0.0 | 0.000 | 0s | ANECDOTAL n=0 |\n| late_certainty_snipe | High-certainty late entry | 204 | 93.6% | $-0.003 | $-0.629 | -0.3% | $0.174 | 0.1% | $2.687 | 35.7 | 0.935 | 32s | MODERATE n=204 |\n\n## Best Candidates\n\n### discount_window_delta\n- Principle: `Late-entry value hunting`\n- Description: Window-delta candidates only when the binary price is still <= 0.70.\n- Result: `20` trades, `75.0%` WR, `$4.509` total net PnL, `43.2%` net ROI on deployed cost\n- Trade mix: `window_delta (20)`\n- Price buckets: `0.60-0.79 (12), 0.00-0.39 (5), 0.40-0.59 (3)`\n- Original statuses: `shadow (20)`\n\n### ensemble_ranked\n- Principle: `Cross-source quality ranking`\n- Description: Take the single highest-scoring candidate per epoch across momentum, window_delta, and snipe, with a hard price cap of 0.82.\n- Result: `134` trades, `72.4%` WR, `$8.921` total net PnL, `10.1%` net ROI on deployed cost\n- Trade mix: `binance_momentum (134)`\n- Price buckets: `0.60-0.79 (83), 0.40-0.59 (36), 0.80-1.00 (11)`\n- Original statuses: `filtered (100), unlabeled (23), executed (9)`\n\n### current_guarded_shadow\n- Principle: `Cost and timing discipline`\n- Description: Binance momentum with price <= 0.80 and at least 210s remaining.\n- Result: `92` trades, `68.5%` WR, `$3.224` total net PnL, `5.4%` net ROI on deployed cost\n- Trade mix: `binance_momentum (92)`\n- Price buckets: `0.60-0.79 (63), 0.40-0.59 (26), 0.00-0.39 (2)`\n- Original statuses: `filtered (66), unlabeled (19), executed (6)`\n\n## Dataset Gaps\n\n- `epoch_coverage` is absent in both live snapshots, so this scan cannot score truly missed BTC 5m epochs that produced no logged signal at all.\n- Net replay is still approximate: fees/slippage are modeled heuristically, not from actual order-book fills.\n- Opposite-side prices are not stored per signal, so this scan cannot fairly simulate mean-reversion or side-flip strategies off the same order book.\n- There is no single terminal decision state per candidate across the whole history, so strategy attribution still depends on `status` plus stage logs rather than one canonical decision enum.\n- Config-era tagging is still incomplete, so this scan blends multiple live rule eras unless you filter by time range.\n\n## Recommendation\n\nPromote the top 1-2 strategies to a dedicated shadow comparison first. Do not treat the best gross backtest as production-ready until it survives fee-aware replay and current live shadow observation.",
+  "citation": "btc5m_strategy_shadow_scan_20260312_084012.md",
+  "id": "internal-report-btc5m-strategy-shadow-scan-20260312-084012",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_report",
+  "source_path": "dario_output/btc5m_strategy_shadow_scan_20260312_084012.md",
+  "source_url": "",
+  "summary": "# BTC 5m Multi-Strategy Shadow Scan - Generated: `2026-03-12 08:40:12 UTC` - Candidates scanned: `1361`",
+  "title": "BTC 5m Multi-Strategy Shadow Scan",
+  "topics": [
+    "internal-report",
+    "analysis"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:21:24.353063+00:00"
+}

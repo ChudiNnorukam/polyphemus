@@ -1,0 +1,27 @@
+{
+  "actionable_lessons": [
+    "Generated: `2026-03-12`",
+    "Scope: first live sample after deploying `btc5m_shadow_lab_v3` to `emmanuel` and `polyphemus`",
+    "Objective: compare fresh BTC 5m shadow coverage, ensemble selection, and signal starvation",
+    "BTC epochs logged under `btc5m_shadow_lab_v3`: `90`"
+  ],
+  "anti_patterns": [
+    "Do not treat a historical report as fresher than current runtime status."
+  ],
+  "body": "# BTC5M Shadow Lab v3 Initial Live Comparison\n\n- Generated: `2026-03-12`\n- Scope: first live sample after deploying `btc5m_shadow_lab_v3` to `emmanuel` and `polyphemus`\n- Objective: compare fresh BTC 5m shadow coverage, ensemble selection, and signal starvation\n\n## Headline\n\n`polyphemus` is currently the better BTC 5m research sensor.\n\nIt is seeing far more BTC epochs with signals than `emmanuel`, even though both instances are running the same shadow-lab config label and the same shared runtime code.\n\nNeither instance has produced a new real passed BTC candidate yet, so this is still a research/coverage result, not a live-profit result.\n\n## Live Sample Summary\n\n### emmanuel\n\n- BTC epochs logged under `btc5m_shadow_lab_v3`: `90`\n- BTC epochs with any logged signal: `11`\n- BTC signal coverage rate: `12.2%`\n- Tagged BTC signal rows: `17`\n- Ensemble candidates: `17`\n- Ensemble-selected rows: `7`\n- Current-guarded rows: `3`\n- Current pipeline status: `stalled`\n- Current interpretation: momentum source still starved, but ensemble logic is surfacing additional candidate epochs that the current guarded slice would miss\n\n### polyphemus\n\n- BTC epochs logged under `btc5m_shadow_lab_v3`: `90`\n- BTC epochs with any logged signal: `46`\n- BTC signal coverage rate: `51.1%`\n- Tagged BTC signal rows: `55`\n- Ensemble candidates: `55`\n- Ensemble-selected rows: `5`\n- Current-guarded rows: `2`\n- Current pipeline status: `guard_blocked`\n- Current interpretation: much better BTC shadow coverage than `emmanuel`, but the live path still dies at guard stage\n\n## What Improved\n\n- `epoch_coverage` is now live and tagged correctly on both instances.\n- Signals are now tagged with:\n  - `instance_name`\n  - `config_label`\n  - `config_era`\n  - ensemble-shadow annotations\n- The dashboard pipeline API now reflects the new comparison counts:\n  - `ensemble_selected_*`\n  - `current_guarded_*`\n\n## What The First Sample Says\n\n### 1. The ensemble path is already adding useful research signal\n\nEven in a small initial sample:\n\n- `emmanuel`: `7` ensemble-selected vs `3` current-guarded\n- `polyphemus`: `5` ensemble-selected vs `2` current-guarded\n\nPlain English: the ranked cross-source shadow model is finding more candidate epochs than the old guarded slice, without changing live execution behavior.\n\n### 2. `emmanuel` is still badly starved as a BTC sensor\n\nBoth instances logged the same number of BTC epochs (`90`), but:\n\n- `emmanuel` only saw BTC signals in `11`\n- `polyphemus` saw BTC signals in `46`\n\nThat gap is too large to explain away as noise. It strongly suggests a feed, trigger, or runtime-state difference still exists between the two instances.\n\n### 3. Coverage improved faster than trade readiness\n\nNeither instance has produced a fresh passed BTC candidate after rollout.\n\nPlain English: the new lab is collecting better evidence, but the guard/execution path is still too tight to create real tradable BTC momentum flow.\n\n## Most Important Current Risks\n\n- `emmanuel` still shows the pre-existing startup mismatch:\n  - `CLOB\u2194DB trade audit FAILED: CLOB has 1 trades in 24h but DB has 0`\n- `polyphemus` has better research coverage, but not yet better live convertibility\n- Most recent `window_delta` rows are still too late or too expensive to qualify for ensemble selection\n\n## Best Next Action\n\nAudit why `emmanuel` is seeing far fewer BTC signals than `polyphemus` under the same shadow-lab code.\n\nThe highest-value comparison is:\n\n- Binance/market feed freshness\n- market prefetch/cache state\n- shadow trigger generation by source\n- any per-instance config differences not covered by `config_label`\n\nUntil that is explained, `emmanuel` is not a trustworthy primary research box.",
+  "citation": "btc5m_shadow_lab_v3_initial_live_comparison_20260312.md",
+  "id": "internal-report-btc5m-shadow-lab-v3-initial-live-comparison-20260312",
+  "metadata": {},
+  "published_at": "",
+  "source_class": "internal_report",
+  "source_path": "dario_output/btc5m_shadow_lab_v3_initial_live_comparison_20260312.md",
+  "source_url": "",
+  "summary": "# BTC5M Shadow Lab v3 Initial Live Comparison - Generated: `2026-03-12` - Scope: first live sample after deploying `btc5m_shadow_lab_v3` to `emmanuel` and `polyphemus`",
+  "title": "BTC5M Shadow Lab v3 Initial Live Comparison",
+  "topics": [
+    "internal-report",
+    "analysis"
+  ],
+  "trust_tier": "T1",
+  "updated_at": "2026-03-13T02:21:24.349528+00:00"
+}

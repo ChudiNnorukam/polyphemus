@@ -1,0 +1,34 @@
+{
+  "generated_at": "2026-03-13T02:21:32.123964+00:00",
+  "report_doc_count": 21,
+  "report_docs": [
+    "internal-report-blocked-signal-relaxation-audit-20260311",
+    "internal-report-btc5m-ensemble-go-live-gate-20260312-164254",
+    "internal-report-btc5m-ensemble-go-live-gate-20260312-212651",
+    "internal-report-btc5m-ensemble-go-live-gate-20260313-022101",
+    "internal-report-btc5m-live-emmanuel-20260310",
+    "internal-report-btc5m-live-emmanuel-debug-20260310",
+    "internal-report-btc5m-live-ruleset-candidate-20260310",
+    "internal-report-btc5m-shadow-lab-v3-initial-live-comparison-20260312",
+    "internal-report-btc5m-strategy-shadow-scan-20260312-081336",
+    "internal-report-btc5m-strategy-shadow-scan-20260312-081435",
+    "internal-report-btc5m-strategy-shadow-scan-20260312-081516",
+    "internal-report-btc5m-strategy-shadow-scan-20260312-081720",
+    "internal-report-btc5m-strategy-shadow-scan-20260312-081818",
+    "internal-report-btc5m-strategy-shadow-scan-20260312-084012",
+    "internal-report-dario-btceth-5m-filter-20260220",
+    "internal-report-dario-full-codebase-audit-20260219",
+    "internal-report-dario-preflight-stages-20260219",
+    "internal-report-pnl-protection-package-20260310",
+    "internal-report-progress",
+    "internal-report-claude-memory-reconciliation",
+    "internal-report-btc5m-bot-improvement-plan"
+  ],
+  "runtime_doc_count": 4,
+  "runtime_docs": [
+    "shadow_window_status",
+    "shadow_window_checklist",
+    "go_live_gate_status",
+    "audit_mismatch_status"
+  ]
+}
