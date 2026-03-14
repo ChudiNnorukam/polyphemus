@@ -8,7 +8,7 @@
     "ensemble_selected_live_v1: sample size 10 < 30",
     "emmanuel: passed ensemble-selected BTC candidates 1 < 10"
   ],
-  "generated_at": "2026-03-13T05:10:04.020790+00:00",
+  "generated_at": "2026-03-14T07:30:17.203307+00:00",
   "kb_index_ready": true,
   "next_action": "Keep the aligned shadow window running and refresh caches again later.",
   "recommended_role": "quant_researcher",
@@ -17,52 +17,52 @@
   "source_freshness": {
     "audit_status": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.016075+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.198432+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/audit_mismatch_status.json"
     },
     "decision_memo": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.020059+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.202538+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/decision_memo.json"
     },
     "dependency_audit_status": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.018385+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.200556+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/dependency_audit_status.json"
     },
     "gate_status": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.015602+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.197907+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/go_live_gate_status.json"
     },
     "kb_index": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.003956+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.187618+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/index/kb_index.json"
     },
     "research_brief": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.019396+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.201855+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/research_brief.json"
     },
     "security_audit_status": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.017922+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.199007+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/security_audit_status.json"
     },
     "service_hardening_status": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.018544+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.200752+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/service_hardening_status.json"
     },
     "shadow_checklist": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.015958+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.198309+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/shadow_window_checklist.json"
     },
     "shadow_window_status": {
       "exists": true,
-      "mtime_iso": "2026-03-13T05:10:04.015785+00:00",
+      "mtime_iso": "2026-03-14T07:30:17.198126+00:00",
       "path": "/Users/chudinnorukam/Projects/business/polyphemus/kb/internal/runtime/current/shadow_window_status.json"
     }
   }
