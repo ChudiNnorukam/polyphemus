@@ -35,6 +35,7 @@ class MarketWS:
         self._bid_sizes: Dict[str, float] = {}   # top-of-book bid quantity
         self._ask_sizes: Dict[str, float] = {}   # top-of-book ask quantity
         self._last_update: Dict[str, float] = {}  # token_id -> epoch of last update
+        self._depth_timestamps: Dict[str, float] = {}  # token_id -> last book update time
         self._subscribed: Set[str] = set()
         self._pending_subscribe: Set[str] = set()  # tokens to sub on (re)connect
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -43,6 +44,8 @@ class MarketWS:
         self._update_count = 0
         self._price_event: Optional[asyncio.Event] = None  # Set on every price update
         self._connected_at: float = 0.0  # Track connection age for forced reconnects
+        # Full order book depth cache: token_id -> {'bids': [(price, size), ...], 'asks': [...], 'ts': float}
+        self._book_depth: Dict[str, dict] = {}
 
     async def start(self) -> None:
         """Connect and run the message loop with auto-reconnect."""
@@ -112,18 +115,94 @@ class MarketWS:
         return ask - bid
 
     def get_book_depth(self, token_id: str) -> Optional[dict]:
-        """Return top-of-book qty imbalance. None if no size data yet.
+        """Return top-of-book qty imbalance. None if no size data yet or stale (>10s).
 
         imbalance = bid_qty / (bid_qty + ask_qty)
         > 0.5 = buy pressure, < 0.5 = sell pressure.
         Only populated from 'book' snapshot messages (not price_change).
+        Returns None if depth data is stale (older than 10 seconds).
         """
         bid_q = self._bid_sizes.get(token_id, 0.0)
         ask_q = self._ask_sizes.get(token_id, 0.0)
         if bid_q <= 0 or ask_q <= 0:
             return None
+
+        # Check freshness: return None if depth is stale.
+        # Polymarket only sends 'book' snapshots on WS reconnect (every 300s).
+        # Staleness threshold matches MAX_CONNECTION_AGE so depth is valid
+        # for the full connection lifetime.
+        age = time.time() - self._depth_timestamps.get(token_id, 0)
+        if age > 300.0:
+            return None
+
         imbalance = bid_q / (bid_q + ask_q)
-        return {"bid_qty": bid_q, "ask_qty": ask_q, "imbalance": round(imbalance, 4)}
+        return {
+            "bid_qty": bid_q,
+            "ask_qty": ask_q,
+            "imbalance": round(imbalance, 4),
+            "age_secs": round(age, 2)
+        }
+
+    def get_full_depth(self, token_id: str) -> Optional[dict]:
+        """Return cached full order book depth or None if stale (>5s old).
+
+        Returns dict with keys:
+        - bids: list of (price, size) tuples sorted best-first (highest price first)
+        - asks: list of (price, size) tuples sorted best-first (lowest price first)
+        - ts: timestamp of book snapshot
+        """
+        depth = self._book_depth.get(token_id)
+        if depth is None:
+            return None
+
+        age = time.time() - depth.get("ts", 0)
+        if age > 5.0:
+            return None
+
+        return depth
+
+    def estimate_slippage(self, token_id: str, size_usdc: float, side: str) -> Optional[float]:
+        """Estimate price impact (slippage) for an order of given size.
+
+        Args:
+            token_id: Token ID to estimate slippage for
+            size_usdc: Order size in USDC (total notional)
+            side: "BUY" or "SELL"
+
+        Returns:
+            Estimated slippage as a fraction (e.g., 0.01 = 1% slippage).
+            None if book is unavailable or too shallow.
+        """
+        depth = self.get_full_depth(token_id)
+        if depth is None:
+            return None
+
+        if side.upper() == "BUY":
+            levels = depth.get("asks", [])
+        else:
+            levels = depth.get("bids", [])
+
+        if not levels:
+            return None
+
+        # Walk the book to accumulate size
+        accumulated_usdc = 0.0
+        final_price = None
+        for price, size in levels:
+            size_in_usdc = size * price
+            if accumulated_usdc + size_in_usdc >= size_usdc:
+                # This level fills the remaining order
+                remaining = size_usdc - accumulated_usdc
+                final_price = price
+                break
+            accumulated_usdc += size_in_usdc
+
+        if final_price is None:
+            return None
+
+        # Slippage = distance from best price to execution price
+        best_price = levels[0][0]
+        return abs(final_price - best_price) / best_price
 
     @property
     def is_connected(self) -> bool:
@@ -232,6 +311,19 @@ class MarketWS:
             self._bid_sizes[asset_id] = float(buys[0].get("size", 0))
         if sells:
             self._ask_sizes[asset_id] = float(sells[0].get("size", 0))
+
+        # Store full order book depth for slippage estimation
+        now = time.time()
+        bids = [(float(b["price"]), float(b.get("size", 0))) for b in buys]
+        asks = [(float(a["price"]), float(a.get("size", 0))) for a in sells]
+        self._book_depth[asset_id] = {
+            "bids": bids,
+            "asks": asks,
+            "ts": now,
+        }
+
+        # Timestamp depth update for freshness tracking
+        self._depth_timestamps[asset_id] = now
 
         self._update_prices(asset_id, best_bid, best_ask)
 

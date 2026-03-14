@@ -327,17 +327,21 @@ class BalanceManager:
         unmatched_count = clob_count - matched_count
         ratio = matched_count / clob_count if clob_count > 0 else 1.0
 
-        if ratio < 0.50:
+        # NOTE: FAK (taker) mode entry orders do not appear in maker_orders[], so the
+        # natural match ratio for FAK mode is ~40-50% (exits match, entries don't).
+        # CRITICAL threshold is set to 0.20 to catch real data-loss (near-zero match)
+        # without false-halting on normal FAK operation. WARN at < 0.60.
+        if ratio < 0.20:
             msg = (
                 f"CRITICAL: matched {matched_count}/{clob_count} CLOB order ids in {window} "
-                f"(unmatched={unmatched_count}, ratio={ratio:.1%} < 50%) — halting trading"
+                f"(unmatched={unmatched_count}, ratio={ratio:.1%} < 20%) — halting trading"
             )
             return (False, msg)
 
-        if ratio < 0.80:
+        if ratio < 0.60:
             msg = (
                 f"WARNING: matched {matched_count}/{clob_count} CLOB order ids in {window} "
-                f"(unmatched={unmatched_count}, ratio={ratio:.1%} < 80%) — continuing with caution"
+                f"(unmatched={unmatched_count}, ratio={ratio:.1%} < 60%) — continuing with caution"
             )
             self._logger.warning(msg)
             return (True, msg)

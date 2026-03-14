@@ -79,7 +79,7 @@ class _AssetState:
     __slots__ = (
         "asset", "contract", "current_price", "last_update_ts",
         "price_buffer", "epoch_open_prices", "prev_above_open",
-        "cross_confirm_count",
+        "cross_confirm_count", "direction_history",
     )
 
     def __init__(self, asset: str, contract: str):
@@ -91,6 +91,7 @@ class _AssetState:
         self.epoch_open_prices: Dict[int, float] = {}
         self.prev_above_open: Dict[int, Optional[bool]] = {}  # epoch -> last known direction
         self.cross_confirm_count: Dict[int, int] = {}  # epoch -> consecutive readings on new side
+        self.direction_history: deque = deque(maxlen=10)  # last 10 oracle direction readings ("up" or "down")
 
 
 class ChainlinkFeed:
@@ -113,6 +114,10 @@ class ChainlinkFeed:
         self._assets: Dict[str, _AssetState] = {}
         for asset, contract in ASSET_CONTRACTS.items():
             self._assets[asset] = _AssetState(asset, contract)
+
+        # RTDS price trajectory buffer: asset -> list of (timestamp, price) tuples
+        # Max 120 entries per asset = ~60s of history at 0.5s update frequency
+        self._rtds_history: Dict[str, list] = {asset: [] for asset in ASSET_CONTRACTS.keys()}
 
         # Connection state
         self._session: Optional[aiohttp.ClientSession] = None
@@ -181,6 +186,63 @@ class ChainlinkFeed:
             return False
         age = time.time() - state.last_update_ts
         return age < self._config.oracle_stale_threshold_secs
+
+    def get_direction_confirmed(self, asset: str, n: int = 3) -> Optional[str]:
+        """Returns direction only if last n oracle readings agree.
+
+        Returns "up" or "down" if confirmed, None if mixed or insufficient data.
+        Used by IGOC strategy to confirm oracle direction before entry.
+        """
+        state = self._assets.get(asset.upper())
+        if state is None:
+            return None
+
+        history = list(state.direction_history)
+        if len(history) < n:
+            return None
+
+        recent = history[-n:]
+        if all(d == "up" for d in recent):
+            return "up"
+        if all(d == "down" for d in recent):
+            return "down"
+        return None
+
+    def get_price_trajectory(self, asset: str, window_secs: float = 60.0) -> list:
+        """Return RTDS price trajectory for the last window_secs seconds.
+
+        Returns: list of (timestamp, price) tuples, most recent last.
+                 Returns empty list if no history or asset unknown.
+        """
+        asset = asset.upper()
+        history = self._rtds_history.get(asset, [])
+        if not history:
+            return []
+
+        cutoff_ts = time.time() - window_secs
+        return [(ts, p) for ts, p in history if ts >= cutoff_ts]
+
+    def get_trajectory_direction(self, asset: str, window_secs: float = 30.0) -> Optional[str]:
+        """Determine direction based on price trajectory over window_secs.
+
+        Returns "up", "down", or None if:
+        - Less than 2 points in trajectory
+        - Price change < 0.5%
+        """
+        trajectory = self.get_price_trajectory(asset, window_secs)
+        if len(trajectory) < 2:
+            return None
+
+        start_price = trajectory[0][1]
+        end_price = trajectory[-1][1]
+        if start_price <= 0:
+            return None
+
+        pct_change = (end_price - start_price) / start_price
+        if abs(pct_change) < 0.005:  # 0.5%
+            return None
+
+        return "up" if pct_change > 0 else "down"
 
     @property
     def staleness_secs(self) -> float:
@@ -408,6 +470,12 @@ class ChainlinkFeed:
         state.last_update_ts = now
         state.price_buffer.append((now, price))
 
+        # Track RTDS price trajectory (max 120 entries per asset)
+        if asset in self._rtds_history:
+            self._rtds_history[asset].append((now, price))
+            if len(self._rtds_history[asset]) > 120:
+                self._rtds_history[asset].pop(0)
+
         # Anchor epoch open prices for both 5m and 15m windows
         for window in (300, 900):
             epoch = int(now // window) * window
@@ -425,6 +493,11 @@ class ChainlinkFeed:
                 open_price = state.epoch_open_prices[epoch]
                 is_above = price >= open_price
                 ew_key = (epoch, window)
+
+                # Track direction in history for get_direction_confirmed()
+                direction_str = "up" if is_above else "down"
+                state.direction_history.append(direction_str)
+
                 prev = state.prev_above_open.get(ew_key)
                 if prev is not None and is_above != prev:
                     # Direction crossed - increment confirmation counter

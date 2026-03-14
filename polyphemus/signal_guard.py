@@ -73,11 +73,13 @@ class SignalGuard:
         is_sharp = signal.get('source') == 'sharp_move'
         is_oracle_flip = signal.get('source') == 'oracle_flip'
         is_streak_contrarian = signal.get('source') == 'streak_contrarian'
+        is_clob_imbalance = signal.get('source') == 'clob_imbalance'
+        is_flat_regime_rtds = signal.get('source') == 'flat_regime_rtds'
 
         # ====================================================================
         # FILTER 1: Direction Check (only BUY signals from DB)
         # ====================================================================
-        if not is_momentum and not is_window_delta and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+        if not is_momentum and not is_window_delta and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds:
             direction = signal.get('direction', '').upper()
             if direction != 'BUY':
                 reasons.append('not_buy_signal')
@@ -153,8 +155,8 @@ class SignalGuard:
         elif is_snipe:
             if price < self._config.snipe_min_entry_price or price > self._config.snipe_max_entry_price:
                 reasons.append('price_out_of_range')
-        elif is_oracle_flip or is_streak_contrarian:
-            pass  # oracle_flip/streak_contrarian use their own price gates
+        elif is_oracle_flip or is_streak_contrarian or is_flat_regime_rtds:
+            pass  # these sources use their own price gates in the scan loop
         elif is_pair_arb:
             pass  # pair_arb uses pair_cost filter in scan loop, not entry price range
         elif is_weather:
@@ -163,6 +165,10 @@ class SignalGuard:
             # Sharp moves use extended ceiling (0.90-0.95 zone, near-zero taker fee)
             sharp_max = self._config.sharp_move_max_entry_price
             if price < min_price or price > sharp_max:
+                reasons.append('price_out_of_range')
+        elif is_clob_imbalance:
+            # IGOC uses custom price range
+            if price < self._config.igoc_min_price or price > self._config.igoc_max_price:
                 reasons.append('price_out_of_range')
         elif price < min_price or price > max_price:
             reasons.append('price_out_of_range')
@@ -248,7 +254,8 @@ class SignalGuard:
         # When volatility is too low, directionality ratio is noisy/meaningless.
         # Data: flat regime = -$2.83/signal (worst per-signal P&L on both instances)
         # ====================================================================
-        if self._config.flat_regime_block and not is_weather:
+        is_flat_regime_rtds = signal.get('source') == 'flat_regime_rtds'
+        if self._config.flat_regime_block and not is_weather and not is_clob_imbalance and not is_flat_regime_rtds:
             vol_1h = signal.get('volatility_1h')
             if vol_1h is not None and vol_1h < self._config.flat_regime_max_vol:
                 reasons.append('flat_regime')
@@ -394,7 +401,8 @@ class SignalGuard:
         slug = signal.get('slug', '')
         window = parse_window_from_slug(slug)
         min_secs = 0
-        if not is_window_delta and not is_weather and not is_15m_momentum and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+        secs_left = 0
+        if not is_window_delta and not is_weather and not is_15m_momentum and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_clob_imbalance:
             # Cap min_secs at 40% of window so 5m markets (300s) aren't blocked
             # 5m: min(360, 120) = 120s → 3min entry window
             # 15m momentum: skipped here — timing validated in FILTER 2b
@@ -406,6 +414,15 @@ class SignalGuard:
                 secs_left = market_end - time.time()
                 if secs_left < min_secs:
                     reasons.append('market_expired')
+        elif is_clob_imbalance:
+            # IGOC has custom secs_remaining range
+            parts = slug.rsplit('-', 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                market_epoch = int(parts[1])
+                market_end = market_epoch + window
+                secs_left = market_end - time.time()
+                if secs_left < self._config.igoc_min_secs_remaining or secs_left > self._config.igoc_max_secs_remaining:
+                    reasons.append('secs_remaining_out_of_range')
 
         # ====================================================================
         # VALIDATOR 2: Dedup Check (via PositionStore)
@@ -454,7 +471,7 @@ class SignalGuard:
         # VALIDATOR 4: Minimum Conviction Check
         # ====================================================================
         usdc_size = signal.get('usdc_size', 0)
-        if not is_momentum and not is_window_delta and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
+        if not is_momentum and not is_window_delta and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds:
             if usdc_size < self._config.min_db_signal_size:
                 reasons.append('low_conviction')
 

@@ -354,12 +354,32 @@ class Settings(BaseSettings):
     mm_stale_max_secs_remaining: int = 180  # stale quotes scan up to 3min before epoch end (wider than pair arb)
     mm_stale_min_secs_remaining: int = 8    # stop scanning (need time for FOK fill)
 
+    # IGOC: Imbalance-Gated Oracle Confirm strategy (book depth + oracle direction alignment)
+    igoc_enabled: bool = False
+    igoc_shadow_only: bool = True           # True = shadow mode (log only, no entry)
+    igoc_imbalance_threshold: float = 0.72  # bid/(bid+ask) must exceed this
+    igoc_min_price: float = 0.35
+    igoc_max_price: float = 0.65
+    igoc_min_secs_remaining: int = 130
+    igoc_max_secs_remaining: int = 200
+    igoc_bet_size: float = 5.0
+    igoc_stop_pct: float = 0.01             # 1% mid-price stop
+    igoc_target_pct: float = 0.015          # 1.5% profit target
+    igoc_oracle_confirm_n: int = 3          # consecutive oracle readings needed
+    igoc_max_daily_trades: int = 20
+    igoc_max_daily_loss: float = 25.0
+
     # Order entry/exit mode
     entry_mode: str = "taker"  # "taker" (cross spread) or "maker" (post-only)
     maker_offset: float = 0.005  # place maker order this much below midpoint (DARIO: aggressive pricing better for snipers)
     taker_on_5m: bool = True            # Use taker FOK on 5m markets (fee-free = no cost, instant fill)
     hold_to_resolution: bool = False     # Hold to market resolution instead of profit_target/stop_loss
     maker_exit_enabled: bool = True    # Feature flag: maker SELL for profit_target (zero fee)
+    profit_target_early_enabled: bool = False   # Exit early when up enough with time remaining
+    profit_target_early_pp: float = 0.07        # pp gain above entry that triggers early exit (0.07 = 7pp)
+    profit_target_early_min_secs: int = 30      # must have >= this many secs remaining to fire
+    profit_target_early_dry_run: bool = True    # log only, no actual exit
+    profit_target_early_apply_fee_correction: bool = True  # subtract taker fee (p²*(1-p)) before threshold check
     maker_exit_timeout_polls: int = 10  # Polls for maker SELL fill before taker fallback
     signature_type: int = 1  # 1=Proxy wallet, 2=EOA (MetaMask direct)
 
@@ -402,6 +422,18 @@ class Settings(BaseSettings):
     # Flat regime blocking (low vol = directionality ratio is noisy, WR drops)
     flat_regime_block: bool = False         # block trading when volatility_1h < flat_regime_max_vol
     flat_regime_max_vol: float = 0.003     # vol below this = flat regime (default 0.3%)
+
+    # Flat regime RTDS continuation signal
+    # Fires when market is flat (vol < flat_regime_max_vol) but RTDS clearly shows direction vs strike
+    flat_regime_rtds_enabled: bool = False       # master switch
+    flat_regime_rtds_shadow: bool = True         # shadow-only until validated
+    flat_regime_rtds_min_gap: float = 0.05       # min token mispricing vs RTDS direction (5pp)
+    flat_regime_rtds_min_secs: int = 45          # min secs remaining to enter
+    flat_regime_rtds_max_secs: int = 180         # max secs remaining to enter
+    flat_regime_rtds_min_price: float = 0.30     # min token entry price
+    flat_regime_rtds_max_price: float = 0.80     # max token entry price (above 0.80 = already priced in)
+    flat_regime_rtds_imbalance_threshold: float = 0.55  # CLOB imbalance confirmation gate
+    flat_regime_rtds_rtds_min_pct: float = 0.005  # min RTDS deviation from strike (0.5%)
 
     # S1: Regime-adaptive sizing (T0: calm=44% WR, moderate=80% WR, elevated=mixed)
     regime_sizing_enabled: bool = False     # enable 4-tier vol regime sizing
@@ -454,6 +486,14 @@ class Settings(BaseSettings):
     btc5m_entry_retry_max_placement_retries: int = 1  # Retry transient placement failures once
     btc5m_entry_retry_max_fill_retries: int = 1  # Retry one zero-fill timeout after cancel
     btc5m_entry_retry_delay_ms: int = 500  # Delay before retrying a passed BTC 5m entry
+    # Layer 1k: Ensemble bet sizing
+    ensemble_sizing_enabled: bool = False          # Gate: enable ensemble score → size multiplier
+    ensemble_sizing_dry_run: bool = True           # Log only, no actual size adjustment
+    ensemble_none_fallback: str = "neutral"        # "neutral" (1.0x) or "cautious" (0.5x) for non-BTC signals
+    ensemble_high_threshold: float = 0.80          # Score >= this → high multiplier
+    ensemble_high_mult: float = 1.25               # Size multiplier for high-scoring signals
+    ensemble_low_threshold: float = 0.40           # Score < this → low multiplier
+    ensemble_low_mult: float = 0.50                # Size multiplier for low-scoring signals
     btc5m_entry_retry_reprice_cents: int = 1  # Extra cents over fresh midpoint on retry
     btc5m_entry_retry_min_secs_remaining: int = 45  # Skip retries too close to market close
     btc5m_entry_retry_max_overpay_cents: int = 5  # Hard cap over original signal price on retry

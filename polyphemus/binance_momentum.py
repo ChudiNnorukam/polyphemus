@@ -32,6 +32,22 @@ GAMMA_API_URL = "https://gamma-api.polymarket.com"
 BINANCE_TO_ASSET = {v: k for k, v in ASSET_TO_BINANCE.items()}
 
 
+def parse_strike_from_slug(slug: str) -> Optional[float]:
+    """Parse the strike price from a Polymarket slug.
+
+    e.g., 'btc-updown-5m-$85000-1773424500' -> 85000.0
+          'btc-updown-5m-1773424500'          -> None (no strike in slug)
+    """
+    import re
+    m = re.search(r'\$(\d[\d,]*)', slug)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(',', ''))
+    except ValueError:
+        return None
+
+
 class BinanceMomentumFeed:
     """Real-time Binance price momentum detector → Polymarket signal generator."""
 
@@ -1199,7 +1215,7 @@ class BinanceMomentumFeed:
                 raise
             except Exception as e:
                 self._logger.warning(f"Window delta loop error: {e}")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.02)
 
     async def _generate_delta_signal(self, asset: str, direction: str, slug: str,
                                       pct_change: float, secs_left: float,

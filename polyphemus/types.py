@@ -29,6 +29,7 @@ class ExitReason(str, Enum):
     STOP_LOSS = "stop_loss"
     MID_PRICE_STOP = "mid_price_stop"
     PRE_RESOLUTION_EXIT = "pre_resolution_exit"
+    PROFIT_TARGET_EARLY = "profit_target_early"
 
 
 class OrderStatus(str, Enum):
@@ -173,8 +174,8 @@ BALANCE_CACHE_TTL = 60
 # Monitoring
 HEALTH_LOG_INTERVAL = 300
 WATCHDOG_INTERVAL = 60
-EXIT_CHECK_INTERVAL = 0.5
-PRICE_FEED_INTERVAL = 0.5  # seconds between price updates (was 1s, reduced for faster stop-loss reaction)
+EXIT_CHECK_INTERVAL = 0.05   # 50ms fallback; exit loop is event-driven via WS
+PRICE_FEED_INTERVAL = 0.05   # 50ms fallback; price loop uses WS midpoints (dict lookup, no REST)
 
 # Auto-Claim
 REDEEM_INTERVAL = 600

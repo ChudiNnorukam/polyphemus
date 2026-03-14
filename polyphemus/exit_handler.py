@@ -233,7 +233,7 @@ class ExitHandler:
         # =====================================================================
         # Step f: SELL retry — if first attempt timed out, retry with deeper cut
         # =====================================================================
-        if fill_result.reason == "timeout" and is_time_exit:
+        if fill_result.reason == "timeout":
             # Cancel the stale order (already done in _poll_for_fill)
             # Retry with much more aggressive pricing
             retry_price = max(0.01, exit_price - 0.10)  # 10-cent discount

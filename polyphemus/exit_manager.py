@@ -130,6 +130,13 @@ class ExitManager:
             "reversal_short",
         )
 
+        # IGOC: Dynamic hold_to_resolution based on oracle confirmation
+        if source == "clob_imbalance" and self._chainlink:
+            asset = pos.metadata.get("asset", "")
+            oracle_dir = self._chainlink.get_direction_confirmed(asset, n=self._config.igoc_oracle_confirm_n)
+            trade_dir = pos.metadata.get("direction", "")
+            hold_to_resolution = (oracle_dir is not None and oracle_dir == trade_dir)
+
         # === TIME CHECK #1: max_hold (TIME, independent of price) ===
         if not hold_to_resolution and self._check_max_hold(pos, now):
             return ExitSignal(
@@ -325,8 +332,11 @@ class ExitManager:
                 and not hold_to_resolution
                 and pos.current_price > 0
                 and pos.entry_time
-                and (datetime.now(timezone.utc) - pos.entry_time).total_seconds() >= 15):
-            stop_price = pos.entry_price * (1 - self._config.mid_price_stop_pct)
+                and (datetime.now(timezone.utc) - pos.entry_time).total_seconds() >= 2):
+            # Use IGOC-specific stop % for clob_imbalance, else global mid_price_stop_pct
+            stop_pct = (self._config.igoc_stop_pct if source == "clob_imbalance"
+                        else self._config.mid_price_stop_pct)
+            stop_price = pos.entry_price * (1 - stop_pct)
             if pos.current_price <= stop_price:
                 self._logger.info(
                     f"mid_price_stop triggered | token_id={pos.token_id} | "
@@ -364,6 +374,40 @@ class ExitManager:
                     reason=ExitReason.PRE_RESOLUTION_EXIT.value,
                     exit_price=pos.current_price,
                 )
+
+        # === CHECK #3e: early profit target (bypasses hold_to_resolution) ===
+        # Fires when position is up profit_target_early_pp (after taker fee) with >= min_secs remaining.
+        # Fee correction: taker fee at exit = p²*(1-p). At p=0.92: ~6.8%. Without this, a 7pp gross
+        # gain at 0.92 is nearly breakeven after fees. Only counts net gain toward the threshold.
+        if (self._config.profit_target_early_enabled
+                and pos.current_price > 0
+                and pos.market_end_time):
+            secs_remaining = pos.market_end_time.timestamp() - time.time()
+            gain_pp = pos.current_price - pos.entry_price
+            p = pos.current_price
+            fee_at_exit = p * p * (1.0 - p) if self._config.profit_target_early_apply_fee_correction else 0.0
+            net_gain_pp = gain_pp - fee_at_exit
+            if (net_gain_pp >= self._config.profit_target_early_pp
+                    and secs_remaining >= self._config.profit_target_early_min_secs):
+                if self._config.profit_target_early_dry_run:
+                    self._logger.info(
+                        f"[DRY] profit_target_early WOULD fire | token={pos.token_id[:8]} | "
+                        f"entry={pos.entry_price:.4f} | current={pos.current_price:.4f} | "
+                        f"gross={gain_pp:.4f}pp | fee={fee_at_exit:.4f}pp | net={net_gain_pp:.4f}pp | "
+                        f"secs_remaining={secs_remaining:.0f}"
+                    )
+                else:
+                    self._logger.info(
+                        f"profit_target_early triggered | token_id={pos.token_id} | "
+                        f"entry={pos.entry_price:.4f} | current={pos.current_price:.4f} | "
+                        f"gross={gain_pp:.4f}pp | fee={fee_at_exit:.4f}pp | net={net_gain_pp:.4f}pp | "
+                        f"secs_remaining={secs_remaining:.0f}"
+                    )
+                    return ExitSignal(
+                        token_id=pos.token_id,
+                        reason=ExitReason.PROFIT_TARGET_EARLY.value,
+                        exit_price=pos.current_price,
+                    )
 
         # === HOLD-TO-RESOLUTION: skip stop_loss and profit_target ===
         # Oracle flips/snipes always hold. Regular 5m positions hold if config says so.

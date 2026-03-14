@@ -268,7 +268,7 @@ class HealthMonitor:
                 pass
 
     def _check_pipeline_watchdog(self):
-        """Warn when the BTC 5m pipeline is starved or stopping at a known stage."""
+        """Warn when the trading pipeline is starved or stopping at a known stage."""
         signal_db = getattr(self._signal_logger, "_db_path", None)
         perf_db_path = getattr(self._perf_db, "db_path", None)
         if not signal_db or not perf_db_path:
@@ -281,27 +281,28 @@ class HealthMonitor:
             trade_conn = sqlite3.connect(str(perf_db_path))
             trade_conn.row_factory = sqlite3.Row
             try:
+                # Check ANY signal source (binance_momentum or flat_regime_rtds)
                 last_decision = sig_conn.execute(
                     """
                     SELECT MAX(epoch) AS ts
                     FROM signals
-                    WHERE asset = 'BTC' AND market_window_secs = 300
+                    WHERE market_window_secs IN (300, 900)
                     """
                 ).fetchone()["ts"]
                 last_candidate = sig_conn.execute(
                     """
                     SELECT MAX(epoch) AS ts
                     FROM signals
-                    WHERE asset = 'BTC' AND market_window_secs = 300
-                      AND source = 'binance_momentum'
+                    WHERE market_window_secs IN (300, 900)
+                      AND source IN ('binance_momentum', 'flat_regime_rtds')
                     """
                 ).fetchone()["ts"]
                 passed_1h = sig_conn.execute(
                     """
                     SELECT COUNT(*) AS n
                     FROM signals
-                    WHERE asset = 'BTC' AND market_window_secs = 300
-                      AND source = 'binance_momentum'
+                    WHERE market_window_secs IN (300, 900)
+                      AND source IN ('binance_momentum', 'flat_regime_rtds')
                       AND epoch >= ? AND guard_passed = 1
                     """,
                     (now - 3600,),
@@ -310,8 +311,8 @@ class HealthMonitor:
                     """
                     SELECT COUNT(*) AS n
                     FROM signals
-                    WHERE asset = 'BTC' AND market_window_secs = 300
-                      AND source = 'binance_momentum'
+                    WHERE market_window_secs IN (300, 900)
+                      AND source IN ('binance_momentum', 'flat_regime_rtds')
                       AND epoch >= ?
                     """,
                     (now - 3600,),
@@ -320,8 +321,8 @@ class HealthMonitor:
                     """
                     SELECT guard_reasons, COUNT(*) AS n
                     FROM signals
-                    WHERE asset = 'BTC' AND market_window_secs = 300
-                      AND source = 'binance_momentum'
+                    WHERE market_window_secs IN (300, 900)
+                      AND source IN ('binance_momentum', 'flat_regime_rtds')
                       AND epoch >= ? AND COALESCE(guard_reasons, '') != ''
                     GROUP BY guard_reasons
                     ORDER BY n DESC
@@ -333,7 +334,7 @@ class HealthMonitor:
                     """
                     SELECT MAX(entry_time) AS ts
                     FROM trades
-                    WHERE slug LIKE 'btc-updown-5m-%'
+                    WHERE slug LIKE '%-updown-5m-%' OR slug LIKE '%-updown-15m-%'
                     """
                 ).fetchone()["ts"]
             finally:
@@ -346,14 +347,14 @@ class HealthMonitor:
         if not last_decision or now - float(last_decision) > 900:
             mins = "never" if not last_decision else f"{(now - float(last_decision)) / 60:.1f}m"
             self._logger.warning(
-                "PIPELINE WATCHDOG: no BTC 5m decision in %s; market discovery or signal generation may be stalled",
+                "PIPELINE WATCHDOG: no signal decision in %s; market discovery or signal generation may be stalled",
                 mins,
             )
 
         if not last_candidate or now - float(last_candidate) > 3600:
             age = "never" if not last_candidate else f"{(now - float(last_candidate)) / 3600:.1f}h"
             self._logger.warning(
-                "PIPELINE WATCHDOG: no BTC 5m binance_momentum candidate in %s; entry source may be starved",
+                "PIPELINE WATCHDOG: no signal candidate in %s; entry source may be starved",
                 age,
             )
             return
@@ -363,7 +364,7 @@ class HealthMonitor:
                 f"{row['guard_reasons']} ({row['n']})" for row in top_reasons if row["guard_reasons"]
             ) or "unknown"
             self._logger.warning(
-                "PIPELINE WATCHDOG: %s BTC binance_momentum candidates in last hour but 0 passed guards; top blockers: %s",
+                "PIPELINE WATCHDOG: %s candidates in last hour but 0 passed guards; top blockers: %s",
                 candidates_1h,
                 reasons,
             )
@@ -371,7 +372,7 @@ class HealthMonitor:
         if not last_trade or now - float(last_trade) > 21600:
             age = "never" if not last_trade else f"{(now - float(last_trade)) / 3600:.1f}h"
             self._logger.warning(
-                "PIPELINE WATCHDOG: no executed BTC 5m trade in %s; pipeline may be starving before execution",
+                "PIPELINE WATCHDOG: no executed trade in %s; pipeline may be starving before execution",
                 age,
             )
 

@@ -1009,6 +1009,29 @@ class PositionExecutor:
                     f"after_sm={base_spend:.2f}"
                 )
 
+        # Layer 1k: Ensemble bet sizing (BTC 5m signals only; non-BTC → neutral fallback)
+        # CRITICAL: None score means non-BTC signal. Default "neutral" = 1.0x to avoid silently
+        # halving ETH/SOL/XRP bets with zero justification. Only "cautious" opt-in reduces them.
+        if self._config.ensemble_sizing_enabled and signal:
+            ensemble_score = signal.get('ensemble_score')  # None for non-BTC signals
+            if ensemble_score is None:
+                ens_mult = 0.5 if self._config.ensemble_none_fallback == "cautious" else 1.0
+            elif ensemble_score >= self._config.ensemble_high_threshold:
+                ens_mult = self._config.ensemble_high_mult
+            elif ensemble_score < self._config.ensemble_low_threshold:
+                ens_mult = self._config.ensemble_low_mult
+            else:
+                ens_mult = 1.0  # neutral band: 0.40 <= score < 0.80
+            label = "[DRY] " if self._config.ensemble_sizing_dry_run else ""
+            if ens_mult != 1.0 or self._config.ensemble_sizing_dry_run:
+                self._logger.info(
+                    f"{label}Layer 1k (ensemble): score={ensemble_score}, "
+                    f"mult={ens_mult:.2f}x, before={base_spend:.2f}, "
+                    f"after={base_spend * ens_mult:.2f}"
+                )
+            if not self._config.ensemble_sizing_dry_run:
+                base_spend *= ens_mult
+
         # Layer 2: Tuner multiplier
         spend = base_spend
         tuner_multiplier = 1.0

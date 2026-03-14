@@ -30,7 +30,7 @@ from .performance_tracker import PerformanceTracker
 from .balance_manager import BalanceManager
 from .health_monitor import HealthMonitor
 from .binance_feed import BinanceFeed
-from .binance_momentum import BinanceMomentumFeed
+from .binance_momentum import BinanceMomentumFeed, parse_strike_from_slug
 from .dashboard import Dashboard
 from .arb_engine import ArbEngine
 from .accumulator import AccumulatorEngine
@@ -484,6 +484,17 @@ class SignalBot:
         else:
             self._logger.info(f"PREFLIGHT [OK]   wallet balance ${balance:.2f}")
         self._slack.seed_stats(0, 0, 0.0, start_balance=balance)
+        self._slack.notify_startup(
+            open_positions=self._store.count_open(),
+            balance=balance,
+            dry_run=self._dry_run,
+            active_assets=self._config.asset_filter,
+            entry_mode=self._config.entry_mode,
+            max_bet=self._config.max_bet,
+            max_open_positions=self._config.max_open_positions,
+            mid_price_stop_enabled=self._config.mid_price_stop_enabled,
+            mid_price_stop_pct=self._config.mid_price_stop_pct,
+        )
 
         # 3. Binance WS host TCP reachability (skip for modes that don't use Binance)
         needs_binance = (
@@ -722,6 +733,10 @@ class SignalBot:
                 tasks.append(self._safe_task(self._momentum_feed.near_res_pair_arb_loop(), "near_res_pair_arb"))
             if self._market_maker:
                 tasks.append(self._safe_task(self._market_maker.start(), "market_maker"))
+            if self._config.igoc_enabled:
+                tasks.append(self._safe_task(self._igoc_signal_loop(), "igoc_signal_loop"))
+            if self._config.flat_regime_rtds_enabled:
+                tasks.append(self._safe_task(self._flat_regime_rtds_loop(), "flat_regime_rtds"))
             await asyncio.gather(*tasks)
 
         except KeyboardInterrupt:
@@ -1064,7 +1079,7 @@ class SignalBot:
                     self._mark_signal_stage(signal_id, "momentum_confirmation", "passed", detail)
 
             # 2c. Regime check (skip flat markets — not applicable to price arb or weather)
-            if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather', 'resolution_snipe'):
+            if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather', 'resolution_snipe', 'flat_regime_rtds'):
                 if not self._regime_detector.should_trade(signal.get("asset", "BTC")):
                     if self._signal_logger and signal_id > 0:
                         self._signal_logger.update_signal(signal_id, {"outcome": "regime_filtered"})
@@ -1185,6 +1200,10 @@ class SignalBot:
                 await self._telegram.submit(signal)
                 return  # execution happens via _execute_weather_signal callback
 
+            # Inject ensemble score for Layer 1k sizing (None for non-BTC signals — fallback to neutral)
+            if ensemble_verdict is not None:
+                signal['ensemble_score'] = ensemble_verdict.score
+
             signal = self._prepare_entry_signal(signal)
 
             # 6. Execute buy
@@ -1239,6 +1258,7 @@ class SignalBot:
                     momentum_pct=signal.get("momentum_pct", 0.0),
                     source=signal.get("source", ""),
                     secs_left=signal.get("time_remaining_secs", 0),
+                    entry_mode=self._config.entry_mode,
                 )
             except Exception:
                 pass
@@ -1350,10 +1370,17 @@ class SignalBot:
             self._logger.error(f"Non-critical task '{name}' crashed: {e}", exc_info=True)
 
     async def _exit_loop(self):
-        """Run exit check loop forever."""
+        """Run exit check loop forever.
+
+        Event-driven: wakes on every WS price update rather than fixed timer.
+        Falls back to EXIT_CHECK_INTERVAL polling if WS is unavailable.
+        """
         try:
             while True:
-                await asyncio.sleep(EXIT_CHECK_INTERVAL)
+                if self._market_ws:
+                    await self._market_ws.wait_for_update(timeout=EXIT_CHECK_INTERVAL)
+                else:
+                    await asyncio.sleep(EXIT_CHECK_INTERVAL)
                 try:
                     now = datetime.now(timezone.utc)
                     exit_signals = self._exit_mgr.check_all(now)
@@ -1386,13 +1413,31 @@ class SignalBot:
                     if not open_positions:
                         continue
 
-                    # Fetch all prices in parallel
-                    results = await asyncio.gather(
-                        *[self._clob.get_midpoint(pos.token_id) for pos in open_positions],
-                        return_exceptions=True,
-                    )
+                    # Use WS midpoint (dict lookup, sub-ms) with REST fallback if stale.
+                    # WS prices update every ~50-100ms; no REST round-trip needed here.
+                    ws_prices = []
+                    rest_needed = []
+                    for pos in open_positions:
+                        ws_price = self._market_ws.get_midpoint(pos.token_id) if self._market_ws else 0.0
+                        if ws_price > 0:
+                            ws_prices.append((pos, ws_price))
+                        else:
+                            rest_needed.append(pos)
 
-                    for pos, price in zip(open_positions, results):
+                    # REST fallback only for tokens with stale/missing WS data
+                    rest_results = []
+                    if rest_needed:
+                        rest_results = await asyncio.gather(
+                            *[self._clob.get_midpoint(pos.token_id) for pos in rest_needed],
+                            return_exceptions=True,
+                        )
+
+                    results = ws_prices + [
+                        (pos, price) for pos, price in zip(rest_needed, rest_results)
+                        if not isinstance(price, Exception)
+                    ]
+
+                    for pos, price in results:
                         if isinstance(price, Exception):
                             self._logger.warning(
                                 f"Price fetch exception for {pos.slug}: {type(price).__name__}"
@@ -1794,6 +1839,354 @@ class SignalBot:
             f"trigger={exit_signal.reason}"
         )
         await self._on_signal(rs_signal)
+
+    async def _igoc_signal_loop(self):
+        """IGOC (Imbalance-Gated Oracle Confirm) signal loop.
+
+        Monitors for buy/sell imbalance opportunities gated by oracle direction confirmation.
+        Only logs signals (shadow mode) when igoc_enabled=True.
+        """
+        if not self._config.igoc_enabled:
+            return
+
+        try:
+            while True:
+                # Event-driven: wake on every WS price update (50ms timeout fallback)
+                if self._market_ws:
+                    await self._market_ws.wait_for_update(timeout=0.05)
+                else:
+                    await asyncio.sleep(0.05)
+
+                try:
+                    now = datetime.now(timezone.utc)
+
+                    # Skip if trading is halted
+                    if self._trading_halted:
+                        continue
+
+                    # Get current active markets from market_ws subscriptions
+                    if not self._market_ws or not self._market_ws._subscribed:
+                        continue
+
+                    for token_id in list(self._market_ws._subscribed):
+                        # Get book depth (imbalance + freshness)
+                        book_depth = self._market_ws.get_book_depth(token_id)
+                        if not book_depth:
+                            continue  # Stale or no data
+
+                        imbalance = book_depth.get("imbalance", 0)
+                        bid_qty = book_depth.get("bid_qty", 0)
+                        ask_qty = book_depth.get("ask_qty", 0)
+
+                        # Skip if imbalance doesn't meet threshold
+                        if imbalance < self._config.igoc_imbalance_threshold and imbalance > (1 - self._config.igoc_imbalance_threshold):
+                            continue  # Balanced, not imbalanced
+
+                        # Resolve slug via momentum feed's market cache.
+                        # py_clob_client get_market() takes condition_id, not token_id —
+                        # calling with token_id returns {'error': 'not found'} with no slug key.
+                        # Reverse-lookup token_id -> slug from _market_cache instead.
+                        slug = ""
+                        if self._momentum_feed:
+                            for _slug, _info in self._momentum_feed._market_cache.items():
+                                if _info.get("up_token_id") == token_id or _info.get("down_token_id") == token_id:
+                                    slug = _slug
+                                    break
+                        if not slug:
+                            continue
+
+                        # Parse epoch and window
+                        parts = slug.rsplit("-", 1)
+                        if len(parts) != 2 or not parts[1].isdigit():
+                            continue
+
+                        epoch = int(parts[1])
+                        window = 300 if "5m" in slug else 900
+                        market_end = epoch + window
+                        secs_left = market_end - time.time()
+
+                        # Check secs_remaining range
+                        if not (self._config.igoc_min_secs_remaining <= secs_left <= self._config.igoc_max_secs_remaining):
+                            continue
+
+                        # Get midpoint and check price range
+                        midpoint = self._market_ws.get_midpoint(token_id)
+                        if midpoint <= 0:
+                            continue
+
+                        if not (self._config.igoc_min_price <= midpoint <= self._config.igoc_max_price):
+                            continue
+
+                        # Determine direction from imbalance
+                        # High imbalance = more buy pressure (buy more YES tokens)
+                        # Low imbalance = more sell pressure (buy more NO tokens)
+                        direction = "up" if imbalance >= 0.5 else "down"
+
+                        # Check oracle direction confirmation
+                        # Extract asset from slug: "btc-updown-5m-..." -> "BTC"
+                        asset = slug.split('-')[0].upper() if slug else ""
+                        if not asset or not self._chainlink:
+                            continue
+
+                        confirmed_direction = self._chainlink.get_direction_confirmed(
+                            asset,
+                            n=self._config.igoc_oracle_confirm_n
+                        )
+
+                        # Build IGOC signal
+                        igoc_signal = {
+                            "slug": slug,
+                            "asset": asset,
+                            "direction": direction,
+                            "token_id": token_id,
+                            "price": midpoint,
+                            "source": "clob_imbalance",
+                            "market_window_secs": window,
+                            "time_remaining_secs": int(secs_left),
+                            "imbalance": round(imbalance, 4),
+                            "bid_qty": round(bid_qty, 2),
+                            "ask_qty": round(ask_qty, 2),
+                            "oracle_confirmed": confirmed_direction == direction,
+                            "oracle_n": self._config.igoc_oracle_confirm_n,
+                            "metadata": {
+                                "source": "clob_imbalance",
+                                "imbalance_threshold": self._config.igoc_imbalance_threshold,
+                            },
+                        }
+
+                        # Pass through signal guard
+                        guard_result = self._guard.check(igoc_signal)
+
+                        # Log signal to signals.db even if oracle or guard filter it
+                        if confirmed_direction != direction:
+                            # Oracle disagrees with imbalance direction
+                            igoc_signal["outcome"] = "filtered"
+                            signal_id, _ = self._log_signal_observation(
+                                igoc_signal,
+                                guard_result,
+                                market_context={},
+                                regime=None,
+                            )
+                            self._logger.debug(
+                                f"[IGOC FILTERED] {slug} {direction} @ {midpoint:.4f} | "
+                                f"imbalance={imbalance:.4f} | "
+                                f"oracle={confirmed_direction} (disagrees) | "
+                                f"{secs_left:.0f}s left | signal_id={signal_id}"
+                            )
+                            continue
+
+                        if not guard_result.passed:
+                            # Guard filter rejected the signal
+                            igoc_signal["outcome"] = "filtered"
+                            signal_id, _ = self._log_signal_observation(
+                                igoc_signal,
+                                guard_result,
+                                market_context={},
+                                regime=None,
+                            )
+                            self._logger.debug(
+                                f"[IGOC FILTERED] {slug} {direction} @ {midpoint:.4f} | "
+                                f"guard_reasons={guard_result.reasons} | "
+                                f"signal_id={signal_id}"
+                            )
+                            continue
+
+                        # Log signal in shadow mode (no execution)
+                        if self._config.igoc_shadow_only or self._dry_run:
+                            signal_id, _ = self._log_signal_observation(
+                                igoc_signal,
+                                guard_result,
+                                market_context={},
+                                regime=None,
+                            )
+                            self._logger.info(
+                                f"[IGOC SHADOW] {slug} {direction} @ {midpoint:.4f} | "
+                                f"imbalance={imbalance:.4f} | "
+                                f"oracle={confirmed_direction} | "
+                                f"{secs_left:.0f}s left | signal_id={signal_id}"
+                            )
+                        else:
+                            # IGOC live mode (currently disabled by default)
+                            self._logger.info(
+                                f"[IGOC LIVE] {slug} {direction} @ {midpoint:.4f} | "
+                                f"imbalance={imbalance:.4f} | "
+                                f"oracle={confirmed_direction} | "
+                                f"{secs_left:.0f}s left"
+                            )
+                            await self._on_signal(igoc_signal)
+
+                except Exception as e:
+                    self._logger.debug(f"IGOC loop error: {e}")
+
+        except asyncio.CancelledError:
+            self._logger.info("IGOC signal loop cancelled")
+            raise
+
+    async def _flat_regime_rtds_loop(self) -> None:
+        """Flat regime RTDS continuation signal.
+
+        Fires when:
+        - Market is in flat regime (vol < flat_regime_max_vol)
+        - RTDS price clearly above/below strike (min 0.5% deviation)
+        - Token midpoint is 0.30-0.80 (hasn't yet priced in the direction)
+        - CLOB book imbalance confirms direction
+        - T=45-180s remaining
+
+        Shadow-only until validated. Promotes alongside IGOC.
+        Break-even WR at entry 0.65: 21.8%. RTDS confirmation expected >> 21.8%.
+        """
+        cfg = self._config
+        if not cfg.flat_regime_rtds_enabled:
+            self._logger.info("flat_regime_rtds: disabled, skipping loop")
+            return
+
+        self._logger.info(
+            f"flat_regime_rtds: loop started | shadow={cfg.flat_regime_rtds_shadow} | "
+            f"price={cfg.flat_regime_rtds_min_price}-{cfg.flat_regime_rtds_max_price} | "
+            f"secs={cfg.flat_regime_rtds_min_secs}-{cfg.flat_regime_rtds_max_secs} | "
+            f"min_gap={cfg.flat_regime_rtds_min_gap}"
+        )
+
+        _rtds_fired: set = set()  # (slug, epoch_ts) already signaled — one per epoch per slug
+
+        while True:
+            try:
+                await self._market_ws.wait_for_update(timeout=0.1)
+
+                # Only fire in flat regime
+                regime = self._regime_detector.get_regime() if self._regime_detector else None
+                vol_1h = regime.volatility_1h if regime else None
+                if vol_1h is not None and vol_1h >= cfg.flat_regime_max_vol:
+                    continue
+
+                # Scan all active markets
+                for token_id in list(self._market_ws._subscribed):
+                    try:
+                        # Reverse lookup slug from market cache
+                        slug = ""
+                        if self._momentum_feed:
+                            for _slug, _info in self._momentum_feed._market_cache.items():
+                                if (_info.get("up_token_id") == token_id or
+                                        _info.get("down_token_id") == token_id):
+                                    slug = _slug
+                                    break
+                        if not slug:
+                            continue
+
+                        # Parse asset and epoch timestamp
+                        asset = slug.split('-')[0].upper()
+                        if asset not in ["BTC", "ETH", "SOL", "XRP"]:
+                            continue
+                        # Respect ASSET_FILTER / SHADOW_ASSETS
+                        _shadow_assets = cfg.get_shadow_assets()
+                        _is_shadow_asset = asset in _shadow_assets
+                        if asset not in cfg.asset_filter and not _is_shadow_asset:
+                            continue
+                        slug_parts = slug.rsplit('-', 1)
+                        if len(slug_parts) != 2 or not slug_parts[1].isdigit():
+                            continue
+                        epoch_ts = int(slug_parts[1])
+                        window_secs_rtds = 300 if "5m" in slug else 900
+
+                        # Get RTDS direction from chainlink epoch delta (current vs epoch open)
+                        # epoch_ts is the epoch START (confirmed by market_end = epoch_ts + window)
+                        delta_pct = None
+                        if self._chainlink:
+                            delta_pct = self._chainlink.get_epoch_delta_pct(
+                                asset, epoch_ts, window_secs_rtds
+                            )
+                        if delta_pct is None:
+                            continue
+                        if abs(delta_pct) < cfg.flat_regime_rtds_rtds_min_pct:
+                            continue  # RTDS too close to open, direction uncertain
+
+                        direction = "up" if delta_pct > 0 else "down"
+
+                        # Check token midpoint is in actionable range
+                        midpoint = self._market_ws.get_midpoint(token_id)
+                        if not midpoint:
+                            continue
+
+                        # For UP signal: token should be cheap (below 0.80) — hasn't priced in yet
+                        # For DOWN signal: token should be expensive (above 0.20) — hasn't priced in yet
+                        is_up_token = self._momentum_feed._market_cache.get(slug, {}).get("up_token_id") == token_id
+                        if direction == "up" and not is_up_token:
+                            continue
+                        if direction == "down" and is_up_token:
+                            continue
+
+                        if not (cfg.flat_regime_rtds_min_price <= midpoint <= cfg.flat_regime_rtds_max_price):
+                            continue
+
+                        # Gap: how far is token from fair value (1.0 if RTDS confirms direction)
+                        gap = (1.0 - midpoint) if direction == "up" else midpoint
+                        if gap < cfg.flat_regime_rtds_min_gap:
+                            continue
+
+                        # Check time remaining
+                        parts = slug.rsplit('-', 1)
+                        secs_left = None
+                        if len(parts) == 2 and parts[1].isdigit():
+                            market_epoch = int(parts[1])
+                            window = 300 if "5m" in slug else 900
+                            market_end = market_epoch + window
+                            secs_left = market_end - time.time()
+                        if secs_left is None:
+                            continue
+                        if not (cfg.flat_regime_rtds_min_secs <= secs_left <= cfg.flat_regime_rtds_max_secs):
+                            continue
+
+                        # Check CLOB book imbalance confirmation
+                        _book = self._market_ws.get_book_depth(token_id)
+                        imbalance = _book.get("imbalance") if _book else 0.5
+                        if direction == "up" and imbalance < cfg.flat_regime_rtds_imbalance_threshold:
+                            continue
+                        if direction == "down" and imbalance > (1.0 - cfg.flat_regime_rtds_imbalance_threshold):
+                            continue
+
+                        # Build signal dict matching the standard signal format
+                        signal = {
+                            "source": "flat_regime_rtds",
+                            "shadow": cfg.flat_regime_rtds_shadow or _is_shadow_asset,
+                            "slug": slug,
+                            "token_id": token_id,
+                            "asset": asset,
+                            "outcome": direction,
+                            "price": midpoint,
+                            "direction": direction.upper(),
+                            "momentum_pct": delta_pct,
+                            "time_remaining_secs": secs_left,
+                            "volatility_1h": vol_1h,
+                            "rtds_price": self._chainlink.get_current_price(asset) if self._chainlink else None,
+                            "strike": self._chainlink.get_window_open_price(epoch_ts, window_secs_rtds, asset) if self._chainlink else None,
+                            "rtds_gap_pct": round(delta_pct * 100, 2),
+                            "token_gap_pp": round(gap * 100, 2),
+                            "book_imbalance": round(imbalance, 3),
+                        }
+
+                        # Throttle: one signal per epoch per slug (prevents 10x/sec spam)
+                        _fire_key = (slug, epoch_ts)
+                        if _fire_key in _rtds_fired:
+                            continue
+                        _rtds_fired.add(_fire_key)
+
+                        mode = "SHADOW" if cfg.flat_regime_rtds_shadow else "LIVE"
+                        self._logger.info(
+                            f"[FLAT_REGIME_RTDS {mode}] {slug} {direction.upper()} @ {midpoint:.3f} | "
+                            f"epoch_delta={delta_pct:+.2%} | "
+                            f"gap={gap:.2%} secs={secs_left:.0f} imbalance={imbalance:.3f} vol={vol_1h or 'N/A'}"
+                        )
+
+                        await self._on_signal(signal)
+
+                    except Exception as e:
+                        self._logger.debug(f"flat_regime_rtds scan error for {token_id}: {e}")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._logger.warning(f"flat_regime_rtds loop error: {e}")
+                await asyncio.sleep(1.0)
 
 
 async def main():
