@@ -287,31 +287,73 @@ def generate_digest(whale_data: dict, news_data: dict, trend_data: dict) -> str:
 
 
 def generate_slack_summary(whale_data: dict, news_data: dict, trend_data: dict) -> str:
-    parts = [":globe_with_meridians: *Social Intel Scan*"]
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    parts = [f":globe_with_meridians: *Social Intel Scan* — {now}"]
 
-    # Leaderboard top 3
-    leaders = whale_data.get("polymarket_leaderboard", {}).get("pnl_leaders", [])
+    lb = whale_data.get("polymarket_leaderboard", {})
+
+    # --- PnL leaderboard top 5 with volume ---
+    leaders = lb.get("pnl_leaders", [])
     if leaders:
-        parts.append("\n*Polymarket top 3 (24h PnL):*")
-        for entry in leaders[:3]:
+        parts.append("\n*:trophy: Polymarket Top 5 (24h PnL):*")
+        for entry in leaders[:5]:
             pnl = entry.get("pnl_24h", 0)
-            if isinstance(pnl, (int, float)):
-                parts.append(f"  #{entry.get('rank','?')} {entry.get('username','?')}: ${pnl:+,.0f}")
-            else:
-                parts.append(f"  #{entry.get('rank','?')} {entry.get('username','?')}")
+            vol = entry.get("volume_24h", 0)
+            pnl_str = f"${pnl:+,.0f}" if isinstance(pnl, (int, float)) else str(pnl)
+            vol_str = f"${vol:,.0f}" if isinstance(vol, (int, float)) else "n/a"
+            parts.append(f"  #{entry.get('rank','?')} {entry.get('username','?')}: {pnl_str}  _(vol {vol_str})_")
 
-    # Top news headlines
+    # --- Crypto 7d leaders top 3 ---
+    crypto = lb.get("crypto_leaders", [])
+    if crypto:
+        parts.append("\n*:chart_with_upwards_trend: Crypto Traders (7d Vol):*")
+        for entry in crypto[:3]:
+            pnl = entry.get("pnl_week", 0)
+            vol = entry.get("volume_week", 0)
+            pnl_str = f"${pnl:+,.0f}" if isinstance(pnl, (int, float)) else str(pnl)
+            vol_str = f"${vol:,.0f}" if isinstance(vol, (int, float)) else "n/a"
+            parts.append(f"  #{entry.get('rank','?')} {entry.get('username','?')}: {pnl_str} PnL  |  {vol_str} vol")
+
+    # --- News with sentiment badges and clickable links ---
     articles = news_data.get("crypto_news", {}).get("articles", [])
+    bull, bear = 0, 0
     if articles:
-        parts.append(f"\n*Crypto news ({len(articles)} articles):*")
-        for a in articles[:3]:
-            parts.append(f"  {a['title'][:80]}")
+        news_lines = []
+        for a in articles[:5]:
+            sigs = extract_signals(a.get("title", ""))
+            sentiment = sigs.get("sentiment", 0)
+            if sentiment > 0:
+                bull += 1
+                badge = ":green_circle:"
+            elif sentiment < 0:
+                bear += 1
+                badge = ":red_circle:"
+            else:
+                badge = ":white_circle:"
+            url = a.get("url", "")
+            title = a.get("title", "")[:100]
+            source = a.get("source", "")
+            pub = a.get("published", "")
+            pub_short = pub[-5:] if pub else ""  # HH:MM only
+            link = f"<{url}|{title}>" if url else title
+            news_lines.append(f"  {badge} {link}  _{source} {pub_short}_")
+        sentiment_str = f"+{bull} bullish / -{bear} bearish"
+        parts.append(f"\n*:newspaper: Crypto News ({len(articles)}) — {sentiment_str}:*")
+        parts.extend(news_lines)
 
-    # Trending
+    # --- Trending coins with 24h price change ---
     coins = trend_data.get("trending", {}).get("coins", [])
     if coins:
-        top_names = [f"{c['symbol']}" for c in coins[:5]]
-        parts.append(f"\n*Trending:* {', '.join(top_names)}")
+        trend_parts = []
+        for c in coins[:7]:
+            sym = c.get("symbol", "")
+            change = c.get("price_change_24h_pct", 0)
+            if isinstance(change, (int, float)) and change != 0:
+                arrow = ":small_red_triangle:" if change > 0 else ":small_red_triangle_down:"
+                trend_parts.append(f"{sym} {arrow}{change:+.1f}%")
+            else:
+                trend_parts.append(sym)
+        parts.append(f"\n*:fire: Trending:* {',  '.join(trend_parts)}")
 
     return "\n".join(parts)
 
