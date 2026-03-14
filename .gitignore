@@ -41,3 +41,18 @@ linkedin-outreach-output/
 # Large analysis artifacts
 *.html
 polyphemus_charts.py
+
+# Nested repos (separate projects with own remotes)
+bot-dashboard/frontend/
+luna/
+polymarket-bot/
+polymarket-bot-v2/4coinsbot/
+polymarket-bot-v2/collectmarkets2/
+polymarket-bot-v2/polyrec/
+polymarket-bot-v2/polyterminal/
+
+# Security scan artifacts
+FINAL_SECURITY_REVIEW.md
+SECURITY_SUMMARY.md
+security_audit_report.md
+verify-secrets.sh
