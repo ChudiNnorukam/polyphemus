@@ -64,8 +64,8 @@ if [[ -n "$DEPLOY_INSTANCE" && -f "$LIVE_CONFIG" ]]; then
 
     if [[ -n "$VPS_ENV" ]]; then
         for key in $DRIFT_KEYS; do
-            vps_val=$(echo "$VPS_ENV" | grep -E "^${key}=" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-            mem_val=$(grep -oP "\\*\\*${key}\\*\\*:\\s*\\K[^|*]+" "$LIVE_CONFIG" 2>/dev/null | head -1 | xargs)
+            vps_val=$(echo "$VPS_ENV" | grep -E "^${key}=" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+            mem_val=$(grep -oP "\\*\\*${key}\\*\\*:\\s*\\K[^|*]+" "$LIVE_CONFIG" 2>/dev/null | head -1 | xargs || true)
 
             if [[ -n "$vps_val" && -n "$mem_val" && "$vps_val" != "$mem_val" ]]; then
                 echo -e "  ${RED}DRIFT${NC} $key: VPS=${vps_val} MEMORY=${mem_val}"

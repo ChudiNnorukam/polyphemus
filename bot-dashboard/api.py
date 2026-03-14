@@ -749,6 +749,234 @@ async def oracle_stats(
     }
 
 
+@app.get("/api/scoreboard")
+async def scoreboard(
+    hours: int = Query(4, le=48),
+    token: str = Depends(verify_token),
+):
+    """Live scoreboard: recent trades, open positions, running stats, streak."""
+    cutoff = time.time() - (hours * 3600)
+    all_recent = []
+    all_open = []
+    combined = {"total": 0, "wins": 0, "losses": 0, "pnl": 0.0,
+                "avg_win": 0.0, "avg_loss": 0.0, "streak": 0, "streak_type": ""}
+
+    win_pnls = []
+    loss_pnls = []
+
+    for bot_name, bot_cfg in BOTS.items():
+        db_path = bot_cfg["db"]
+        pnl_col = "pnl" if has_column(db_path, "trades", "pnl") else "profit_loss"
+
+        # Recent closed trades
+        rows = await query_db(db_path, f"""
+            SELECT slug, entry_price, exit_price, entry_size, {pnl_col} as pnl,
+                   exit_reason, outcome, entry_time, exit_time
+            FROM trades
+            WHERE exit_time IS NOT NULL AND entry_time > ?
+            ORDER BY exit_time DESC LIMIT 50
+        """, (cutoff,))
+        for r in rows:
+            r["bot"] = bot_name
+            r["is_win"] = (r["pnl"] or 0) > 0
+        all_recent.extend(rows)
+
+        # Open positions
+        open_rows = await query_db(db_path, """
+            SELECT slug, entry_price, entry_size, outcome, entry_time, market_title
+            FROM trades WHERE exit_time IS NULL ORDER BY entry_time DESC
+        """)
+        for r in open_rows:
+            r["bot"] = bot_name
+            if r.get("entry_time"):
+                r["hold_secs"] = round(time.time() - r["entry_time"])
+        all_open.extend(open_rows)
+
+    # Sort all recent by exit_time desc
+    all_recent.sort(key=lambda x: x.get("exit_time") or 0, reverse=True)
+
+    # Compute aggregate stats
+    for t in all_recent:
+        pnl_val = t["pnl"] or 0
+        combined["total"] += 1
+        combined["pnl"] += pnl_val
+        if pnl_val > 0:
+            combined["wins"] += 1
+            win_pnls.append(pnl_val)
+        else:
+            combined["losses"] += 1
+            loss_pnls.append(pnl_val)
+
+    combined["pnl"] = round(combined["pnl"], 2)
+    combined["win_rate"] = round(combined["wins"] / combined["total"] * 100, 1) if combined["total"] else 0
+    combined["avg_win"] = round(sum(win_pnls) / len(win_pnls), 2) if win_pnls else 0
+    combined["avg_loss"] = round(sum(loss_pnls) / len(loss_pnls), 2) if loss_pnls else 0
+    combined["ev_per_trade"] = round(combined["pnl"] / combined["total"], 2) if combined["total"] else 0
+
+    # Compute streak (from most recent trade)
+    sorted_by_time = sorted(all_recent, key=lambda x: x.get("exit_time") or 0, reverse=True)
+    if sorted_by_time:
+        streak_win = sorted_by_time[0]["is_win"]
+        streak_count = 0
+        for t in sorted_by_time:
+            if t["is_win"] == streak_win:
+                streak_count += 1
+            else:
+                break
+        combined["streak"] = streak_count
+        combined["streak_type"] = "W" if streak_win else "L"
+
+    return {
+        "recent": all_recent[:30],
+        "open": all_open,
+        "stats": combined,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/stats")
+async def stats(
+    days: int = Query(7, le=90),
+    token: str = Depends(verify_token),
+):
+    """Aggregate stats: by asset, direction, hour, entry price, per-instance."""
+    cutoff = time.time() - (days * 86400)
+
+    by_asset: dict = {}
+    by_direction: dict = {}
+    by_hour: dict = {str(h): {"hour": h, "trades": 0, "wins": 0, "pnl": 0.0} for h in range(24)}
+    by_entry_bucket: dict = {}
+    per_instance: dict = {}
+    cumulative_series: list = []
+    all_trades_for_cum: list = []
+
+    for bot_name, bot_cfg in BOTS.items():
+        db_path = bot_cfg["db"]
+        pnl_col = "pnl" if has_column(db_path, "trades", "pnl") else "profit_loss"
+
+        rows = await query_db(db_path, f"""
+            SELECT slug, entry_price, {pnl_col} as pnl, exit_time, outcome, exit_reason
+            FROM trades
+            WHERE exit_time IS NOT NULL AND entry_time > ?
+            ORDER BY exit_time ASC
+        """, (cutoff,))
+
+        inst = {"trades": 0, "wins": 0, "pnl": 0.0}
+
+        for row in rows:
+            pnl_val = row["pnl"] or 0
+            is_win = pnl_val > 0
+            slug = row["slug"] or ""
+
+            # Extract asset from slug (e.g. "btc-updown-5m-123" -> "BTC")
+            asset = slug.split("-")[0].upper() if slug else "UNKNOWN"
+
+            # Direction from outcome column
+            direction = row.get("outcome") or "unknown"
+
+            # Entry price bucket
+            ep = row.get("entry_price") or 0
+            if ep < 0.50:
+                bucket = "<0.50"
+            elif ep < 0.52:
+                bucket = "0.50-0.52"
+            elif ep < 0.55:
+                bucket = "0.52-0.55"
+            elif ep < 0.58:
+                bucket = "0.55-0.58"
+            else:
+                bucket = "0.58+"
+
+            # Hour of day (UTC)
+            exit_t = row.get("exit_time") or 0
+            hour_utc = datetime.fromtimestamp(exit_t, tz=timezone.utc).hour if exit_t else 0
+
+            # Aggregate by asset
+            if asset not in by_asset:
+                by_asset[asset] = {"asset": asset, "trades": 0, "wins": 0, "pnl": 0.0}
+            by_asset[asset]["trades"] += 1
+            by_asset[asset]["pnl"] += pnl_val
+            if is_win:
+                by_asset[asset]["wins"] += 1
+
+            # Aggregate by direction
+            if direction not in by_direction:
+                by_direction[direction] = {"direction": direction, "trades": 0, "wins": 0, "pnl": 0.0}
+            by_direction[direction]["trades"] += 1
+            by_direction[direction]["pnl"] += pnl_val
+            if is_win:
+                by_direction[direction]["wins"] += 1
+
+            # Aggregate by hour
+            h_key = str(hour_utc)
+            by_hour[h_key]["trades"] += 1
+            by_hour[h_key]["pnl"] += pnl_val
+            if is_win:
+                by_hour[h_key]["wins"] += 1
+
+            # Aggregate by entry bucket
+            if bucket not in by_entry_bucket:
+                by_entry_bucket[bucket] = {"bucket": bucket, "trades": 0, "wins": 0, "pnl": 0.0}
+            by_entry_bucket[bucket]["trades"] += 1
+            by_entry_bucket[bucket]["pnl"] += pnl_val
+            if is_win:
+                by_entry_bucket[bucket]["wins"] += 1
+
+            # Per-instance
+            inst["trades"] += 1
+            inst["pnl"] += pnl_val
+            if is_win:
+                inst["wins"] += 1
+
+            # Cumulative series
+            all_trades_for_cum.append({"exit_time": exit_t, "pnl": pnl_val, "bot": bot_name})
+
+        per_instance[bot_name] = {
+            "trades": inst["trades"],
+            "wins": inst["wins"],
+            "win_rate": round(inst["wins"] / inst["trades"] * 100, 1) if inst["trades"] else 0,
+            "pnl": round(inst["pnl"], 2),
+        }
+
+    # Add win_rate to all aggregates
+    def add_wr(items):
+        for item in items:
+            n = item["trades"]
+            item["win_rate"] = round(item["wins"] / n * 100, 1) if n else 0
+            item["pnl"] = round(item["pnl"], 2)
+            item["confidence"] = confidence_label(n)
+
+    asset_list = sorted(by_asset.values(), key=lambda x: x["pnl"], reverse=True)
+    add_wr(asset_list)
+    direction_list = list(by_direction.values())
+    add_wr(direction_list)
+    hour_list = sorted(by_hour.values(), key=lambda x: x["hour"])
+    add_wr(hour_list)
+    bucket_list = sorted(by_entry_bucket.values(), key=lambda x: x["bucket"])
+    add_wr(bucket_list)
+
+    # Build cumulative P&L series
+    all_trades_for_cum.sort(key=lambda x: x["exit_time"])
+    cum_pnl = 0.0
+    for t in all_trades_for_cum:
+        cum_pnl += t["pnl"]
+        cumulative_series.append({
+            "time": t["exit_time"],
+            "pnl": round(cum_pnl, 2),
+            "trade_pnl": round(t["pnl"], 2),
+        })
+
+    return {
+        "by_asset": asset_list,
+        "by_direction": direction_list,
+        "by_hour": hour_list,
+        "by_entry_bucket": bucket_list,
+        "per_instance": per_instance,
+        "cumulative": cumulative_series,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.post("/api/config")
 async def update_config(
     bot: str = Query(...),
