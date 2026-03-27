@@ -34,10 +34,17 @@ import os
 import sqlite3
 import sys
 import time
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+import anthropic
+
+# Optional telemetry
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tools'))
+    from api_telemetry import log_usage as _log_usage
+except ImportError:
+    _log_usage = None
 
 # --- Config ---
 
@@ -193,35 +200,32 @@ def retrieve_past_learnings() -> list:
 # ========================================================================
 
 def _call_claude(system: str, prompt: str, max_tokens: int = 4000) -> str:
-    """Call Claude API. Returns response text or error string."""
+    """Call Claude API via SDK with prompt caching. Returns response text or error string."""
     if not ANTHROPIC_API_KEY:
         return "[ERROR: ANTHROPIC_API_KEY not set]"
 
-    payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode()
-
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-            return data["content"][0]["text"]
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if hasattr(e, 'read') else ""
-        return f"[API ERROR {e.code}]: {body[:500]}"
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-6-20260217",
+            max_tokens=max_tokens,
+            system=[{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        usage = response.usage
+        cache_read = getattr(usage, 'cache_read_input_tokens', 0)
+        cache_write = getattr(usage, 'cache_creation_input_tokens', 0)
+        _log(f"API usage: in={usage.input_tokens} out={usage.output_tokens} "
+             f"cache_read={cache_read} cache_write={cache_write}")
+        if _log_usage:
+            _log_usage("llm_optimizer", response)
+        return response.content[0].text
+    except anthropic.APIError as e:
+        return f"[API ERROR {e.status_code}]: {e.message}"
     except Exception as e:
         return f"[ERROR]: {e}"
 

@@ -22,6 +22,12 @@ from datetime import datetime, timezone
 
 import requests
 
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tools'))
+    from api_telemetry import log_usage as _log_usage
+except ImportError:
+    _log_usage = None
+
 # --- Config ---
 
 DB_PATH = os.environ.get(
@@ -170,6 +176,8 @@ def _llm_synthesize(findings):
             max_tokens=500,
             messages=[{'role': 'user', 'content': prompt}]
         )
+        if _log_usage:
+            _log_usage("cmo_engine", response)
         return response.content[0].text
     except Exception:
         return ''

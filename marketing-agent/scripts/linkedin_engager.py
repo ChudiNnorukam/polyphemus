@@ -20,6 +20,7 @@ Examples:
 """
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -27,6 +28,12 @@ from datetime import datetime, timezone
 
 import anthropic
 import requests
+
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tools'))
+    from api_telemetry import log_usage as _log_usage
+except ImportError:
+    _log_usage = None
 
 DB_PATH = os.environ.get(
     'LEADS_DB_PATH',
@@ -64,33 +71,85 @@ SLACK_CHANNEL_ID = os.environ.get('SLACK_CHANNEL_ID', '')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 
 
-REPLY_SYSTEM_PROMPT = """You are Chudi, replying to a comment on your LinkedIn post.
+def _load_voice_config() -> dict:
+    """Load LinkedIn voice config from canonical JSON (source: voice.ts)."""
+    voice_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'voice-linkedin.json')
+    if os.path.exists(voice_path):
+        with open(voice_path) as f:
+            return json.load(f)
+    print("[WARN] voice-linkedin.json not found, using fallback voice rules")
+    return {}
+
+
+def _build_reply_prompt(voice: dict) -> str:
+    """Build REPLY_SYSTEM_PROMPT from voice-linkedin.json."""
+    identity = voice.get('identity', {})
+    name = identity.get('name', 'Chudi')
+    posture = voice.get('posture', 'Mid-to-senior practitioner thinking in public.')
+    audience = voice.get('audience_model', 'Peers figuring things out in parallel.')
+    em_dash = voice.get('em_dash_rule', 'No em dashes in AI-generated content.')
+
+    framing_use = voice.get('framing_use', [])
+    framing_never = voice.get('framing_never', [])
+    forbidden = voice.get('forbidden_phrases', [])
+    comment_rules = voice.get('comment_rules', {})
+    patterns = comment_rules.get('patterns', {})
+    max_sentences = comment_rules.get('max_sentences', 3)
+    max_exchanges = comment_rules.get('max_exchanges_per_thread', 2)
+    fingerprints = voice.get('fingerprints', {})
+
+    never_list = '\n'.join(f'- "{p}"' for p in framing_never[:6])
+    forbidden_list = ', '.join(f'"{p}"' for p in forbidden[:10])
+    fingerprint_list = '\n'.join(f'- {k.replace("_", " ").title()}: {v}' for k, v in list(fingerprints.items())[:5])
+
+    return f"""You are {name}, replying to a comment on your LinkedIn post.
+
+VOICE IDENTITY:
+- {posture}
+- Audience: {audience}
+- {em_dash}
 
 VOICE RULES (mandatory):
 - Grace over grind: meet comments with curiosity, not machismo
-- Self-compassion is visible: "I sat with it" not "I pushed through"
-- Warmth toward the reader: assume they're figuring it out too
+- Self-compassion visible: "I sat with it" not "I pushed through"
+- Warmth toward the reader
 - Specificity over polish: real moments over curated narratives
-- Humor and lightness are welcome
-- NEVER use em-dashes. Use periods or commas instead.
-- NEVER: "grinded through", "no excuses", "hustle", humble-brags
-- Keep replies 1-3 sentences. Natural, not performative.
+- Humor and lightness welcome
+- Keep replies 1-{max_sentences} sentences. Natural, not performative.
+- NEVER use em dashes in your reply.
+
+NEVER USE THESE PHRASES:
+{never_list}
+
+ALSO BANNED (AI detection triggers):
+{forbidden_list}
+
+VOICE FINGERPRINTS (use when natural):
+{fingerprint_list}
+
+PREFERRED FRAMINGS:
+{chr(10).join(f'- "{p}"' for p in framing_use[:5])}
 
 REPLY PATTERNS:
-- If they share experience: acknowledge it specifically, add your perspective
-- If they ask a question: answer directly, then ask one back (first exchange only)
-- If they agree/validate: thank warmly, add a small new insight
-- If they disagree: "that's a fair point" + genuine curiosity about their view
-- Max 2-3 exchanges per thread (don't over-engage)
+- Shared experience: {patterns.get('shared_experience', 'Acknowledge specifically, add perspective.')}
+- Question: {patterns.get('question', 'Answer directly, ask one back.')}
+- Agreement: {patterns.get('agreement', 'Thank warmly, add new insight.')}
+- Disagreement: {patterns.get('disagreement', 'Fair point + genuine curiosity.')}
+- Cheerleader: {patterns.get('cheerleader', 'Brief thanks, point to what is next.')}
+- Max {max_exchanges} exchanges per thread.
 
 POST CONTEXT:
-{post_content}
+{{post_content}}
 
 COMMENTER:
-Name: {commenter_name}
-Comment: {comment_text}
+Name: {{commenter_name}}
+Comment: {{comment_text}}
 
 Write a reply. No quotation marks around it. Just the text."""
+
+
+_VOICE_CONFIG = _load_voice_config()
+REPLY_SYSTEM_PROMPT = _build_reply_prompt(_VOICE_CONFIG)
 
 
 def get_db():
@@ -209,6 +268,8 @@ def generate_reply(post_content: str, commenter_name: str, comment_text: str) ->
             }],
             messages=[{"role": "user", "content": "Write the reply."}]
         )
+        if _log_usage:
+            _log_usage("linkedin_engager", response)
         return response.content[0].text.strip()
     except Exception as e:
         print(f"    Reply generation failed: {e}")

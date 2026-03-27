@@ -234,8 +234,21 @@ def post_linkedin(content: str, image_url: str) -> str:
         timeout=15
     )
     r.raise_for_status()
-    # LinkedIn returns the post URN in the X-RestLi-Id header
-    post_id = r.headers.get('X-RestLi-Id', r.headers.get('x-restli-id', 'unknown'))
+    # LinkedIn returns the post URN in the X-RestLi-Id header or response body
+    post_id = r.headers.get('X-RestLi-Id', r.headers.get('x-restli-id', ''))
+    if not post_id:
+        # Some API versions return the URN in the response body or Location header
+        post_id = r.headers.get('Location', '').split('/')[-1] if r.headers.get('Location') else ''
+    if not post_id:
+        try:
+            body = r.json()
+            post_id = body.get('id', body.get('urn', ''))
+        except Exception:
+            pass
+    if not post_id:
+        # Fallback: extract from x-linkedin-id or content-location
+        post_id = r.headers.get('x-linkedin-id', r.headers.get('Content-Location', 'unknown'))
+    print(f"    [DEBUG] Post response status={r.status_code} headers={dict((k,v) for k,v in r.headers.items() if 'id' in k.lower() or 'location' in k.lower() or 'restli' in k.lower())}")
     return post_id
 
 

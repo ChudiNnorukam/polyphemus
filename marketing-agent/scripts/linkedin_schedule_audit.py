@@ -19,7 +19,7 @@ DB_PATH = os.environ.get(
     os.path.join(os.path.dirname(__file__), '..', 'data', 'marketing_leads.db')
 )
 LOCAL_TZ = ZoneInfo('America/Los_Angeles')
-ALLOWED_WEEKDAYS = {0, 1, 2, 3}  # Mon-Thu
+ALLOWED_WEEKDAYS = {0, 1, 2, 3, 4}  # Mon-Fri
 
 
 def _load_env():
@@ -95,7 +95,7 @@ def main():
         dt_local = local_dt(row['scheduled_at'])
         issues = []
         if dt_local.weekday() not in ALLOWED_WEEKDAYS:
-            issues.append('non-Mon-Thu')
+            issues.append('non-Mon-Fri')
         if day_counts[dt_local.date().isoformat()] > 1:
             issues.append('duplicate-day')
 
@@ -110,7 +110,7 @@ def main():
     print("LINKEDIN SCHEDULE AUDIT")
     print("━" * 52)
     print(f"  Local timezone: {LOCAL_TZ.key}")
-    print(f"  Allowed days:   Mon Tue Wed Thu")
+    print(f"  Allowed days:   Mon Tue Wed Thu Fri")
     print(f"  Queue:          {sum(r['status'] == 'approved' for r in rows)} approved / {sum(r['status'] == 'posted' for r in rows)} posted")
     print(f"  Compliance:     {'OK' if not violations else 'FAIL'}")
 

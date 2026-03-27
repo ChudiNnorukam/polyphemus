@@ -14,6 +14,7 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,18 +102,44 @@ def main():
         from memory_engine import cmd_scan
         from ceo_engine import cmd_weekly as ceo_weekly
 
-        steps = [
+        # Phase 1: Run CMO, CTO, COO in parallel (independent engines)
+        parallel_steps = [
             ('CMO Daily', cmo_daily, engine_args),
             ('CTO Daily', cto_daily, engine_args),
             ('COO Daily', coo_daily, engine_args),
+        ]
+
+        # Phase 2: Sequential steps that depend on Phase 1
+        sequential_steps = [
             ('Memory Scan', cmd_scan, engine_args),
         ]
         if not args.skip_ceo:
-            steps.append(('CEO Weekly', ceo_weekly, engine_args))
+            sequential_steps.append(('CEO Weekly', ceo_weekly, engine_args))
 
-    for label, fn, fn_args in steps:
-        ok, elapsed = run_step(label, fn, fn_args)
-        results.append((label, ok, elapsed))
+        steps = parallel_steps + sequential_steps
+
+    if args.only:
+        # Single engine: run sequentially
+        for label, fn, fn_args in steps:
+            ok, elapsed = run_step(label, fn, fn_args)
+            results.append((label, ok, elapsed))
+    else:
+        # Phase 1: run CMO/CTO/COO in parallel
+        print(f'\n  Running {len(parallel_steps)} engines in parallel...')
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {
+                pool.submit(run_step, label, fn, fn_args): label
+                for label, fn, fn_args in parallel_steps
+            }
+            for future in as_completed(futures):
+                label = futures[future]
+                ok, elapsed = future.result()
+                results.append((label, ok, elapsed))
+
+        # Phase 2: Memory + CEO sequentially
+        for label, fn, fn_args in sequential_steps:
+            ok, elapsed = run_step(label, fn, fn_args)
+            results.append((label, ok, elapsed))
 
     # Summary
     print()

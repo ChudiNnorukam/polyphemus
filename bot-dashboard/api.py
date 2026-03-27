@@ -35,6 +35,18 @@ logger = logging.getLogger("dashboard")
 
 API_TOKEN = os.environ.get("DASHBOARD_TOKEN", "changeme")
 
+def _safe_ts(v):
+    """Convert exit_time (float or datetime string) to unix timestamp."""
+    if not v:
+        return 0.0
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        try:
+            return datetime.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            return 0.0
+
 BOTS = {
     "emmanuel": {
         "db": "/opt/lagbot/instances/emmanuel/data/performance.db",
@@ -51,6 +63,14 @@ BOTS = {
         "service": "lagbot@polyphemus",
         "health_dir": "/opt/lagbot/instances/polyphemus/data",
         "kill_switch": "/opt/lagbot/instances/polyphemus/KILL_SWITCH",
+    },
+    "pair_arb": {
+        "db": "/opt/lagbot/instances/pair_arb/data/performance.db",
+        "signals_db": "/opt/lagbot/instances/pair_arb/data/signals.db",
+        "env": "/opt/lagbot/instances/pair_arb/.env",
+        "service": "lagbot@pair_arb",
+        "health_dir": "/opt/lagbot/instances/pair_arb/data",
+        "kill_switch": "/opt/lagbot/instances/pair_arb/KILL_SWITCH",
     },
 }
 
@@ -582,7 +602,7 @@ async def trades(
             row["bot"] = bot_name
         all_trades.extend(rows)
 
-    all_trades.sort(key=lambda x: x.get("exit_time") or 0, reverse=True)
+    all_trades.sort(key=lambda x: _safe_ts(x.get("exit_time")), reverse=True)
     return {"trades": all_trades[:limit], "count": len(all_trades)}
 
 
@@ -610,7 +630,7 @@ async def pnl(
         """, (cutoff,))
 
         for row in rows:
-            dt = datetime.fromtimestamp(row["exit_time"], tz=timezone.utc)
+            dt = datetime.fromtimestamp(_safe_ts(row["exit_time"]), tz=timezone.utc)
             date_str = dt.strftime("%Y-%m-%d")
             if date_str not in daily:
                 daily[date_str] = {"date": date_str, "pnl": 0, "trades": 0, "wins": 0}
@@ -983,7 +1003,7 @@ async def strategy_pnl(
                 strategy_totals[source]["wins"] += 1
 
             # Daily breakdown for trend charts
-            dt = datetime.fromtimestamp(row["exit_time"], tz=timezone.utc)
+            dt = datetime.fromtimestamp(_safe_ts(row["exit_time"]), tz=timezone.utc)
             date_str = dt.strftime("%Y-%m-%d")
             key = (date_str, source)
             if key not in daily_by_strategy:
@@ -1118,7 +1138,7 @@ async def scoreboard(
         all_open.extend(open_rows)
 
     # Sort all recent by exit_time desc
-    all_recent.sort(key=lambda x: x.get("exit_time") or 0, reverse=True)
+    all_recent.sort(key=lambda x: _safe_ts(x.get("exit_time")), reverse=True)
 
     # Compute aggregate stats
     for t in all_recent:
@@ -1139,7 +1159,7 @@ async def scoreboard(
     combined["ev_per_trade"] = round(combined["pnl"] / combined["total"], 2) if combined["total"] else 0
 
     # Compute streak (from most recent trade)
-    sorted_by_time = sorted(all_recent, key=lambda x: x.get("exit_time") or 0, reverse=True)
+    sorted_by_time = sorted(all_recent, key=lambda x: _safe_ts(x.get("exit_time")), reverse=True)
     if sorted_by_time:
         streak_win = sorted_by_time[0]["is_win"]
         streak_count = 0
@@ -1189,7 +1209,10 @@ async def stats(
         inst = {"trades": 0, "wins": 0, "pnl": 0.0}
 
         for row in rows:
-            pnl_val = row["pnl"] or 0
+            try:
+                pnl_val = float(row["pnl"] or 0)
+            except (ValueError, TypeError):
+                pnl_val = 0
             is_win = pnl_val > 0
             slug = row["slug"] or ""
 
@@ -1200,7 +1223,10 @@ async def stats(
             direction = row.get("outcome") or "unknown"
 
             # Entry price bucket
-            ep = row.get("entry_price") or 0
+            try:
+                ep = float(row.get("entry_price") or 0)
+            except (ValueError, TypeError):
+                ep = 0
             if ep < 0.50:
                 bucket = "<0.50"
             elif ep < 0.52:
@@ -1214,7 +1240,10 @@ async def stats(
 
             # Hour of day (UTC)
             exit_t = row.get("exit_time") or 0
-            hour_utc = datetime.fromtimestamp(exit_t, tz=timezone.utc).hour if exit_t else 0
+            try:
+                hour_utc = datetime.fromtimestamp(float(exit_t), tz=timezone.utc).hour if exit_t else 0
+            except (ValueError, TypeError, OSError):
+                hour_utc = 0
 
             # Aggregate by asset
             if asset not in by_asset:
@@ -1281,7 +1310,7 @@ async def stats(
     add_wr(bucket_list)
 
     # Build cumulative P&L series
-    all_trades_for_cum.sort(key=lambda x: x["exit_time"])
+    all_trades_for_cum.sort(key=lambda x: _safe_ts(x.get("exit_time")))
     cum_pnl = 0.0
     for t in all_trades_for_cum:
         cum_pnl += t["pnl"]

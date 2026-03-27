@@ -19,6 +19,13 @@ from datetime import datetime, timedelta, timezone
 
 from anthropic import Anthropic
 
+# Optional telemetry
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tools'))
+    from api_telemetry import log_usage as _log_usage
+except ImportError:
+    _log_usage = None
+
 DB_PATH = os.environ.get(
     'LEADS_DB_PATH',
     os.path.join(os.path.dirname(__file__), '..', 'data', 'marketing_leads.db')
@@ -38,24 +45,83 @@ FORBIDDEN_PHRASES = [
     'Moreover',
 ]
 
-LINKEDIN_CHAR_LIMIT = 1200
-LINKEDIN_TARGET_CHARS = 1150
-LINKEDIN_MAX_HASHTAGS = 3
+def _load_voice_config() -> dict:
+    """Load LinkedIn voice config from canonical JSON (source: voice.ts)."""
+    voice_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'voice-linkedin.json')
+    if os.path.exists(voice_path):
+        with open(voice_path) as f:
+            return json.load(f)
+    print("[WARN] voice-linkedin.json not found, using fallback voice rules")
+    return {}
+
+
+_VOICE_CONFIG = _load_voice_config()
+
+LINKEDIN_CHAR_LIMIT = _VOICE_CONFIG.get('post_rules', {}).get('char_limit', 1200)
+LINKEDIN_TARGET_CHARS = _VOICE_CONFIG.get('post_rules', {}).get('target_chars', 1150)
+LINKEDIN_MAX_HASHTAGS = _VOICE_CONFIG.get('post_rules', {}).get('max_hashtags', 3)
 LINKEDIN_COMMENT_PATTERNS = [
     r'\bin the comments\b',
     r'\bin comments\b',
     r'\bfirst comment\b',
     r'\bdropping it in the comments\b',
 ]
-LINKEDIN_VOICE_BRIEF = """Voice goals:
-- Sound like a mid-to-senior practitioner thinking in public, not a guru or marketer
+
+
+def _build_voice_brief(voice: dict) -> str:
+    """Build LINKEDIN_VOICE_BRIEF from voice-linkedin.json."""
+    posture = voice.get('posture', 'Mid-to-senior practitioner thinking in public.')
+    audience = voice.get('audience_model', 'Peers figuring things out in parallel.')
+    em_dash = voice.get('em_dash_rule', 'No em dashes.')
+    framing_use = voice.get('framing_use', [])
+    framing_never = voice.get('framing_never', [])
+    forbidden = voice.get('forbidden_phrases', [])
+    fingerprints = voice.get('fingerprints', {})
+    structure = voice.get('post_rules', {}).get('structure', '')
+
+    fingerprint_lines = '\n'.join(f'- {v}' for v in list(fingerprints.values())[:6])
+    framing_lines = ', '.join(f'"{p}"' for p in framing_use[:5])
+
+    return f"""Voice goals:
+- {posture}
+- Audience: {audience}
 - Warm, exploratory, and peer-to-peer
 - Use concrete mechanisms, tradeoffs, failure modes, and architecture layers when relevant
-- Applied LLM / harness engineering / systems design framing is welcome when it fits the topic
-- Prefer \"I keep noticing\", \"my current model is\", or similarly curious framing over absolute claims
+- Prefer curious framing: {framing_lines}
 - Name what changed your thinking, not just the conclusion
-- Avoid hype, certainty theater, hustle language, and sweeping statements about what \"everyone\" should do
-- No em dashes
+- {structure}
+- {em_dash}
+
+Voice fingerprints (use when natural):
+{fingerprint_lines}
+
+NEVER use: {', '.join(f'"{p}"' for p in framing_never[:5])}
+BANNED phrases (AI detection): {', '.join(f'"{p}"' for p in forbidden[:8])}
+"""
+
+
+LINKEDIN_VOICE_BRIEF = _build_voice_brief(_VOICE_CONFIG)
+
+# Cached system prompt for all repurpose API calls (~1200 tokens to exceed Haiku's 1024 minimum)
+REPURPOSE_SYSTEM_PROMPT = f"""You are a content repurposing specialist for a solo-founder tech startup.
+You convert technical blog posts into platform-specific social media content.
+
+{LINKEDIN_VOICE_BRIEF}
+
+Universal rules (apply to ALL platforms):
+- No em dashes (use commas, periods, colons, or hyphens instead)
+- No "leverage", "robust", "scalable", "game-changer", "cutting-edge"
+- No "Additionally", "Furthermore", "In conclusion", "Moreover"
+- Conversational, not corporate. Sound like someone building real systems.
+- Share specific insights, tradeoffs, or failure modes, not generic advice.
+- Avoid sweeping declarations like "this is why everyone should" or "99% of people".
+
+Platform-specific guidelines:
+- LinkedIn: 800-1200 chars, max {LINKEDIN_MAX_HASHTAGS} hashtags, no mention of comments/first comment
+- Twitter: 8-10 tweets, each max 280 chars, return as JSON array of strings
+- Pinterest: 150-300 char description + max 100 char title, two lines only
+
+When rewriting to fix issues, return ONLY the rewritten text with no preamble or explanation.
 """
 
 
@@ -76,6 +142,13 @@ def _load_env():
 
 _load_env()
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+
+
+def _track(response):
+    """Log API usage telemetry if available. Returns response for chaining."""
+    if _log_usage:
+        _log_usage("repurpose", response)
+    return response
 DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 
 
@@ -135,11 +208,13 @@ def check_and_fix_voice(client: Anthropic, text: str, platform: str) -> str:
     for phrase in found:
         label = 'em dash' if phrase == '\u2014' else f'"{phrase}"'
         prompt = f"Rewrite this without {label}. Return only the rewritten text, nothing else:\n\n{text}"
-        response = client.messages.create(
+        response = _track(client.messages.create(
             model='claude-haiku-4-5-20251001',
             max_tokens=800,
+            system=[{"type": "text", "text": REPURPOSE_SYSTEM_PROMPT,
+                     "cache_control": {"type": "ephemeral"}}],
             messages=[{'role': 'user', 'content': prompt}]
-        )
+        ))
         text = response.content[0].text.strip()
     return text
 
@@ -236,11 +311,13 @@ Issues to fix: {', '.join(issues)}
 Current post:
 {normalized}
 """
-        response = client.messages.create(
+        response = _track(client.messages.create(
             model='claude-haiku-4-5-20251001',
             max_tokens=500,
+            system=[{"type": "text", "text": REPURPOSE_SYSTEM_PROMPT,
+                     "cache_control": {"type": "ephemeral"}}],
             messages=[{'role': 'user', 'content': prompt}]
-        )
+        ))
         normalized = response.content[0].text.strip()
 
     return fallback_linkedin_cleanup(normalized)
@@ -269,11 +346,13 @@ Rules:
 - Avoid sweeping declarations like "this is why everyone should" or "99% of people"
 - Return only the post text."""
 
-    response = client.messages.create(
+    response = _track(client.messages.create(
         model='claude-haiku-4-5-20251001',
         max_tokens=600,
+        system=[{"type": "text", "text": REPURPOSE_SYSTEM_PROMPT,
+                 "cache_control": {"type": "ephemeral"}}],
         messages=[{'role': 'user', 'content': prompt}]
-    )
+    ))
     return response.content[0].text.strip()
 
 
@@ -293,11 +372,13 @@ Rules:
 - Each tweet must stand alone if read out of context
 - Return ONLY the JSON array, no other text."""
 
-    response = client.messages.create(
+    response = _track(client.messages.create(
         model='claude-haiku-4-5-20251001',
         max_tokens=800,
+        system=[{"type": "text", "text": REPURPOSE_SYSTEM_PROMPT,
+                 "cache_control": {"type": "ephemeral"}}],
         messages=[{'role': 'user', 'content': prompt}]
-    )
+    ))
     raw = response.content[0].text.strip()
     # Strip markdown code fences if LLM wrapped the JSON
     raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.IGNORECASE)
@@ -326,11 +407,13 @@ Rules:
 - No em dashes, no marketing buzzwords
 - Return as two lines: first line = pin title, second line = pin description. Nothing else."""
 
-    response = client.messages.create(
+    response = _track(client.messages.create(
         model='claude-haiku-4-5-20251001',
         max_tokens=200,
+        system=[{"type": "text", "text": REPURPOSE_SYSTEM_PROMPT,
+                 "cache_control": {"type": "ephemeral"}}],
         messages=[{'role': 'user', 'content': prompt}]
-    )
+    ))
     return response.content[0].text.strip()
 
 

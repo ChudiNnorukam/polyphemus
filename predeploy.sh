@@ -98,7 +98,7 @@ COMPILE_FAIL=0
 for f in "$LOCAL_DIR"/*.py; do
     fname="$(basename "$f")"
     [[ "$fname" == test_* ]] && continue
-    if ! python -m py_compile "$f" 2>/dev/null; then
+    if ! python3 -m py_compile "$f" 2>/dev/null; then
         echo -e "  ${RED}FAIL${NC} $fname"
         COMPILE_FAIL=1
     fi
@@ -120,7 +120,7 @@ if [[ "$SKIP_TESTS" == true ]]; then
 else
     echo -e "${CYAN}[3/$TOTAL_STEPS] pytest${NC}"
     cd "$PROJECT_DIR"
-    TEST_OUTPUT=$(python -m pytest polyphemus/test_smoke.py polyphemus/test_modules.py -q 2>&1) || true
+    TEST_OUTPUT=$(python3 -m pytest polyphemus/test_smoke.py polyphemus/test_chainlink.py -q 2>&1) || true
     PASSED=$(echo "$TEST_OUTPUT" | grep -oE '[0-9]+ passed' | head -1 || echo "0 passed")
     FAILED=$(echo "$TEST_OUTPUT" | grep -oE '[0-9]+ failed' | head -1 || echo "")
 
@@ -303,53 +303,86 @@ else
     sleep 1
 fi
 
-# 4b: scp changed files
-echo -e "  Uploading $TOTAL_CHANGED file(s)..."
+# 4b: ATOMIC DEPLOY — stage to /tmp, compile there, swap only on success
+STAGE_DIR="/tmp/lagbot_deploy_$(date +%s)"
+BACKUP_DIR="/tmp/lagbot_backup_$(date +%s)"
+
+echo -e "  Staging $TOTAL_CHANGED file(s) to $STAGE_DIR..."
+ssh root@$VPS "mkdir -p $STAGE_DIR"
+
 for fname in $DEPLOY_LIST; do
-    scp -q "$LOCAL_DIR/$fname" "root@$VPS:$VPS_CODE/$fname"
+    scp -q "$LOCAL_DIR/$fname" "root@$VPS:$STAGE_DIR/$fname"
     echo -e "    ${GREEN}+${NC} $fname"
 done
 
-# 4c: Clear __pycache__
-echo -e "  Clearing __pycache__..."
-ssh root@$VPS "find $VPS_CODE -name __pycache__ -exec rm -rf {} + 2>/dev/null" || true
+# 4c: Verify checksums in staging
+echo -e "  Verifying staged checksums..."
+CHECKSUM_OK=true
+for fname in $DEPLOY_LIST; do
+    local_md5=$(md5 -q "$LOCAL_DIR/$fname" 2>/dev/null || md5sum "$LOCAL_DIR/$fname" | awk '{print $1}')
+    remote_md5=$(ssh root@$VPS "md5sum $STAGE_DIR/$fname | awk '{print \$1}'" 2>/dev/null)
+    if [[ "$local_md5" != "$remote_md5" ]]; then
+        echo -e "    ${RED}MISMATCH${NC} $fname local=$local_md5 staged=$remote_md5"
+        CHECKSUM_OK=false
+    fi
+done
 
-# 4d: py_compile on VPS (from /tmp to avoid types.py shadow)
-echo -e "  Compiling on VPS..."
+if [[ "$CHECKSUM_OK" != true ]]; then
+    echo -e "  ${RED}STAGING CHECKSUM MISMATCH - aborting, live code UNTOUCHED${NC}"
+    ssh root@$VPS "rm -rf $STAGE_DIR" 2>/dev/null || true
+    ssh root@$VPS "systemctl start lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || true
+    exit 1
+fi
+echo -e "  ${GREEN}Staged checksums verified${NC}"
+
+# 4d: py_compile staged files on VPS (from /tmp to avoid types.py shadow)
+echo -e "  Compiling staged files on VPS..."
 VPS_COMPILE_FAIL=0
 for fname in $DEPLOY_LIST; do
-    if ! ssh root@$VPS "cd /tmp && python3 -m py_compile $VPS_CODE/$fname" 2>/dev/null; then
+    if ! ssh root@$VPS "cd /tmp && python3 -m py_compile $STAGE_DIR/$fname" 2>/dev/null; then
         echo -e "    ${RED}FAIL${NC} $fname"
         VPS_COMPILE_FAIL=1
     fi
 done
 
 if [[ $VPS_COMPILE_FAIL -eq 1 ]]; then
-    echo -e "  ${RED}VPS COMPILE FAILED - service NOT restarted${NC}"
-    echo -e "  Fix the error, then: ssh root@$VPS 'systemctl start lagbot@${DEPLOY_INSTANCE}'"
+    echo -e "  ${RED}STAGED COMPILE FAILED - live code UNTOUCHED, restarting old code${NC}"
+    ssh root@$VPS "rm -rf $STAGE_DIR" 2>/dev/null || true
+    ssh root@$VPS "systemctl start lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || true
     exit 1
 fi
-echo -e "  ${GREEN}VPS compile clean${NC}"
+echo -e "  ${GREEN}Staged compile clean${NC}"
 
-# 4e: Verify checksums match after upload
-echo -e "  Verifying checksums..."
-CHECKSUM_OK=true
+# 4e: Backup current live files, then swap staged files in
+echo -e "  Backing up current live files..."
+ssh root@$VPS "mkdir -p $BACKUP_DIR"
 for fname in $DEPLOY_LIST; do
-    local_md5=$(md5 -q "$LOCAL_DIR/$fname" 2>/dev/null || md5sum "$LOCAL_DIR/$fname" | awk '{print $1}')
-    remote_md5=$(ssh root@$VPS "md5sum $VPS_CODE/$fname | awk '{print \$1}'" 2>/dev/null)
-    if [[ "$local_md5" != "$remote_md5" ]]; then
-        echo -e "    ${RED}MISMATCH${NC} $fname local=$local_md5 vps=$remote_md5"
-        CHECKSUM_OK=false
+    ssh root@$VPS "cp $VPS_CODE/$fname $BACKUP_DIR/$fname 2>/dev/null" || true
+done
+
+echo -e "  Swapping staged files to live..."
+SWAP_FAIL=false
+for fname in $DEPLOY_LIST; do
+    if ! ssh root@$VPS "mv $STAGE_DIR/$fname $VPS_CODE/$fname"; then
+        echo -e "    ${RED}SWAP FAILED${NC} $fname"
+        SWAP_FAIL=true
     fi
 done
 
-if [[ "$CHECKSUM_OK" != true ]]; then
-    echo -e "  ${RED}CHECKSUM MISMATCH - service NOT restarted${NC}"
+if [[ "$SWAP_FAIL" == true ]]; then
+    echo -e "  ${RED}SWAP FAILED - rolling back from backup${NC}"
+    for fname in $DEPLOY_LIST; do
+        ssh root@$VPS "cp $BACKUP_DIR/$fname $VPS_CODE/$fname 2>/dev/null" || true
+    done
+    ssh root@$VPS "systemctl start lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || true
     exit 1
 fi
-echo -e "  ${GREEN}Checksums verified${NC}"
 
-# 4f: Start service
+# 4f: Clear __pycache__ and staging dir
+ssh root@$VPS "find $VPS_CODE -name __pycache__ -exec rm -rf {} + 2>/dev/null; rm -rf $STAGE_DIR" || true
+echo -e "  ${GREEN}Atomic swap complete${NC} (backup at $BACKUP_DIR)"
+
+# 4g: Start service
 echo -e "  Starting lagbot@${DEPLOY_INSTANCE}..."
 ssh root@$VPS "systemctl start lagbot@${DEPLOY_INSTANCE}"
 sleep 2
