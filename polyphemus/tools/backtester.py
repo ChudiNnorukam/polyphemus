@@ -31,30 +31,30 @@ LOCAL_CACHE = Path(__file__).parent / ".backtest_cache"
 # Adjusted to current data availability. Keep the default grid small enough
 # to be usable on laptop-sized cached DBs.
 FILTER_GRID = {
-    "entry_price_min": [0.80, 0.82, 0.84],
-    "entry_price_max": [0.85, 0.88, 0.90, 0.92],
-    "min_time_remaining": [0, 30, 60, 120],
-    "min_momentum_pct": [0.0, 0.001, 0.002, 0.003],
+    "entry_price_min": [0.45, 0.50, 0.55, 0.60],
+    "entry_price_max": [0.75, 0.80, 0.85, 0.90],
+    "min_time_remaining": [0, 60, 120, 240],
+    "min_momentum_pct": [0.001, 0.002, 0.003, 0.005],
     "allowed_regimes": [
         ("trending", "volatile", "flat"),
         ("trending", "volatile"),
         ("trending",),
     ],
     "post_loss_cooldown": [0, 300, 900, 1800],
-    "max_consec_losses": [2, 3, 5, 999],
+    "max_consec_losses": [3, 5, 10, 999],
 }
 
 FILTER_GRID_REDUCED = {
-    "entry_price_min": [0.80, 0.82],
-    "entry_price_max": [0.88, 0.90],
-    "min_time_remaining": [0, 60],
-    "min_momentum_pct": [0.0, 0.002],
+    "entry_price_min": [0.50, 0.60],
+    "entry_price_max": [0.79, 0.85],
+    "min_time_remaining": [0, 120],
+    "min_momentum_pct": [0.002, 0.003],
     "allowed_regimes": [
         ("trending", "volatile", "flat"),
         ("trending", "volatile"),
     ],
     "post_loss_cooldown": [0, 900],
-    "max_consec_losses": [3, 999],
+    "max_consec_losses": [5, 999],
 }
 
 

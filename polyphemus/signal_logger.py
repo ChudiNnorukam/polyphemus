@@ -173,6 +173,27 @@ class SignalLogger:
                 pass
         self._conn.commit()
 
+        # Position snapshots: periodic midpoint captures for mid-epoch exit research
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS position_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                asset TEXT,
+                direction TEXT,
+                entry_price REAL NOT NULL,
+                midpoint REAL,
+                spread REAL,
+                time_remaining_secs INTEGER,
+                secs_held REAL,
+                is_winning INTEGER
+            )
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshots_slug ON position_snapshots(slug)
+        """)
+        self._conn.commit()
+
         # Additive migrations — try/except pattern (ALTER TABLE IF NOT EXISTS not valid in SQLite)
         _migration_cols = [
             ("strategy_type", "TEXT"), ("pair_cost", "REAL"), ("source", "TEXT"),
@@ -193,6 +214,10 @@ class SignalLogger:
             ("shadow_ensemble_selected", "INTEGER"),
             ("shadow_ensemble_score", "REAL"),
             ("shadow_ensemble_reason", "TEXT"),
+            ("coinbase_premium_bps", "REAL"),
+            ("liq_volume_60s", "REAL"),
+            ("liq_bias", "TEXT"),
+            ("liq_conviction", "REAL"),
         ]
         for col_name, col_def in _migration_cols:
             try:
@@ -222,6 +247,10 @@ class SignalLogger:
         for key, value in features.items():
             if key not in self._signal_columns:
                 continue
+            # Normalize direction to lowercase to prevent case-mismatch bugs
+            # (Mar 22 2026: 37% of labels were inverted due to Up/up mismatch)
+            if key == "direction" and isinstance(value, str):
+                value = value.lower()
             sanitized[key] = self._normalize_value(key, value)
         return sanitized
 
@@ -448,6 +477,29 @@ class SignalLogger:
             "avg_win_score": round(row[7], 2) if row[7] else None,
             "avg_loss_score": round(row[8], 2) if row[8] else None,
         }
+
+    def log_position_snapshot(self, slug: str, asset: str, direction: str,
+                              entry_price: float, midpoint: float,
+                              spread: float = None, time_remaining_secs: int = None,
+                              secs_held: float = None):
+        """Log a periodic midpoint snapshot for an open position.
+
+        Called every ~30s per open position. Enables mid-epoch exit research
+        by tracking price trajectories during position lifetime.
+        """
+        now = datetime.now(timezone.utc)
+        is_winning = 1 if (midpoint and midpoint > entry_price) else 0
+        try:
+            self._conn.execute("""
+                INSERT INTO position_snapshots
+                    (timestamp, slug, asset, direction, entry_price, midpoint,
+                     spread, time_remaining_secs, secs_held, is_winning)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now.isoformat(), slug, asset, direction, entry_price,
+                  midpoint, spread, time_remaining_secs, secs_held, is_winning))
+            self._conn.commit()
+        except Exception as e:
+            self._logger.error(f"Failed to log position snapshot: {e}")
 
     def close(self):
         """Close the database connection."""

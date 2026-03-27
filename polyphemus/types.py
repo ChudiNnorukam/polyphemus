@@ -30,6 +30,7 @@ class ExitReason(str, Enum):
     MID_PRICE_STOP = "mid_price_stop"
     PRE_RESOLUTION_EXIT = "pre_resolution_exit"
     PROFIT_TARGET_EARLY = "profit_target_early"
+    CONFIDENCE_EXIT = "confidence_exit"
 
 
 class OrderStatus(str, Enum):

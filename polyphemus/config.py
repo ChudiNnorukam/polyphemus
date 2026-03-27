@@ -9,6 +9,7 @@ try:
     from pydantic_settings import BaseSettings
 except ImportError:
     from pydantic import BaseSettings
+from pydantic import field_validator
 
 
 ENV_PATH = Path(__file__).parent / '.env'
@@ -25,6 +26,10 @@ class Settings(BaseSettings):
     builder_api_key: str
     builder_secret: str
     builder_passphrase: str
+
+    # Relayer API Key auth (simpler than builder HMAC, preferred when available)
+    relayer_api_key: str = ""
+    relayer_api_key_address: str = ""
 
     polygon_chain_id: int = 137
     polygon_rpc_url: str
@@ -278,9 +283,27 @@ class Settings(BaseSettings):
     trailing_stop_min_gain_pct: float = 0.05  # only activate after 5% gain from entry
     trailing_stop_dry_run: bool = True    # log only, no actual exits
 
+    # Confidence exit: cut positions early when midpoint trajectory signals likely loser.
+    # Research (Mar 23, n=264): winners avg 0.71 midpoint at T-210s, losers avg 0.47.
+    # Exit if midpoint < threshold after min_hold_secs. Walk-forward validated (+$44 OOS).
+    confidence_exit_enabled: bool = False
+    confidence_exit_dry_run: bool = True   # log only, no actual exits
+    confidence_exit_threshold: float = 0.60  # exit if our token midpoint below this
+    confidence_exit_min_hold_secs: int = 60  # don't check before 60s held
+    confidence_exit_max_hold_secs: int = 120  # stop checking after 120s (later exits are net negative)
+
+    # Outcome gate: pause trading when rolling WR drops (losing regime detection)
+    # Research (Mar 23, n=329): after-loss WR=29%, after-win WR=85%, ACF=0.401.
+    # Losses cluster. Pausing after N consecutive losses avoids regime drawdowns.
+    outcome_gate_enabled: bool = False
+    outcome_gate_dry_run: bool = True     # log only, no actual blocking
+    outcome_gate_window: int = 10         # track last N trade outcomes
+    outcome_gate_min_wr: float = 0.40     # block if rolling WR < 40%
+    outcome_gate_resume_wr: float = 0.55  # resume when rolling WR recovers to 55%
+
     # Mid-price stop-loss for momentum positions (bypasses hold_to_resolution)
     mid_price_stop_enabled: bool = False
-    mid_price_stop_pct: float = 0.35   # exit when mid-price drops 35% below entry
+    mid_price_stop_pct: float = 0.08   # exit when mid-price drops 8% below entry
 
     # Pre-resolution exit: force sell momentum positions N seconds before market end
     pre_resolution_exit_secs: int = 0   # 0 = disabled. e.g. 15 = sell 15s before resolution
@@ -354,6 +377,50 @@ class Settings(BaseSettings):
     mm_stale_max_secs_remaining: int = 180  # stale quotes scan up to 3min before epoch end (wider than pair arb)
     mm_stale_min_secs_remaining: int = 8    # stop scanning (need time for FOK fill)
 
+    # Limit-order pair-cost arbitrage (maker bids on BOTH sides, wait for fills, profit from resolution)
+    # Inspired by 0x8dxd: post GTC limit bids at target prices, poll for fills, hold to resolution.
+    # Maker fee = $0. Profit = $1.00 - (bid_up + bid_down) per share if both fill.
+    mm_limit_enabled: bool = False          # master switch for limit-order MM
+    mm_limit_dry_run: bool = True           # log only, no real orders
+    mm_limit_bid_price: float = 0.48        # bid price per side (pair_cost = 2 * this = $0.96)
+    mm_limit_min_bid: float = 0.40          # floor bid price (below = too risky, won't fill)
+    mm_limit_max_bid: float = 0.52          # ceiling bid price (above = pair_cost too high)
+    mm_limit_bet_pct: float = 0.03          # 3% of balance per leg
+    mm_limit_max_bet: float = 5.0           # hard $ cap per leg (start small: $5)
+    mm_limit_min_secs_post: int = 180       # post orders when >= N secs remain in epoch
+    mm_limit_max_secs_post: int = 280       # post orders when <= N secs remain (avoid start-of-epoch)
+    mm_limit_cancel_at_secs: int = 30       # cancel unfilled orders when < N secs remain
+    mm_limit_poll_interval: float = 5.0     # seconds between fill-check polls
+    mm_limit_max_pairs: int = 2             # max simultaneous pair positions across all assets
+    mm_limit_orphan_hold: bool = True       # if only one leg fills, hold to resolution (directional bet at 0.48)
+
+    # Rebate MM: continuous two-sided quoting with VPIN protection for maker rebate farming
+    # Posts GTC bids AND asks near midpoint. Earns Polymarket quadratic liquidity rewards.
+    # VPIN dynamically widens spread or pulls quotes when informed flow detected.
+    mm_rebate_enabled: bool = False         # master switch for rebate market making
+    mm_rebate_dry_run: bool = True          # log only, no real orders
+    mm_rebate_base_spread: float = 0.04    # base bid-ask spread width ($0.04 = 2c each side)
+    mm_rebate_min_spread: float = 0.02     # tightest allowed spread (aggressive for rewards)
+    mm_rebate_max_spread: float = 0.10     # widest spread before pulling quotes entirely
+    mm_rebate_size_pct: float = 0.03       # 3% of balance per side per quote
+    mm_rebate_max_size: float = 10.0       # hard $ cap per side (start small)
+    mm_rebate_min_mid: float = 0.20        # skip quoting when mid < this (too far from 50/50)
+    mm_rebate_max_mid: float = 0.80        # skip quoting when mid > this
+    mm_rebate_refresh_secs: float = 5.0    # cancel+replace quotes every N seconds
+    mm_rebate_min_secs: int = 60           # stop quoting when < N secs remain (resolution risk)
+    mm_rebate_max_secs: int = 280          # start quoting when <= N secs remain in epoch
+    mm_rebate_max_positions: int = 2       # max simultaneous rebate-quoted markets
+    mm_rebate_inventory_warn: float = 0.65 # inventory ratio threshold for aggressive skew (0.5=balanced)
+
+    # VPIN thresholds for rebate MM (calibrate to market: start with these, tighten after data)
+    mm_rebate_vpin_safe: float = 0.40      # below = normal, quote at base spread
+    mm_rebate_vpin_elevated: float = 0.55  # above = widen 30%
+    mm_rebate_vpin_high: float = 0.65      # above = widen 80%
+    mm_rebate_vpin_kill: float = 0.75      # above = pull all quotes immediately
+    mm_rebate_vpin_bucket_vol: float = 1000.0  # VPIN bucket volume in USDC
+    mm_rebate_vpin_n_buckets: int = 30     # VPIN rolling window (30 for fast 5m markets)
+    mm_rebate_lob_levels: int = 5          # LOB imbalance depth levels
+
     # IGOC: Imbalance-Gated Oracle Confirm strategy (book depth + oracle direction alignment)
     igoc_enabled: bool = False
     igoc_shadow_only: bool = True           # True = shadow mode (log only, no entry)
@@ -374,6 +441,32 @@ class Settings(BaseSettings):
     maker_offset: float = 0.005  # place maker order this much below midpoint (DARIO: aggressive pricing better for snipers)
     taker_on_5m: bool = True            # Use taker FOK on 5m markets (fee-free = no cost, instant fill)
     hold_to_resolution: bool = False     # Hold to market resolution instead of profit_target/stop_loss
+
+    # Epoch accumulator: ugag-style continuous buying throughout an epoch
+    accum_mode_enabled: bool = False
+    accum_bet_per_round: float = 1.0     # $ per buy round
+    accum_interval_secs: int = 15        # seconds between buys
+    accum_max_rounds: int = 10           # max buys per epoch
+    accum_stop_before_end_secs: int = 30 # stop buying N secs before resolution
+    accum_reversal_pct: float = 0.002    # stop accumulating if Binance reverses > this % against direction
+    cheap_side_min_imbalance: float = 0.0  # min book imbalance to confirm direction (0=disabled, 0.3=strong)
+    lottery_enabled: bool = False          # near-resolution lottery tickets ($0.01-$0.05, last 30s)
+    lottery_max_price: float = 0.05        # max token price for lottery entries
+    lottery_min_secs: int = 5              # minimum secs before resolution
+    lottery_max_secs: int = 45             # maximum secs before resolution (entry window)
+    lottery_bet: float = 0.50              # bet size per lottery ticket
+    conviction_dry_run: bool = True        # log conviction scaling signals without acting
+    mode2_dry_run: bool = True             # log Mode 2 momentum signals without acting
+
+    # Cheap side signal: buy whichever token is cheaper (ugag's core strategy)
+    cheap_side_enabled: bool = False
+    cheap_side_max_price: float = 0.45   # only buy if cheaper side <= this
+    cheap_side_min_price: float = 0.15   # skip extremely cheap (likely resolved)
+    cheap_side_scan_interval: float = 30   # seconds between scans (supports sub-second)
+    cheap_side_min_secs: int = 60        # min secs remaining to enter
+    cheap_side_max_secs: int = 240       # max secs remaining (wait for some price discovery)
+    cheap_side_windows: str = "300"      # comma-separated window sizes in seconds (300=5m, 900=15m)
+    cheap_side_active_hours: str = ""    # comma-separated UTC hours when cheap side is active (empty=always)
     maker_exit_enabled: bool = True    # Feature flag: maker SELL for profit_target (zero fee)
     profit_target_early_enabled: bool = False   # Exit early when up enough with time remaining
     profit_target_early_pp: float = 0.07        # pp gain above entry that triggers early exit (0.07 = 7pp)
@@ -423,6 +516,10 @@ class Settings(BaseSettings):
     flat_regime_block: bool = False         # block trading when volatility_1h < flat_regime_max_vol
     flat_regime_max_vol: float = 0.003     # vol below this = flat regime (default 0.3%)
 
+    # Stale regime data guard (vol_1h=0 AND trend_1h=0 exactly = regime calculator uninitialized)
+    # 7/7 trades with this pattern were losses (n=24, 24h window Mar 26 2026). Data quality gate.
+    stale_regime_skip_enabled: bool = False  # off by default; enable after VPS deploy + log verification
+
     # Flat regime RTDS continuation signal
     # Fires when market is flat (vol < flat_regime_max_vol) but RTDS clearly shows direction vs strike
     flat_regime_rtds_enabled: bool = False       # master switch
@@ -434,6 +531,40 @@ class Settings(BaseSettings):
     flat_regime_rtds_max_price: float = 0.80     # max token entry price (above 0.80 = already priced in)
     flat_regime_rtds_imbalance_threshold: float = 0.55  # CLOB imbalance confirmation gate
     flat_regime_rtds_rtds_min_pct: float = 0.005  # min RTDS deviation from strike (0.5%)
+    flat_regime_rtds_blackout_hours: str = ""     # comma-separated UTC hours to skip (e.g. "4,17,18,19,21,23")
+    rtds_down_sizing_mult: float = 1.0           # sizing multiplier for RTDS Down entries (0.5 = half-size cold-start guard)
+
+    # Momentum-size proportional sizing (bigger BTC move = bigger bet)
+    # Data: 0.3-0.5% = 71% dir WR, 0.5-1.0% = 76%, 1.0%+ = 90%+
+    momentum_size_scaling_enabled: bool = True
+    momentum_size_tier1_pct: float = 0.005   # 0.5% move threshold for tier 1
+    momentum_size_tier1_mult: float = 1.5    # 1.5x bet at 0.5%+ moves
+    momentum_size_tier2_pct: float = 0.01    # 1.0% move threshold for tier 2
+    momentum_size_tier2_mult: float = 2.0    # 2x bet at 1.0%+ moves
+
+    # Dynamic Kelly sizing (Thorp: recalculate optimal bet from rolling WR)
+    dynamic_kelly_enabled: bool = False       # off by default, enable after 50+ trades at new config
+    dynamic_kelly_lookback: int = 50          # rolling window for WR calculation
+
+    # Dynamic maker/taker entry (Telonex: top snipers are 75-82% taker)
+    # Fill rate data: 0.60-0.74 = 5-12% maker fill, 0.75+ = 23%+
+    dynamic_entry_mode_enabled: bool = False  # off by default
+    dynamic_entry_taker_below: float = 0.75   # use taker when midpoint < this
+    entry_delay_secs: float = 0.0             # stagger delay before order placement (prevent CLOB collision between instances)
+
+    # Phase Gate hedge leg (opposite side cheap buy after RTDS main leg fires)
+    phase_gate_hedge_enabled: bool = False
+    phase_gate_hedge_max_price: float = 0.08    # max price for opposite side token
+    phase_gate_hedge_max_bet: float = 5.0       # max dollar size for hedge leg
+    phase_gate_hedge_size_pct: float = 0.15     # hedge size as % of main bet
+
+    # Tugao9 copy-trade watcher
+    tugao9_watcher_enabled: bool = False
+    tugao9_poll_interval: float = 5.0
+    tugao9_address: str = "0x970e744a34cd0795ff7b4ba844018f17b7fd5c26"
+    tugao9_min_price: float = 0.40
+    tugao9_max_price: float = 0.60
+    tugao9_shadow: bool = True
 
     # S1: Regime-adaptive sizing (T0: calm=44% WR, moderate=80% WR, elevated=mixed)
     regime_sizing_enabled: bool = False     # enable 4-tier vol regime sizing
@@ -458,6 +589,11 @@ class Settings(BaseSettings):
     vpin_block_enabled: bool = False         # block when VPIN indicates adverse selection
     vpin_block_threshold: float = 0.65       # VPIN above this = high informed trading activity
     vpin_block_dry_run: bool = True          # log only, no actual blocking
+    vpin_sustained_bars: int = 5             # consecutive high-VPIN bars to trigger sustained alert
+    vpin_sustained_threshold: float = 0.60   # threshold for sustained alert (lower than instant)
+    vpin_sizing_enabled: bool = False        # graduated position sizing based on VPIN level
+    vpin_size_reduce_at: float = 0.50        # start reducing size at this VPIN
+    vpin_size_min_mult: float = 0.50         # minimum size multiplier at vpin_block_threshold
 
     # Coinbase Premium confirmation (cross-exchange divergence signal)
     coinbase_premium_enabled: bool = False    # enable concurrent Coinbase feed for premium calc
@@ -507,6 +643,20 @@ class Settings(BaseSettings):
         env_file = str(ENV_PATH)
         case_sensitive = False
         extra = 'ignore'
+
+    @field_validator(
+        'mid_price_stop_pct', 'igoc_stop_pct', 'trailing_stop_pct',
+        'stop_loss_pct', 'trailing_stop_min_gain_pct',
+        mode='before',
+    )
+    @classmethod
+    def validate_stop_pct_range(cls, v, info):
+        v = float(v)
+        if v < 0 or v > 1.0:
+            raise ValueError(
+                f"{info.field_name} must be between 0 and 1.0, got {v}"
+            )
+        return v
 
     def get_asset_filter(self) -> List[str]:
         """Return allow-list of assets. Empty list means all assets allowed."""

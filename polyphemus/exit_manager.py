@@ -46,6 +46,8 @@ class ExitManager:
         self._exit_failures: Dict[str, Tuple[int, float]] = {}
         # Optional momentum feed for reversal exit (set via set_momentum_feed)
         self._momentum_feed = None
+        # Dedup set for dry-run confidence exit (log once per position)
+        self._confidence_exit_logged: Set[str] = set()
         # Optional Chainlink oracle feed for oracle-based reversal (set via set_chainlink_feed)
         self._chainlink = None
 
@@ -127,7 +129,8 @@ class ExitManager:
         source = (pos.metadata or {}).get("source", "")
         hold_to_resolution = source in (
             "oracle_flip", "resolution_snipe", "resolution_snipe_15m",
-            "reversal_short",
+            "reversal_short", "tugao9_copy", "phase_gate_hedge",
+            "pair_arb", "cheap_side", "lottery",
         )
 
         # IGOC: Dynamic hold_to_resolution based on oracle confirmation
@@ -166,7 +169,9 @@ class ExitManager:
                 )
 
         # === TIME CHECK #2: time_exit (TIME, independent of price) ===
-        if self._check_time_exit(pos, now):
+        # Gated by hold_to_resolution: cheap_side/oracle_flip/snipe hold to resolution,
+        # selling them before end loses the payoff. Consistent with max_hold gate above.
+        if not hold_to_resolution and self._check_time_exit(pos, now):
             return ExitSignal(
                 token_id=pos.token_id,
                 reason=ExitReason.TIME_EXIT.value,
@@ -327,9 +332,58 @@ class ExitManager:
                             exit_price=pos.current_price,
                         )
 
-        # === CHECK #3c: mid-price stop for momentum positions ===
-        if (self._config.mid_price_stop_enabled
+        # === CHECK #3b3: confidence exit (midpoint trajectory) ===
+        # Research: at 60-120s into a 5m position, winners avg midpoint 0.71
+        # while losers avg 0.47. If midpoint < threshold, cut early.
+        # Skips hold_to_resolution sources (oracle_flip, snipe, etc.)
+        if (self._config.confidence_exit_enabled
                 and not hold_to_resolution
+                and pos.current_price > 0
+                and pos.entry_time):
+            pos_age = (datetime.now(timezone.utc) - pos.entry_time).total_seconds()
+            # Book depth guard: skip confidence exit if midpoint is unreliable.
+            # If peak_price never exceeded threshold, the position entered cheap
+            # and the low midpoint is normal, not a signal of losing.
+            # Also skip if current_price is suspiciously near 0 (thin book artifact).
+            peak_ok = pos.peak_price >= self._config.confidence_exit_threshold if pos.peak_price > 0 else True
+            book_ok = pos.current_price > 0.02  # below 0.02 = likely no real book
+            if (self._config.confidence_exit_min_hold_secs
+                    <= pos_age
+                    <= self._config.confidence_exit_max_hold_secs
+                    and pos.current_price < self._config.confidence_exit_threshold
+                    and peak_ok and book_ok):
+                if self._config.confidence_exit_dry_run:
+                    if pos.token_id not in self._confidence_exit_logged:
+                        self._confidence_exit_logged.add(pos.token_id)
+                        self._logger.info(
+                            f"[DRY] confidence_exit WOULD fire | token={pos.token_id[:8]} | "
+                            f"entry={pos.entry_price:.4f} | midpoint={pos.current_price:.4f} | "
+                            f"threshold={self._config.confidence_exit_threshold} | "
+                            f"age={pos_age:.0f}s | slug={pos.slug}"
+                        )
+                else:
+                    self._logger.info(
+                        f"confidence_exit triggered | token_id={pos.token_id} | "
+                        f"entry={pos.entry_price:.4f} | midpoint={pos.current_price:.4f} | "
+                        f"threshold={self._config.confidence_exit_threshold} | "
+                        f"age={pos_age:.0f}s | slug={pos.slug}"
+                    )
+                    return ExitSignal(
+                        token_id=pos.token_id,
+                        reason=ExitReason.CONFIDENCE_EXIT.value,
+                        exit_price=pos.current_price,
+                    )
+
+        # === CHECK #3c: mid-price stop for momentum AND high-entry snipe positions ===
+        # Snipe positions are in hold_to_resolution (needed for pre_resolution_exit, max_hold bypass).
+        # But high-entry snipes (>= 0.80) benefit from mid_price_stop to cap loss asymmetry.
+        # This bypass enables mid_price_stop ONLY, without affecting other hold_to_resolution checks.
+        snipe_with_stop = (
+            source in ("resolution_snipe", "resolution_snipe_15m")
+            and pos.entry_price >= 0.80
+        )
+        if (self._config.mid_price_stop_enabled
+                and (not hold_to_resolution or snipe_with_stop)
                 and pos.current_price > 0
                 and pos.entry_time
                 and (datetime.now(timezone.utc) - pos.entry_time).total_seconds() >= 2):
@@ -339,7 +393,7 @@ class ExitManager:
             stop_price = pos.entry_price * (1 - stop_pct)
             if pos.current_price <= stop_price:
                 self._logger.info(
-                    f"mid_price_stop triggered | token_id={pos.token_id} | "
+                    f"mid_price_stop triggered | token_id={pos.token_id} | source={source} | "
                     f"entry={pos.entry_price:.4f} | current={pos.current_price:.4f} | "
                     f"stop_price={stop_price:.4f}"
                 )
@@ -350,16 +404,21 @@ class ExitManager:
                 )
 
         # === CHECK #3d: pre-resolution exit ===
-        # Last resort: dump position N seconds before market ends to avoid $0.005 resolution.
-        # For momentum: always fires. For snipe/oracle_flip: only if position is losing.
+        # Dump LOSING positions N seconds before market ends to avoid $0.005 resolution.
+        # WINNING positions (current > entry) hold to $1.00 resolution - selling at $0.96
+        # loses $0.56/trade vs holding. Selling losers at $0.41 saves $5.67/trade vs $0.005.
+        # Born from: Mar 21 2026 audit - 29 winning trades sold at $0.96 instead of $1.00,
+        # leaving $16.24 on the table across 36 trades.
         snipe_losing = (
             hold_to_resolution
             and source in ("resolution_snipe", "resolution_snipe_15m")
             and pos.current_price > 0
             and pos.current_price < pos.entry_price
         )
+        is_losing = pos.current_price < pos.entry_price
         if (self._config.pre_resolution_exit_secs > 0
                 and (not hold_to_resolution or snipe_losing)
+                and is_losing
                 and pos.market_end_time
                 and pos.current_price > 0):
             secs_remaining = (pos.market_end_time.timestamp() - time.time())
@@ -367,7 +426,8 @@ class ExitManager:
                 self._logger.info(
                     f"pre_resolution_exit | token_id={pos.token_id} | "
                     f"slug={pos.slug} | secs_remaining={secs_remaining:.0f} | "
-                    f"current_price={pos.current_price:.4f}"
+                    f"current_price={pos.current_price:.4f} | "
+                    f"entry_price={pos.entry_price:.4f} | losing=True"
                 )
                 return ExitSignal(
                     token_id=pos.token_id,
@@ -681,6 +741,7 @@ class ExitManager:
         """
         self._pending_exits.discard(token_id)
         self._exit_failures.pop(token_id, None)
+        self._confidence_exit_logged.discard(token_id)
         self._logger.debug(f"Exit completed | token_id={token_id}")
 
     def fail_exit(self, token_id: str) -> None:

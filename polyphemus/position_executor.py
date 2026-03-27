@@ -56,7 +56,9 @@ class PositionExecutor:
         self._fill_optimizer = None  # Set by signal_bot after init
         self._performance_db = None  # Set by signal_bot after init (Kelly sizing)
         self._tracker = None         # Set by signal_bot (flip escalation)
+        self._momentum_feed = None   # Set by signal_bot (reversal-cancel during maker poll)
         self._kelly_cache: dict = {}  # (asset, bucket) -> (wr, n, fetched_at)
+        self._direction_wr_cache: dict = {}  # {"up": (wr, n), "down": (wr, n), "fetched_at": float}
         self._entry_retry_stats = {
             "placement_retry_eligible": 0,
             "placement_retry_attempted": 0,
@@ -265,6 +267,10 @@ class PositionExecutor:
         Returns:
             ExecutionResult with success status, order_id, fill details, or error
         """
+        # Stagger delay to prevent CLOB collisions between instances
+        if self._config.entry_delay_secs > 0:
+            await asyncio.sleep(self._config.entry_delay_secs)
+
         # Extract signal fields
         token_id = signal.get("token_id", "")
         price = signal.get("price", 0.0)
@@ -296,6 +302,10 @@ class PositionExecutor:
                 f"Weather sizing: kelly={kelly:.3f}, spend={spend:.2f}, "
                 f"size={size:.2f} shares @ {price:.4f}"
             )
+        elif signal.get("override_bet_size"):
+            # Accumulator override: fixed $ per round
+            spend = float(signal["override_bet_size"])
+            size = round(spend / price, 2) if price > 0 else 0
         else:
             # Calculate position size (3-layer sizing + asset multiplier + liquidation boost)
             size = self._calculate_size(price, available_capital, asset=asset, liq_conviction=liq_conviction, spread=signal.get("spread"), fear_greed=signal.get("fear_greed"), signal=signal)
@@ -314,6 +324,10 @@ class PositionExecutor:
         use_maker = self._config.entry_mode == "maker"
         price_tick = self._get_price_tick(signal)
 
+        # Override: signal-level entry mode (cheap_side uses fak to avoid crossing book)
+        if signal.get("entry_mode_override") == "fak":
+            use_maker = False
+
         # Override: use taker on 5m markets (NOTE: 5m taker fees active since Feb 12 2026)
         if self._config.taker_on_5m and window <= 300:
             use_maker = False
@@ -321,6 +335,18 @@ class PositionExecutor:
                 f"5m taker override: fee-free market, using taker for instant fill | "
                 f"slug={slug}"
             )
+
+        # Dynamic maker/taker: taker at low midpoints (poor maker fill rate),
+        # maker at high midpoints (23%+ fill rate). Telonex: top snipers are 75-82% taker.
+        # Fill rate data: 0.60-0.74 = 5-12% maker fill, 0.75-0.79 = 23% fill.
+        if self._config.dynamic_entry_mode_enabled and use_maker and price > 0:
+            if price < self._config.dynamic_entry_taker_below:
+                use_maker = False
+                self._logger.info(
+                    f"Dynamic entry: taker (midpoint={price:.3f} < "
+                    f"{self._config.dynamic_entry_taker_below:.2f}, "
+                    f"maker fill rate too low) | slug={slug}"
+                )
 
         # Resolution snipe: taker entry (no time for maker fill in last 8-45s)
         is_snipe = signal.get('source') == 'resolution_snipe' if signal else False
@@ -444,16 +470,16 @@ class PositionExecutor:
                     mode="up",
                 )
             else:
-                # +$0.02 on top of live price, but cap total overpay at $0.05 from signal
+                # +$0.01 on top of live price, but cap total overpay at $0.03 from signal
                 buy_price = self._quantize_price(
-                    min(base_price + 0.02, price + 0.05, 0.99),
+                    min(base_price + 0.01, price + 0.03, 0.99),
                     price_tick,
                     mode="up",
                 )
             self._logger.info(
                 f"{'Snipe' if is_snipe else 'Smart'} slippage: signal={price}, "
                 f"midpoint={live_midpoint:.4f}, tick={price_tick:.4f}, buy_price={buy_price} "
-                f"(max overpay ${0.01 if is_snipe else 0.05})"
+                f"(max overpay ${0.01 if is_snipe else 0.03})"
             )
             placement_result = await self._clob.place_order(
                 token_id=token_id,
@@ -514,6 +540,16 @@ class PositionExecutor:
             )
             order_id = placement_result.order_id
 
+            # Set reversal-cancel context for the poll loop
+            direction = signal.get("outcome", "").lower()
+            self._pending_entry_direction = "up" if direction == "up" else "down"
+            self._pending_entry_asset = signal.get("asset", slug.split("-")[0]).upper()
+            self._pending_entry_binance_price = 0
+            if self._momentum_feed:
+                self._pending_entry_binance_price = (
+                    self._momentum_feed.get_latest_price(self._pending_entry_asset) or 0
+                )
+
             # Poll for fill — maker gets longer timeout, taker gets standard
             poll_max = MAKER_POLL_MAX if use_maker else TAKER_POLL_MAX
             # Snipe: cap timeout at (time_remaining - 3s) to cancel before market close
@@ -525,6 +561,26 @@ class PositionExecutor:
             _fill_start = time.time()
             fill_result = await self._poll_for_fill(order_id, token_id, price, size, max_polls=poll_max)
             fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
+
+        # Adverse selection detection: did Binance move FOR or AGAINST us after fill?
+        if fill_result.success and self._momentum_feed:
+            try:
+                fill_asset = signal.get("asset", slug.split("-")[0]).upper()
+                fill_dir = signal.get("outcome", "").lower()
+                entry_binance = getattr(self, '_pending_entry_binance_price', 0)
+                post_fill_binance = self._momentum_feed.get_latest_price(fill_asset) or 0
+                if entry_binance > 0 and post_fill_binance > 0:
+                    move = (post_fill_binance - entry_binance) / entry_binance
+                    favorable = (fill_dir == "up" and move > 0) or (fill_dir == "down" and move < 0)
+                    self._logger.info(
+                        f"ADVERSE_SELECTION_CHECK | {fill_asset} {fill_dir} | "
+                        f"binance_at_entry={entry_binance:.2f} | "
+                        f"binance_at_fill={post_fill_binance:.2f} | "
+                        f"move={move:+.4%} | "
+                        f"{'FAVORABLE' if favorable else 'ADVERSE'}"
+                    )
+            except Exception:
+                pass
 
         # Record maker fill outcome to optimizer (before fallback)
         if self._fill_optimizer and maker_offset_used is not None:
@@ -821,6 +877,20 @@ class PositionExecutor:
             )
             return max(0, size)
 
+        # Phase gate hedge: small opposite-side buy, capped at phase_gate_hedge_max_bet
+        is_phase_gate_hedge = signal.get('source') == 'phase_gate_hedge' if signal else False
+        if is_phase_gate_hedge:
+            base_spend = min(available_capital, self._config.phase_gate_hedge_max_bet)
+            if self._config.max_trade_amount > 0:
+                base_spend = min(base_spend, self._config.max_trade_amount)
+            base_spend = max(base_spend, self._config.min_bet)
+            size = base_spend / price
+            self._logger.info(
+                f"Phase gate hedge sizing: ${base_spend:.2f} / "
+                f"{price:.4f} = {size:.0f} shares"
+            )
+            return max(0, size)
+
         # Near-resolution pair arb: flat sizing with hard $ cap per leg
         is_near_res = signal.get('near_resolution', False) if signal else False
         if is_near_res:
@@ -966,16 +1036,47 @@ class PositionExecutor:
                     f"mult={dh_mult:.0%}, after_dh={base_spend:.2f}"
                 )
 
-        # Layer 1h: Up direction reduction (Down is 20W/1L, Up is 19W/6L)
-        if signal:
-            outcome = str(signal.get("outcome", "") or signal.get("direction", ""))
-            if outcome.lower() == "up" and self._config.up_direction_size_mult < 1.0:
-                up_mult = self._config.up_direction_size_mult
-                base_spend *= up_mult
-                self._logger.info(
-                    f"Layer 1h (up direction): outcome={outcome}, mult={up_mult:.0%}, "
-                    f"after_up={base_spend:.2f}"
-                )
+        # Layer 1h: Adaptive direction sizing (rolling 50-trade WR by direction)
+        if signal and self._performance_db:
+            outcome = str(signal.get("outcome", "") or signal.get("direction", "")).lower()
+            if outcome in ("up", "down"):
+                # Refresh cache every 5 minutes
+                now = time.time()
+                cache_age = now - self._direction_wr_cache.get("fetched_at", 0)
+                if cache_age > 300 or not self._direction_wr_cache:
+                    try:
+                        dwr = self._performance_db.get_direction_wr(last_n=50)
+                        self._direction_wr_cache = {
+                            "up": dwr["up"], "down": dwr["down"], "fetched_at": now,
+                        }
+                    except Exception:
+                        pass
+
+                up_wr, up_n = self._direction_wr_cache.get("up", (0.0, 0))
+                dn_wr, dn_n = self._direction_wr_cache.get("down", (0.0, 0))
+                min_trades = 10  # need at least 10 trades per direction
+
+                if up_n >= min_trades and dn_n >= min_trades:
+                    edge_pp = abs(up_wr - dn_wr) * 100
+                    if edge_pp >= 10:  # 10pp+ edge triggers boost
+                        favored = "up" if up_wr > dn_wr else "down"
+                        if outcome == favored:
+                            dir_mult = 1.5
+                        else:
+                            dir_mult = 0.7
+                        base_spend *= dir_mult
+                        self._logger.info(
+                            f"Layer 1h (adaptive dir): {outcome} | "
+                            f"up_wr={up_wr:.1%}(n={up_n}) down_wr={dn_wr:.1%}(n={dn_n}) | "
+                            f"favored={favored} edge={edge_pp:.0f}pp | "
+                            f"mult={dir_mult:.1f}x after={base_spend:.2f}"
+                        )
+                    else:
+                        self._logger.debug(
+                            f"Layer 1h (adaptive dir): no edge | "
+                            f"up_wr={up_wr:.1%}(n={up_n}) down_wr={dn_wr:.1%}(n={dn_n}) | "
+                            f"diff={edge_pp:.0f}pp < 10pp threshold"
+                        )
 
         # Layer 1i: Volatility regime sizing (S1)
         # T0: calm (<0.5% vol) = 44% WR, moderate (0.5-1.0%) = 80% WR, elevated (>1.0%) = mixed
@@ -1031,6 +1132,97 @@ class PositionExecutor:
                 )
             if not self._config.ensemble_sizing_dry_run:
                 base_spend *= ens_mult
+
+        # Layer 1l: VPIN graduated sizing (reduce size when order flow is toxic)
+        if self._config.vpin_sizing_enabled and signal:
+            vpin_val = signal.get('vpin_5m')
+            if vpin_val is not None and vpin_val >= self._config.vpin_size_reduce_at:
+                reduce_range = self._config.vpin_block_threshold - self._config.vpin_size_reduce_at
+                if reduce_range > 0:
+                    fraction = min((vpin_val - self._config.vpin_size_reduce_at) / reduce_range, 1.0)
+                    vpin_mult = 1.0 - fraction * (1.0 - self._config.vpin_size_min_mult)
+                else:
+                    vpin_mult = self._config.vpin_size_min_mult
+                base_spend *= vpin_mult
+                self._logger.info(
+                    f"Layer 1l (VPIN sizing): vpin={vpin_val:.3f}, "
+                    f"mult={vpin_mult:.0%}, after_vpin={base_spend:.2f}"
+                )
+
+        # Layer 1m: RTDS Down entry sizing (directional gate from WF-CV regime analysis)
+        # Down entries WR=41-57% vs Up entries WR=67-100% (Cohen's d=1.89)
+        # Static cold-start guard until Layer 1h has enough rolling data
+        if signal and signal.get('source') == 'flat_regime_rtds':
+            sig_dir = str(signal.get('direction', '')).upper()
+            if sig_dir == 'DOWN' and self._config.rtds_down_sizing_mult != 1.0:
+                rd_mult = self._config.rtds_down_sizing_mult
+                base_spend *= rd_mult
+                self._logger.info(
+                    f"Layer 1m (RTDS down gate): direction=DOWN, "
+                    f"mult={rd_mult:.0%}, after_rtds_down={base_spend:.2f}"
+                )
+
+        # Layer 1n: Momentum-size proportional sizing (bigger BTC move = bigger bet)
+        # Data: 0.3-0.5% move = 71% dir WR, 0.5-1.0% = 76%, 1.0%+ = 90%+
+        if self._config.momentum_size_scaling_enabled and signal:
+            mom_pct = abs(signal.get('momentum_pct', 0) or 0)
+            if mom_pct > 0:
+                if mom_pct >= self._config.momentum_size_tier2_pct:
+                    ms_mult = self._config.momentum_size_tier2_mult
+                    tier = "tier2"
+                elif mom_pct >= self._config.momentum_size_tier1_pct:
+                    ms_mult = self._config.momentum_size_tier1_mult
+                    tier = "tier1"
+                else:
+                    ms_mult = 1.0
+                    tier = "base"
+                if ms_mult != 1.0:
+                    base_spend *= ms_mult
+                    self._logger.info(
+                        f"Layer 1n (momentum size): move={mom_pct:.4f}, "
+                        f"{tier}, mult={ms_mult:.1f}x, after_ms={base_spend:.2f}"
+                    )
+
+        # Layer 1o: Dynamic Kelly sizing (Thorp: recalculate optimal bet from rolling WR)
+        # Kelly f = (WR * win_per_dollar - (1-WR) * loss_per_dollar) / win_per_dollar
+        # Half-Kelly = f/2, applied as fraction of balance -> dynamic MAX_BET
+        if self._config.dynamic_kelly_enabled and self._performance_db and price > 0:
+            now = time.time()
+            cache_age = now - getattr(self, '_kelly_cache_ts', 0)
+            if cache_age > 300 or not hasattr(self, '_kelly_mult'):
+                try:
+                    recent = self._performance_db.get_recent_trades(
+                        limit=self._config.dynamic_kelly_lookback
+                    )
+                    if recent and len(recent) >= 30:
+                        wins = sum(1 for t in recent if t.get('pnl', 0) > 0)
+                        wr = wins / len(recent)
+                        avg_mid = sum(t.get('entry_price', 0.70) for t in recent) / len(recent)
+                        win_per_dollar = (1.0 - avg_mid) / avg_mid if avg_mid > 0 else 0.43
+                        kelly_f = (wr * win_per_dollar - (1 - wr)) / win_per_dollar if win_per_dollar > 0 else 0
+                        self._kelly_mult = max(0.5, min(kelly_f / 2, 0.10))  # half-Kelly, capped 0.5x-10%
+                        self._kelly_cache_ts = now
+                        self._logger.info(
+                            f"Layer 1o (dynamic Kelly): wr={wr:.1%} n={len(recent)}, "
+                            f"kelly_f={kelly_f:.1%}, half_kelly={self._kelly_mult:.1%}"
+                        )
+                    else:
+                        self._kelly_mult = self._config.base_bet_pct
+                        self._kelly_cache_ts = now
+                except Exception:
+                    self._kelly_mult = self._config.base_bet_pct
+                    self._kelly_cache_ts = now
+
+            kelly_bet = available_capital * getattr(self, '_kelly_mult', self._config.base_bet_pct)
+            if kelly_bet > 0 and kelly_bet != base_spend:
+                old = base_spend
+                base_spend = min(kelly_bet, self._config.max_bet)
+                base_spend = max(base_spend, 2.50)
+                if abs(base_spend - old) > 1.0:
+                    self._logger.info(
+                        f"Layer 1o (dynamic Kelly): kelly_bet=${kelly_bet:.2f}, "
+                        f"capped=${base_spend:.2f} (was ${old:.2f})"
+                    )
 
         # Layer 2: Tuner multiplier
         spend = base_spend
@@ -1172,6 +1364,33 @@ class PositionExecutor:
         """
         for poll_num in range(1, max_polls + 1):
             await asyncio.sleep(poll_interval)
+
+            # Reversal-cancel: if Binance reversed against entry direction, cancel immediately
+            if self._momentum_feed and hasattr(self, '_pending_entry_direction'):
+                entry_dir = self._pending_entry_direction
+                asset = getattr(self, '_pending_entry_asset', '')
+                entry_binance = getattr(self, '_pending_entry_binance_price', 0)
+                if entry_binance > 0 and asset:
+                    current_binance = self._momentum_feed.get_latest_price(asset)
+                    if current_binance and current_binance > 0:
+                        change_pct = (current_binance - entry_binance) / entry_binance
+                        reversal_thresh = self._config.momentum_reversal_pct
+                        reversed_ = (
+                            (entry_dir == "up" and change_pct < -reversal_thresh)
+                            or (entry_dir == "down" and change_pct > reversal_thresh)
+                        )
+                        if reversed_:
+                            self._logger.warning(
+                                f"REVERSAL-CANCEL: {asset} {entry_dir} reversed "
+                                f"({change_pct:+.3%}) during maker poll — cancelling {order_id}"
+                            )
+                            await self._clob.cancel_order(order_id)
+                            return ExecutionResult(
+                                success=False,
+                                order_id=order_id,
+                                error="reversal_cancel",
+                                reason="reversal_cancel",
+                            )
 
             details = await self._clob.get_order_details(order_id)
             if details is None:

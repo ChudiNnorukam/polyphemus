@@ -6,6 +6,7 @@ Tracks rejection reasons and pass rates for monitoring.
 
 import time
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -44,6 +45,11 @@ class SignalGuard:
         self.signals_passed: int = 0
         self.rejection_reasons: Dict[str, int] = {}
 
+        # Outcome gate: rolling trade outcomes for regime detection
+        self._recent_outcomes: deque = deque(maxlen=config.outcome_gate_window)
+        self._outcome_gate_blocked: bool = False
+        self._outcome_gate_blocked_since: float = 0  # timestamp when gate was blocked
+
     def check(self, signal: dict) -> FilterResult:
         """Apply all filters and validators to a signal.
 
@@ -75,11 +81,14 @@ class SignalGuard:
         is_streak_contrarian = signal.get('source') == 'streak_contrarian'
         is_clob_imbalance = signal.get('source') == 'clob_imbalance'
         is_flat_regime_rtds = signal.get('source') == 'flat_regime_rtds'
+        is_tugao9_copy = signal.get('source') == 'tugao9_copy'
+        is_phase_gate_hedge = signal.get('source') == 'phase_gate_hedge'
+        is_cheap_side = signal.get('source') == 'cheap_side'
 
         # ====================================================================
         # FILTER 1: Direction Check (only BUY signals from DB)
         # ====================================================================
-        if not is_momentum and not is_window_delta and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds:
+        if not is_momentum and not is_window_delta and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds and not is_tugao9_copy and not is_phase_gate_hedge and not is_cheap_side:
             direction = signal.get('direction', '').upper()
             if direction != 'BUY':
                 reasons.append('not_buy_signal')
@@ -155,7 +164,7 @@ class SignalGuard:
         elif is_snipe:
             if price < self._config.snipe_min_entry_price or price > self._config.snipe_max_entry_price:
                 reasons.append('price_out_of_range')
-        elif is_oracle_flip or is_streak_contrarian or is_flat_regime_rtds:
+        elif is_oracle_flip or is_streak_contrarian or is_flat_regime_rtds or is_tugao9_copy or is_phase_gate_hedge or is_cheap_side:
             pass  # these sources use their own price gates in the scan loop
         elif is_pair_arb:
             pass  # pair_arb uses pair_cost filter in scan loop, not entry price range
@@ -255,11 +264,24 @@ class SignalGuard:
         # Data: flat regime = -$2.83/signal (worst per-signal P&L on both instances)
         # ====================================================================
         is_flat_regime_rtds = signal.get('source') == 'flat_regime_rtds'
-        if self._config.flat_regime_block and not is_weather and not is_clob_imbalance and not is_flat_regime_rtds:
+        if self._config.flat_regime_block and not is_weather and not is_clob_imbalance and not is_flat_regime_rtds and not is_tugao9_copy:
             vol_1h = signal.get('volatility_1h')
             if vol_1h is not None and vol_1h < self._config.flat_regime_max_vol:
                 reasons.append('flat_regime')
                 context['flat_vol_1h'] = round(vol_1h, 5)
+
+        # ====================================================================
+        # FILTER 6c2: Stale Regime Data Guard
+        # vol_1h=0.0 AND trend_1h=0.0 exactly = regime calculator uninitialized.
+        # 7/7 trades with this signature were losses (n=24, Mar 26 2026). Data quality gate.
+        # ====================================================================
+        if self._config.stale_regime_skip_enabled and not is_weather:
+            vol_1h = signal.get('volatility_1h')
+            trend_1h = signal.get('trend_1h')
+            if vol_1h is not None and trend_1h is not None and vol_1h == 0.0 and trend_1h == 0.0:
+                reasons.append('stale_regime_data')
+                context['vol_1h'] = 0.0
+                context['trend_1h'] = 0.0
 
         # ====================================================================
         # FILTER 6d: Liquidation Cascade Block
@@ -346,28 +368,51 @@ class SignalGuard:
                         reasons.append('cvd_disagrees')
 
         # ====================================================================
-        # FILTER 7b: VPIN Adverse Selection Filter
-        # High VPIN = informed traders dominating flow. If their direction
-        # opposes our signal, we're likely getting picked off (adverse selection).
+        # FILTER 7b: VPIN Adverse Selection Filter (upgraded)
+        # Uses volume-synchronized BVC VPIN from vpin_engine.py.
+        # Three protection layers:
+        #   1. Instant block: VPIN >= threshold AND flow opposes direction
+        #   2. Sustained block: VPIN elevated for N consecutive volume bars
+        #   3. Graduated sizing: reduce position size proportional to VPIN level
         # ====================================================================
         if self._config.vpin_block_enabled and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian:
             vpin = signal.get('vpin_5m')
-            if vpin is not None and vpin >= self._config.vpin_block_threshold:
-                # VPIN is high - check if taker flow opposes our direction
-                taker_delta_vpin = signal.get('taker_delta')
-                outcome_vpin = signal.get('outcome', '')
-                if taker_delta_vpin is not None:
-                    flow_opposes = (
-                        (outcome_vpin == 'Up' and taker_delta_vpin < 0) or
-                        (outcome_vpin == 'Down' and taker_delta_vpin > 0)
-                    )
-                    context['vpin_5m'] = round(vpin, 3)
-                    context['vpin_flow_opposes'] = flow_opposes
-                    if flow_opposes:
-                        if self._config.vpin_block_dry_run:
-                            context['vpin_blocked_dry_run'] = True
-                        else:
-                            reasons.append('vpin_adverse_selection')
+            vpin_sustained = signal.get('vpin_sustained_alert', False)
+            if vpin is not None:
+                context['vpin_5m'] = round(vpin, 3)
+                context['vpin_sustained'] = vpin_sustained
+
+                # Layer 1: Instant block when high VPIN + opposing flow
+                if vpin >= self._config.vpin_block_threshold:
+                    taker_delta_vpin = signal.get('taker_delta')
+                    outcome_vpin = signal.get('outcome', '')
+                    if taker_delta_vpin is not None:
+                        flow_opposes = (
+                            (outcome_vpin == 'Up' and taker_delta_vpin < 0) or
+                            (outcome_vpin == 'Down' and taker_delta_vpin > 0)
+                        )
+                        context['vpin_flow_opposes'] = flow_opposes
+                        if flow_opposes:
+                            if self._config.vpin_block_dry_run:
+                                context['vpin_blocked_dry_run'] = True
+                            else:
+                                reasons.append('vpin_adverse_selection')
+
+                # Layer 2: Sustained alert block (regardless of direction)
+                if vpin_sustained and not self._config.vpin_block_dry_run:
+                    reasons.append('vpin_sustained_toxic')
+                elif vpin_sustained:
+                    context['vpin_sustained_blocked_dry_run'] = True
+
+                # Layer 3: Graduated sizing (pass multiplier to position_executor)
+                if self._config.vpin_sizing_enabled and vpin >= self._config.vpin_size_reduce_at:
+                    reduce_range = self._config.vpin_block_threshold - self._config.vpin_size_reduce_at
+                    if reduce_range > 0:
+                        fraction = min((vpin - self._config.vpin_size_reduce_at) / reduce_range, 1.0)
+                        vpin_mult = 1.0 - fraction * (1.0 - self._config.vpin_size_min_mult)
+                    else:
+                        vpin_mult = self._config.vpin_size_min_mult
+                    context['vpin_size_mult'] = round(vpin_mult, 2)
 
         # ====================================================================
         # FILTER 7c: Coinbase Premium Confirmation
@@ -390,6 +435,36 @@ class SignalGuard:
                         context['cb_premium_blocked_dry_run'] = True
                     else:
                         reasons.append('coinbase_premium_opposes')
+
+        # ====================================================================
+        # FILTER 8: Outcome Gate (rolling WR regime detection)
+        # Blocks all entries when recent trade outcomes indicate a losing regime.
+        # Hysteresis: blocks at min_wr, resumes at resume_wr to prevent cycling.
+        # ====================================================================
+        if self._config.outcome_gate_enabled and not is_weather:
+            n_outcomes = len(self._recent_outcomes)
+            if n_outcomes >= 3:
+                rolling_wr = sum(self._recent_outcomes) / n_outcomes
+                context['outcome_gate_wr'] = round(rolling_wr, 3)
+                context['outcome_gate_n'] = n_outcomes
+                context['outcome_gate_blocked'] = self._outcome_gate_blocked
+                # Auto-unblock after 30 min to prevent deadlock
+                # (no trades = no new outcomes = gate stuck forever)
+                if (self._outcome_gate_blocked
+                        and self._outcome_gate_blocked_since > 0
+                        and time.time() - self._outcome_gate_blocked_since > 1800):
+                    self._outcome_gate_blocked = False
+                    self._outcome_gate_blocked_since = 0
+                    self._logger.info(
+                        f"Outcome gate AUTO-UNBLOCKED after 30min deadlock | "
+                        f"rolling_wr={rolling_wr:.1%} | allowing 1 trade to probe regime"
+                    )
+                    context['outcome_gate_blocked'] = False
+                if self._outcome_gate_blocked:
+                    if self._config.outcome_gate_dry_run:
+                        context['outcome_gate_blocked_dry_run'] = True
+                    else:
+                        reasons.append('outcome_gate_regime')
 
         # ====================================================================
         # VALIDATOR 1: Market Expiry Check (configurable window)
@@ -471,7 +546,7 @@ class SignalGuard:
         # VALIDATOR 4: Minimum Conviction Check
         # ====================================================================
         usdc_size = signal.get('usdc_size', 0)
-        if not is_momentum and not is_window_delta and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds:
+        if not is_momentum and not is_window_delta and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds and not is_tugao9_copy and not is_phase_gate_hedge and not is_cheap_side:
             if usdc_size < self._config.min_db_signal_size:
                 reasons.append('low_conviction')
 
@@ -525,6 +600,58 @@ class SignalGuard:
             'pass_rate': pass_rate,
             'rejection_reasons': dict(self.rejection_reasons),
         }
+
+    def record_outcome(self, is_win: bool) -> None:
+        """Record a trade outcome for rolling WR tracking.
+
+        Called by signal_bot after each trade exit. Updates the outcome gate
+        blocked/unblocked state based on rolling WR with hysteresis.
+
+        Args:
+            is_win: True if the trade was profitable.
+        """
+        self._recent_outcomes.append(is_win)
+        n = len(self._recent_outcomes)
+        if n < 3:
+            return  # need minimum sample
+
+        rolling_wr = sum(self._recent_outcomes) / n
+        was_blocked = self._outcome_gate_blocked
+
+        if self._outcome_gate_blocked:
+            if rolling_wr >= self._config.outcome_gate_resume_wr:
+                self._outcome_gate_blocked = False
+                self._outcome_gate_blocked_since = 0
+                self._logger.info(
+                    f"Outcome gate UNBLOCKED | rolling_wr={rolling_wr:.1%} "
+                    f">= resume={self._config.outcome_gate_resume_wr:.0%} | n={n}"
+                )
+        else:
+            if rolling_wr < self._config.outcome_gate_min_wr:
+                self._outcome_gate_blocked = True
+                self._outcome_gate_blocked_since = time.time()
+                self._logger.warning(
+                    f"Outcome gate BLOCKED | rolling_wr={rolling_wr:.1%} "
+                    f"< threshold={self._config.outcome_gate_min_wr:.0%} | n={n}"
+                )
+
+    def seed_outcomes(self, outcomes: list) -> None:
+        """Seed recent outcomes from historical data at startup.
+
+        Args:
+            outcomes: List of bools (True=win, False=loss), oldest first.
+        """
+        for o in outcomes:
+            self._recent_outcomes.append(o)
+        n = len(self._recent_outcomes)
+        if n >= 3:
+            rolling_wr = sum(self._recent_outcomes) / n
+            if rolling_wr < self._config.outcome_gate_min_wr:
+                self._outcome_gate_blocked = True
+                self._outcome_gate_blocked_since = time.time()
+                self._logger.warning(
+                    f"Outcome gate BLOCKED at startup | rolling_wr={rolling_wr:.1%} | n={n}"
+                )
 
     def reset_metrics(self) -> None:
         """Reset all metrics counters to 0."""

@@ -41,6 +41,7 @@ from .fill_optimizer import FillOptimizer
 from .regime_detector import RegimeDetector
 from .accumulator_metrics import AccumulatorMetrics
 from .gabagool_tracker import GabagoolTracker
+from .tugao9_watcher import Tugao9Watcher
 from .adaptive_tuner import AdaptiveTuner
 from .market_ws import MarketWS
 from .telegram_approver import TelegramApprover
@@ -154,6 +155,29 @@ class SignalBot:
             tuner=self._tuner,
         )
 
+        # 5b. Epoch accumulator (ugag-style continuous buying)
+        self._epoch_accum = None
+        if config.accum_mode_enabled:
+            from .epoch_accumulator import EpochAccumulator
+            self._epoch_accum = EpochAccumulator(config, self._executor, market_ws=self._market_ws)
+            self._logger.info(
+                f"Epoch accumulator enabled | ${config.accum_bet_per_round}/round | "
+                f"{config.accum_interval_secs}s interval | max {config.accum_max_rounds} rounds"
+            )
+
+        # 5c. Cheap side signal (buy whichever side is cheaper)
+        self._cheap_side = None
+        if getattr(config, 'cheap_side_enabled', False):
+            from .cheap_side_signal import CheapSideSignal
+            self._cheap_side = CheapSideSignal(
+                config=config,
+                clob=self._clob,
+                on_signal=self._on_cheap_side_signal,
+            )
+            self._logger.info(
+                f"Cheap side signal enabled | max_price=${config.cheap_side_max_price}"
+            )
+
         # 6. Exit manager and handler
         self._exit_mgr = ExitManager(store=self._store, config=config)
         self._exit_handler = ExitHandler(clob=self._clob, config=config)
@@ -161,8 +185,29 @@ class SignalBot:
         # 7. Signal guard
         self._guard = SignalGuard(config=config, store=self._store)
 
+        # 7b. Seed outcome gate with recent trade history
+        try:
+            import sqlite3
+            _perf_conn = sqlite3.connect(self._db_path)
+            _recent = _perf_conn.execute(
+                "SELECT pnl FROM trades WHERE exit_time IS NOT NULL "
+                "ORDER BY exit_time DESC LIMIT ?",
+                (config.outcome_gate_window,)
+            ).fetchall()
+            _perf_conn.close()
+            if _recent:
+                # Reverse to oldest-first order
+                self._guard.seed_outcomes([row[0] > 0 for row in reversed(_recent)])
+                self._logger.info(
+                    f"Outcome gate seeded with {len(_recent)} recent trades"
+                )
+        except Exception as seed_err:
+            self._logger.warning(f"Outcome gate seed failed (non-fatal): {seed_err}")
+
         # 8. Performance tracker
         self._tracker = PerformanceTracker(self._db_path)
+        if self._epoch_accum:
+            self._epoch_accum._tracker = self._tracker
 
         # 9. Balance manager
         self._balance = BalanceManager(
@@ -204,6 +249,12 @@ class SignalBot:
                 on_signal=self._on_signal,
             )
             self._exit_mgr.set_momentum_feed(self._momentum_feed)
+            self._executor._momentum_feed = self._momentum_feed
+            if self._epoch_accum:
+                self._epoch_accum._momentum_feed = self._momentum_feed
+            if self._cheap_side:
+                self._cheap_side._momentum_feed = self._momentum_feed
+                self._cheap_side._market_ws = getattr(self._momentum_feed, '_market_ws', None)
             shadow = config.get_shadow_assets()
             self._logger.info(
                 f"Signal mode: Binance momentum (primary)"
@@ -291,6 +342,9 @@ class SignalBot:
             channel_id=config.slack_channel_id,
         )
 
+        # Link slack to health monitor for error rate alerts
+        self._health.set_slack(self._slack)
+
         # Link signal feed to health monitor
         if self._feed:
             self._health.signal_feed = self._feed
@@ -342,6 +396,8 @@ class SignalBot:
                     builder_passphrase=config.builder_passphrase,
                     signature_type=config.signature_type,
                     data_dir=config.lagbot_data_dir,
+                    relayer_api_key=config.relayer_api_key,
+                    relayer_api_key_address=config.relayer_api_key_address,
                 )
                 self._redeemer.set_position_store(self._store)
                 self._redeemer.set_slack(self._slack)
@@ -371,6 +427,24 @@ class SignalBot:
             )
             self._accumulator.set_adaptive_tuner(self._adaptive_tuner)
             self._logger.info("Learning stack ENABLED (metrics + gabagool + tuner)")
+
+        # 13a-iv. Tugao9 copy-trade watcher
+        self._tugao9_watcher = None
+        if config.tugao9_watcher_enabled:
+            self._tugao9_watcher = Tugao9Watcher(
+                address=config.tugao9_address,
+                poll_interval=config.tugao9_poll_interval,
+                min_price=config.tugao9_min_price,
+                max_price=config.tugao9_max_price,
+                shadow=config.tugao9_shadow,
+                on_signal=self._on_signal,
+                momentum_feed=self._momentum_feed,
+                allowed_assets=set(config.asset_filter),
+            )
+            self._logger.info(
+                f"Tugao9 watcher ENABLED | shadow={config.tugao9_shadow} | "
+                f"interval={config.tugao9_poll_interval}s"
+            )
 
         # 13b. Data science modules (all optional, graceful degradation)
         self._signal_logger = None
@@ -483,7 +557,26 @@ class SignalBot:
             ok = False
         else:
             self._logger.info(f"PREFLIGHT [OK]   wallet balance ${balance:.2f}")
-        self._slack.seed_stats(0, 0, 0.0, start_balance=balance)
+        # Seed Slack stats from today's trades in DB (not zeros)
+        try:
+            import sqlite3 as _sql
+            _db_path = os.path.join(self._config.lagbot_data_dir, "performance.db")
+            _conn = _sql.connect(_db_path)
+            _row = _conn.execute(
+                "SELECT "
+                "  SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), "
+                "  SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END), "
+                "  COALESCE(SUM(pnl), 0) "
+                "FROM trades WHERE date(entry_time, 'unixepoch') = date('now')"
+            ).fetchone()
+            _conn.close()
+            _wins = _row[0] or 0
+            _losses = _row[1] or 0
+            _pnl = _row[2] or 0.0
+            self._logger.info(f"PREFLIGHT [OK]   today's DB stats: {_wins}W {_losses}L, ${_pnl:.2f}")
+        except Exception:
+            _wins, _losses, _pnl = 0, 0, 0.0
+        self._slack.seed_stats(_wins, _losses, _pnl, start_balance=balance)
         self._slack.notify_startup(
             open_positions=self._store.count_open(),
             balance=balance,
@@ -523,6 +616,15 @@ class SignalBot:
             else:
                 self._logger.critical("PREFLIGHT: Critical failures detected. Aborting startup.")
                 sys.exit(1)
+
+    async def _on_cheap_side_signal(self, signal: dict):
+        """Handle a cheap-side signal by routing through the normal entry pipeline."""
+        self._logger.info(
+            f"Cheap side signal: {signal.get('slug')} {signal.get('outcome')} "
+            f"@ ${signal.get('price', 0):.3f}"
+        )
+        # Route through the normal _on_signal which handles guard, accumulator, etc.
+        await self._on_signal(signal)
 
     async def start(self):
         """Start the bot with all concurrent tasks."""
@@ -733,10 +835,42 @@ class SignalBot:
                 tasks.append(self._safe_task(self._momentum_feed.near_res_pair_arb_loop(), "near_res_pair_arb"))
             if self._market_maker:
                 tasks.append(self._safe_task(self._market_maker.start(), "market_maker"))
+            if self._config.mm_limit_enabled and self._market_maker:
+                tasks.append(self._safe_task(self._market_maker.start_limit_mm(), "limit_mm"))
+            elif self._config.mm_limit_enabled and not self._market_maker:
+                # Limit MM needs a MarketMaker instance even if taker MM is disabled
+                self._market_maker = MarketMaker(
+                    config=self._config,
+                    clob=self._clob,
+                    market_ws=self._market_ws,
+                    momentum_feed=self._momentum_feed,
+                    tracker=self._tracker,
+                    store=self._store,
+                )
+                tasks.append(self._safe_task(self._market_maker.start_limit_mm(), "limit_mm"))
+            if self._config.mm_rebate_enabled:
+                if self._market_maker:
+                    tasks.append(self._safe_task(self._market_maker.start_rebate_mm(), "rebate_mm"))
+                else:
+                    self._market_maker = MarketMaker(
+                        config=self._config,
+                        clob=self._clob,
+                        market_ws=self._market_ws,
+                        momentum_feed=self._momentum_feed,
+                        tracker=self._tracker,
+                        store=self._store,
+                    )
+                    tasks.append(self._safe_task(self._market_maker.start_rebate_mm(), "rebate_mm"))
             if self._config.igoc_enabled:
                 tasks.append(self._safe_task(self._igoc_signal_loop(), "igoc_signal_loop"))
             if self._config.flat_regime_rtds_enabled:
                 tasks.append(self._safe_task(self._flat_regime_rtds_loop(), "flat_regime_rtds"))
+            if self._tugao9_watcher:
+                tasks.append(self._safe_task(self._tugao9_watcher.start(), "tugao9_watcher"))
+            if self._cheap_side:
+                tasks.append(self._safe_task(self._cheap_side.scan_loop(), "cheap_side_signal"))
+            if self._signal_logger:
+                tasks.append(self._safe_task(self._position_snapshot_loop(), "position_snapshots"))
             await asyncio.gather(*tasks)
 
         except KeyboardInterrupt:
@@ -791,6 +925,13 @@ class SignalBot:
             signal["regime"] = getattr(regime, "regime", "")
             signal["volatility_1h"] = getattr(regime, "volatility_1h", None)
             signal["trend_1h"] = getattr(regime, "trend_1h", None)
+
+        if self._momentum_feed:
+            asset = signal.get("asset", "BTC")
+            binance_symbol = ASSET_TO_BINANCE.get(asset)
+            if binance_symbol:
+                signal["vpin_5m"] = self._momentum_feed.get_vpin(binance_symbol)
+                signal["taker_delta"] = self._momentum_feed.get_taker_delta(binance_symbol, 300)
 
         return signal, market_context, regime
 
@@ -1079,7 +1220,7 @@ class SignalBot:
                     self._mark_signal_stage(signal_id, "momentum_confirmation", "passed", detail)
 
             # 2c. Regime check (skip flat markets — not applicable to price arb or weather)
-            if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather', 'resolution_snipe', 'flat_regime_rtds'):
+            if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather', 'resolution_snipe', 'flat_regime_rtds', 'tugao9_copy'):
                 if not self._regime_detector.should_trade(signal.get("asset", "BTC")):
                     if self._signal_logger and signal_id > 0:
                         self._signal_logger.update_signal(signal_id, {"outcome": "regime_filtered"})
@@ -1176,21 +1317,71 @@ class SignalBot:
                 )
                 return
 
-            # 5. Dry run check
+            # 5. Dry run check — create phantom position for data pipeline
             if self._dry_run:
                 price = signal.get('price', 0)
                 asset = signal.get('asset', '')
                 projected = self._executor._calculate_size(price, available, asset, spread=signal.get("spread"))
+                if price <= 0 or projected <= 0:
+                    return
+
+                # Generate phantom IDs
+                phantom_id = f"dry_{signal.get('slug', 'unknown')}_{int(time.time())}"
+                phantom_token = signal.get("token_id", phantom_id)
+                size = projected / price if price > 0 else 0
+
+                # Create phantom position in store — exit manager will track it
+                from .types import Position
+                phantom_pos = Position(
+                    token_id=phantom_token,
+                    slug=signal.get("slug", ""),
+                    entry_price=price,
+                    entry_size=size,
+                    entry_time=datetime.now(timezone.utc),
+                    entry_tx_hash=phantom_id,
+                    current_price=price,
+                    market_end_time=signal.get("market_end_time"),
+                    metadata={
+                        "asset": asset,
+                        "direction": signal.get("outcome", ""),
+                        "source": signal.get("source", "momentum"),
+                        "signal_id": signal_id,
+                        "dry_run": True,
+                    },
+                )
+                self._store.add(phantom_pos)
+
+                # Record to performance DB (same as live)
+                await self._tracker.record_entry(
+                    trade_id=phantom_id,
+                    token_id=phantom_token,
+                    slug=signal.get("slug", ""),
+                    entry_price=price,
+                    entry_size=size,
+                    entry_tx_hash=phantom_id,
+                    outcome=signal.get("outcome", ""),
+                    market_title=signal.get("market_title", ""),
+                    entry_time=time.time(),
+                    filter_score=signal_score,
+                    metadata=phantom_pos.metadata,
+                )
+
+                # Update signal logger
+                if self._signal_logger and signal_id > 0:
+                    self._signal_logger.update_signal(signal_id, {
+                        "outcome": "executed",
+                        "entry_price": price,
+                        "fill_mode": "dry_run",
+                    })
+
                 self._mark_signal_stage(
-                    signal_id,
-                    "dry_run",
-                    "projected",
-                    f"projected={projected:.2f}/available={available:.2f}",
+                    signal_id, "dry_run", "phantom_entry",
+                    f"price={price:.4f}/size={size:.1f}/projected=${projected:.2f}",
                     outcome="dry_run",
                 )
                 self._logger.info(
-                    f"[DRY RUN] Would execute BUY: {signal.get('slug', 'unknown')} "
-                    f"@ ${price:.4f} (projected ${projected:.2f} / ${available:.2f} avail)"
+                    f"[DRY RUN] Phantom entry: {signal.get('slug', 'unknown')} "
+                    f"@ ${price:.4f} x {size:.1f} shares (tracked by exit manager)"
                 )
                 return
 
@@ -1206,7 +1397,30 @@ class SignalBot:
 
             signal = self._prepare_entry_signal(signal)
 
-            # 6. Execute buy
+            # 6. Execute buy (or start accumulation loop)
+            if self._config.accum_mode_enabled and self._epoch_accum:
+                slug = signal.get("slug", "")
+                if not self._epoch_accum.is_accumulating(slug):
+                    # Parse epoch end from slug
+                    parts = slug.rsplit("-", 1)
+                    epoch_end = 0
+                    if len(parts) == 2 and parts[1].isdigit():
+                        window = 900 if "15m" in slug else 300
+                        epoch_end = int(parts[1]) + window
+                    await self._epoch_accum.start_accumulation(
+                        slug=slug,
+                        direction=signal.get("outcome", "Up").lower(),
+                        token_id=signal.get("token_id", ""),
+                        asset=signal.get("asset", "BTC"),
+                        epoch_end=epoch_end,
+                        initial_price=signal.get("price", 0.5),
+                    )
+                    self._mark_signal_stage(signal_id, "execution", "accumulating", "accum_started")
+                    return
+                else:
+                    self._logger.debug(f"Already accumulating {slug}, skipping")
+                    return
+
             self._mark_signal_stage(signal_id, "execution", "attempted", self._config.entry_mode)
             exec_result = await self._executor.execute_buy(signal, available)
 
@@ -1248,6 +1462,10 @@ class SignalBot:
 
             # 7b. Slack notification (non-fatal)
             try:
+                _bal = await self._balance.get_balance()
+            except Exception:
+                _bal = 0.0
+            try:
                 self._slack.notify_entry(
                     slug=signal.get("slug", ""),
                     asset=signal.get("asset", ""),
@@ -1259,6 +1477,7 @@ class SignalBot:
                     source=signal.get("source", ""),
                     secs_left=signal.get("time_remaining_secs", 0),
                     entry_mode=self._config.entry_mode,
+                    balance=_bal,
                 )
             except Exception:
                 pass
@@ -1269,6 +1488,7 @@ class SignalBot:
                     "outcome": "executed",
                     "entry_price": exec_result.fill_price,
                     "fill_mode": self._config.entry_mode,
+                    "fill_time_ms": exec_result.fill_time_ms,
                 })
                 self._mark_signal_stage(
                     signal_id,
@@ -1345,6 +1565,43 @@ class SignalBot:
         if outcome == "up" and momentum.direction == "UP":
             return True
         return False
+
+    async def _position_snapshot_loop(self):
+        """Log midpoint snapshots for open positions every 30s.
+
+        Enables mid-epoch exit research by tracking price trajectories.
+        Data stored in signals.db position_snapshots table.
+        """
+        while True:
+            await asyncio.sleep(30)
+            try:
+                for pos in list(self._store.get_open()):
+                    if not pos.slug or not pos.entry_price:
+                        continue
+                    mid = None
+                    spread = None
+                    time_remaining = None
+                    if self._market_ws:
+                        mid = self._market_ws.get_midpoint(pos.token_id)
+                        sp = self._market_ws.get_spread(pos.token_id)
+                        if sp >= 0:
+                            spread = sp
+                    if pos.market_end_time:
+                        time_remaining = int(pos.market_end_time.timestamp() - time.time())
+                    secs_held = time.time() - pos.entry_time.timestamp() if pos.entry_time else None
+                    meta = pos.metadata or {}
+                    self._signal_logger.log_position_snapshot(
+                        slug=pos.slug,
+                        asset=meta.get("asset", ""),
+                        direction=meta.get("direction", ""),
+                        entry_price=pos.entry_price,
+                        midpoint=mid,
+                        spread=spread,
+                        time_remaining_secs=time_remaining,
+                        secs_held=secs_held,
+                    )
+            except Exception as e:
+                self._logger.debug(f"Position snapshot error: {e}")
 
     async def _scorer_retrain_loop(self):
         """Periodically retrain the signal scorer with new labeled data."""
@@ -1477,21 +1734,63 @@ class SignalBot:
                 f"Reason: {exit_signal.reason}"
             )
 
-            # 2. Dry run check
-            if self._dry_run:
+            # 2. Dry run check — record real P&L from market price, no CLOB sell
+            is_pair_arb = pos.metadata and isinstance(pos.metadata, dict) and pos.metadata.get("source") == "pair_arb"
+            if self._dry_run and not is_pair_arb:
+                dry_exit_price = exit_signal.exit_price or pos.current_price or pos.entry_price
+                dry_pnl = (dry_exit_price - pos.entry_price) * pos.entry_size
                 self._logger.info(
-                    f"[DRY RUN] Would exit {pos.slug} "
-                    f"@ ${exit_signal.exit_price or pos.current_price:.4f} "
+                    f"[DRY RUN] Exit {pos.slug} "
+                    f"@ ${dry_exit_price:.4f} pnl=${dry_pnl:+.4f} "
                     f"({exit_signal.reason})"
                 )
-                # Record to circuit breaker so post-loss cooldown works in paper mode
+                # Record to circuit breaker + outcome gate
                 try:
-                    dry_exit_price = exit_signal.exit_price or pos.current_price or pos.entry_price
-                    dry_pnl = (dry_exit_price - pos.entry_price) * pos.entry_size
                     self._circuit_breaker.record_trade_result(dry_pnl)
                 except Exception:
                     pass
-                # Still record as exit to advance state
+                try:
+                    self._guard.record_outcome(dry_pnl > 0)
+                except Exception:
+                    pass
+                # Record exit to performance DB (same as live)
+                try:
+                    await self._tracker.record_exit(
+                        trade_id=pos.entry_tx_hash,
+                        exit_price=dry_exit_price,
+                        exit_size=pos.entry_size,
+                        exit_reason=exit_signal.reason,
+                        exit_tx_hash=f"dry_exit_{int(time.time())}",
+                        exit_time=time.time(),
+                    )
+                except Exception as db_err:
+                    self._logger.warning(f"[DRY RUN] record_exit failed: {db_err}")
+                    try:
+                        self._tracker.db.force_close_trade(
+                            slug=pos.slug,
+                            exit_reason=exit_signal.reason,
+                            exit_price=dry_exit_price,
+                        )
+                    except Exception:
+                        pass
+                # Update signal label (closes the feedback loop)
+                try:
+                    if self._signal_logger and pos.metadata:
+                        ml_signal_id = pos.metadata.get("signal_id", -1)
+                        if ml_signal_id and ml_signal_id > 0:
+                            pnl_pct = (dry_exit_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+                            self._signal_logger.update_signal(ml_signal_id, {
+                                "exit_price": dry_exit_price,
+                                "exit_reason": exit_signal.reason,
+                                "pnl": dry_pnl,
+                                "pnl_pct": pnl_pct,
+                                "hold_secs": int(time.time() - pos.entry_time.timestamp()) if pos.entry_time else 0,
+                                "is_win": 1 if dry_pnl > 0 else 0,
+                            })
+                except Exception:
+                    pass
+                # Clean up
+                self._store.remove(exit_signal.token_id)
                 self._exit_mgr.complete_exit(exit_signal.token_id)
                 return
 
@@ -1592,7 +1891,7 @@ class SignalBot:
                     f"Self-tuner update failed for {pos.slug} (non-fatal): {tuner_err}"
                 )
 
-            # 5b. Record result to circuit breaker (non-fatal)
+            # 5b. Record result to circuit breaker + outcome gate (non-fatal)
             try:
                 exit_pnl = (exec_result.fill_price - pos.entry_price) * exec_result.fill_size
                 self._circuit_breaker.record_trade_result(exit_pnl)
@@ -1600,6 +1899,10 @@ class SignalBot:
                 self._logger.error(
                     f"Circuit breaker update failed for {pos.slug} (non-fatal): {cb_err}"
                 )
+            try:
+                self._guard.record_outcome(exit_pnl > 0)
+            except Exception:
+                pass
 
             # 5c. Update signal logger with exit data (non-fatal)
             try:
@@ -2048,6 +2351,9 @@ class SignalBot:
         )
 
         _rtds_fired: set = set()  # (slug, epoch_ts) already signaled — one per epoch per slug
+        _rtds_blackout: set = set()
+        if cfg.flat_regime_rtds_blackout_hours:
+            _rtds_blackout = {int(h.strip()) for h in cfg.flat_regime_rtds_blackout_hours.split(',') if h.strip()}
 
         while True:
             try:
@@ -2057,6 +2363,10 @@ class SignalBot:
                 regime = self._regime_detector.get_regime() if self._regime_detector else None
                 vol_1h = regime.volatility_1h if regime else None
                 if vol_1h is not None and vol_1h >= cfg.flat_regime_max_vol:
+                    continue
+
+                # RTDS-specific blackout hours (independent of global BLACKOUT_HOURS)
+                if _rtds_blackout and time.gmtime().tm_hour in _rtds_blackout:
                     continue
 
                 # Scan all active markets
@@ -2144,6 +2454,27 @@ class SignalBot:
                         if direction == "down" and imbalance > (1.0 - cfg.flat_regime_rtds_imbalance_threshold):
                             continue
 
+                        # Collect cross-feed data for signal logging
+                        _cb_premium = None
+                        _liq_vol = 0.0
+                        _liq_bias_val = ""
+                        _liq_conv = 0.0
+                        if self._momentum_feed:
+                            try:
+                                _cb_premium = self._momentum_feed.get_coinbase_premium(asset)
+                            except Exception:
+                                pass
+                        if self._regime_detector:
+                            try:
+                                _rs = self._regime_detector.get_state(asset)
+                                _liq_vol = _rs.liq_volume_60s
+                                _liq_bias_val = _rs.liq_bias
+                                _liq_conv = self._regime_detector.get_liquidation_conviction(
+                                    asset, direction.capitalize()
+                                )
+                            except Exception:
+                                pass
+
                         # Build signal dict matching the standard signal format
                         signal = {
                             "source": "flat_regime_rtds",
@@ -2162,6 +2493,10 @@ class SignalBot:
                             "rtds_gap_pct": round(delta_pct * 100, 2),
                             "token_gap_pp": round(gap * 100, 2),
                             "book_imbalance": round(imbalance, 3),
+                            "coinbase_premium_bps": _cb_premium,
+                            "liq_volume_60s": _liq_vol,
+                            "liq_bias": _liq_bias_val,
+                            "liq_conviction": _liq_conv,
                         }
 
                         # Throttle: one signal per epoch per slug (prevents 10x/sec spam)
@@ -2178,6 +2513,57 @@ class SignalBot:
                         )
 
                         await self._on_signal(signal)
+
+                        # --- Phase Gate hedge leg ---
+                        # After main leg fires, check if opposite side token is cheap enough
+                        # to buy a small hedge (temporal pair-cost arbitrage)
+                        if cfg.phase_gate_hedge_enabled and not cfg.flat_regime_rtds_shadow:
+                            try:
+                                market_info = self._momentum_feed._market_cache.get(slug) if self._momentum_feed else None
+                                if market_info:
+                                    opp_key = "down_token_id" if direction.lower() == "up" else "up_token_id"
+                                    opp_direction = "Down" if direction.lower() == "up" else "Up"
+                                    opp_token_id = market_info.get(opp_key)
+                                    if opp_token_id:
+                                        opp_mid = 0.0
+                                        if self._market_ws:
+                                            opp_mid = self._market_ws.get_midpoint(opp_token_id)
+                                        if opp_mid <= 0:
+                                            try:
+                                                opp_mid = await self._clob.get_midpoint(opp_token_id)
+                                            except Exception:
+                                                pass
+                                        if 0 < opp_mid <= cfg.phase_gate_hedge_max_price:
+                                            hedge_signal = {
+                                                "source": "phase_gate_hedge",
+                                                "shadow": False,
+                                                "slug": slug,
+                                                "token_id": opp_token_id,
+                                                "asset": asset,
+                                                "outcome": opp_direction,
+                                                "price": opp_mid,
+                                                "direction": opp_direction.upper(),
+                                                "time_remaining_secs": int(secs_left),
+                                                "condition_id": market_info.get("condition_id", ""),
+                                                "metadata": {
+                                                    "source": "phase_gate_hedge",
+                                                    "main_direction": direction.upper(),
+                                                    "main_entry_price": midpoint,
+                                                    "pair_cost": round(midpoint + opp_mid, 4),
+                                                },
+                                            }
+                                            self._logger.info(
+                                                f"[PHASE_GATE_HEDGE] {slug} {opp_direction} @ {opp_mid:.4f} | "
+                                                f"pair_cost={midpoint + opp_mid:.4f} secs={secs_left:.0f}"
+                                            )
+                                            await self._on_signal(hedge_signal)
+                                        else:
+                                            self._logger.debug(
+                                                f"Phase gate hedge skip: opp_mid={opp_mid:.4f} "
+                                                f"> max {cfg.phase_gate_hedge_max_price}"
+                                            )
+                            except Exception as he:
+                                self._logger.debug(f"Phase gate hedge error: {he}")
 
                     except Exception as e:
                         self._logger.debug(f"flat_regime_rtds scan error for {token_id}: {e}")

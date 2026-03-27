@@ -169,6 +169,7 @@ class TestSignaledSlugsDebounce:
 
     def test_signaled_slugs_tracked(self):
         """BinanceMomentumFeed tracks signaled slugs for debouncing."""
+        pytest.importorskip("py_clob_client")
         from polyphemus.binance_momentum import BinanceMomentumFeed
 
         config = make_config()
@@ -193,6 +194,7 @@ class TestMomentumThresholdDetection:
 
     def test_momentum_exactly_at_threshold(self):
         """Momentum move exactly AT threshold should trigger."""
+        pytest.importorskip("py_clob_client")
         from polyphemus.binance_momentum import BinanceMomentumFeed
 
         config = make_config(momentum_trigger_pct=0.003, momentum_window_secs=60)
@@ -212,6 +214,7 @@ class TestMomentumThresholdDetection:
 
     def test_momentum_below_threshold(self):
         """Momentum move below threshold should NOT trigger."""
+        pytest.importorskip("py_clob_client")
         from polyphemus.binance_momentum import BinanceMomentumFeed
 
         config = make_config(momentum_trigger_pct=0.003, momentum_window_secs=60)

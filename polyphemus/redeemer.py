@@ -169,7 +169,8 @@ class Redeemer:
     def __init__(self, private_key: str, wallet_address: str, rpc_url: str,
                  builder_api_key: str = "", builder_secret: str = "",
                  builder_passphrase: str = "", signature_type: int = 1,
-                 data_dir: str = "data"):
+                 data_dir: str = "data",
+                 relayer_api_key: str = "", relayer_api_key_address: str = ""):
         self._logger = setup_logger("polyphemus.redeemer")
         self._queue: asyncio.Queue[RedemptionEvent] = asyncio.Queue()
         self._private_key = private_key
@@ -203,6 +204,10 @@ class Redeemer:
         self.sweep_count = 0  # F4 fix: track sweeps for health invariant check
         self._slack = None  # Optional SlackNotifier for redemption alerts
         self._db = None     # Optional PerformanceDB for P&L updates on redemption
+
+        # Relayer API Key auth (simpler than builder HMAC)
+        self._relayer_api_key = relayer_api_key
+        self._relayer_api_key_address = relayer_api_key_address
 
         # Initialize relayer based on signature type
         self._relayer = None
@@ -445,7 +450,10 @@ class Redeemer:
                 )
                 await asyncio.sleep(delay)
                 continue
-            # Other failure — don't retry
+            # Relay failure (429, proxy_failed, tx_failed) — remove from swept
+            # so next sweep cycle can retry with fresh auth/state
+            self._swept_conditions.discard(event.condition_id)
+            self._save_swept_conditions()
             return
 
         self._logger.warning(f"Gave up redeeming {event.slug} after {len(RETRY_DELAYS)} retries")
@@ -535,13 +543,22 @@ class Redeemer:
                 "type": "PROXY",
                 "metadata": f"Redeem {event.slug}",
             }
-            headers = self._builder_config.generate_builder_headers(
-                "POST", "/submit", str(req_body)
-            )
+            # Prefer Relayer API Key auth (simpler) over builder HMAC
+            if self._relayer_api_key:
+                headers = {
+                    "RELAYER_API_KEY": self._relayer_api_key,
+                    "RELAYER_API_KEY_ADDRESS": self._relayer_api_key_address,
+                    "Content-Type": "application/json",
+                }
+            else:
+                headers = self._builder_config.generate_builder_headers(
+                    "POST", "/submit", str(req_body)
+                )
+                headers = headers.to_dict()
             resp = requests.post(
                 f"{RELAYER_URL}submit",
                 json=req_body,
-                headers=headers.to_dict(),
+                headers=headers,
                 timeout=30,
             )
             resp.raise_for_status()

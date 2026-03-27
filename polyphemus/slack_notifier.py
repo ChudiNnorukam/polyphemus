@@ -381,6 +381,10 @@ class SlackNotifier:
         )
         self._post(msg)
 
+    def send_alert(self, message: str):
+        """Send an urgent alert message. Used by health monitor for error rate alerts."""
+        self._post(f":rotating_light: *ALERT* [{self._instance}]\n{message}")
+
     def _post(self, text: str):
         """Send message in background thread. Never blocks, never raises."""
         t = threading.Thread(target=self._do_post, args=(text,), daemon=True)

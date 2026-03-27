@@ -528,7 +528,7 @@ class ClobWrapper:
 
             return {"asks": asks, "bids": bids}
         except Exception as e:
-            self._logger.warning(f"Order book fetch failed for {token_id}: {e}")
+            self._logger.debug(f"Order book fetch failed for {token_id}: {e}")
             return {"asks": [], "bids": []}
 
     def _record_latency(self, method: str, start_time: float):

@@ -44,6 +44,11 @@ class HealthMonitor:
         self._logger = setup_logger("polyphemus.health")
         self._start_time = time.time()
         self._error_count = 0
+        self._recent_errors = []           # timestamps of recent errors
+        self._error_alert_window = 300     # 5-minute window
+        self._error_alert_threshold = 3    # 3 errors in 5min = alert
+        self._error_alert_sent = False     # prevent spam
+        self._slack = None                 # set via set_slack()
         self._startup_balance = None  # Set during first health_log cycle
         self._last_momentum_detections = 0
         self._last_redemption_count = 0
@@ -52,6 +57,10 @@ class HealthMonitor:
         self._momentum_feed = None
         self._signal_logger = None
         self._perf_db = None
+
+    def set_slack(self, slack_notifier):
+        """Set Slack notifier for error rate alerts."""
+        self._slack = slack_notifier
 
     def set_pipeline_feeds(self, chainlink_feed=None, momentum_feed=None):
         """Set feed references for pipeline status reporting."""
@@ -202,8 +211,8 @@ class HealthMonitor:
                     f"{guard_info}"
                 )
 
-                # Runtime health invariants (detect silent failures within 5 minutes)
-                self._check_runtime_invariants(uptime_hours, balance, gm, open_positions)
+                        # Runtime health invariants (detect silent failures within 5 minutes)
+                self._check_runtime_invariants(uptime_hours, balance, gm, open_positions, now=time.time())
                 self._check_pipeline_watchdog()
 
                 # Clean up old health files (keep last 50)
@@ -212,7 +221,7 @@ class HealthMonitor:
             except Exception as e:
                 self._logger.error(f"health_log_loop error: {e}")
 
-    def _check_runtime_invariants(self, uptime_hours, balance, guard_metrics, open_positions):
+    def _check_runtime_invariants(self, uptime_hours, balance, guard_metrics, open_positions, now=None):
         """Check runtime invariants. CRITICAL violations halt trading via callback (F3 fix)."""
         if not guard_metrics:
             return
@@ -264,6 +273,39 @@ class HealthMonitor:
                             f"— possible re-redemption loop"
                         )
                 self._last_redemption_count = sweep_count
+            except Exception:
+                pass
+
+        # INVARIANT-5: Zero-trade-window detection (CRITICAL → Slack alert)
+        # If signals are passing guard but no trades execute for 1+ hour, something is
+        # silently broken (e.g., execute_buy crashing, balance check failing).
+        # Born from: asyncio bug blocked all trades for hours while bot showed "active".
+        if now and uptime_hours > 1.0 and guard_metrics.get('signals_passed', 0) > 5:
+            try:
+                perf_db_path = getattr(self._perf_db, "db_path", None)
+                if perf_db_path:
+                    conn = sqlite3.connect(str(perf_db_path))
+                    try:
+                        row = conn.execute(
+                            "SELECT MAX(entry_time) FROM trades"
+                        ).fetchone()
+                        last_trade_ts = row[0] if row and row[0] else 0
+                    finally:
+                        conn.close()
+                    if last_trade_ts > 0:
+                        trade_gap = now - float(last_trade_ts)
+                        if trade_gap > 3600:  # 1 hour
+                            gap_h = trade_gap / 3600
+                            msg = (
+                                f"ZERO TRADE ALERT: {gap_h:.1f}h since last trade, "
+                                f"but {guard_metrics['signals_passed']} signals passed guard"
+                            )
+                            self._logger.critical(msg)
+                            if self._slack:
+                                try:
+                                    self._slack.send_alert(msg)
+                                except Exception:
+                                    pass
             except Exception:
                 pass
 
@@ -407,8 +449,29 @@ class HealthMonitor:
                 self._logger.error(f"check_daily_restart error: {e}")
 
     def record_error(self):
-        """Increment error counter."""
+        """Increment error counter and check alert threshold."""
         self._error_count += 1
+        now = time.time()
+        self._recent_errors.append(now)
+        # Prune errors outside window
+        cutoff = now - self._error_alert_window
+        self._recent_errors = [t for t in self._recent_errors if t > cutoff]
+        # Alert if threshold exceeded (once per window)
+        if len(self._recent_errors) >= self._error_alert_threshold and not self._error_alert_sent:
+            self._error_alert_sent = True
+            msg = (
+                f"ERROR RATE ALERT: {len(self._recent_errors)} errors in "
+                f"{self._error_alert_window // 60}min. Check logs immediately."
+            )
+            self._logger.critical(msg)
+            if self._slack:
+                try:
+                    self._slack.send_alert(msg)
+                except Exception:
+                    pass  # Don't let alerting failure mask the real error
+        # Reset alert flag when window clears
+        if len(self._recent_errors) < self._error_alert_threshold:
+            self._error_alert_sent = False
 
     def get_uptime_hours(self) -> float:
         """Return current uptime in hours."""

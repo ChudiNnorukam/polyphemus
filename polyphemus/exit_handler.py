@@ -19,6 +19,7 @@ from .types import (
     ExecutionResult,
     OrderStatus,
     ORDER_POLL_INTERVAL,
+    FAK_POLL_INTERVAL,
     TAKER_POLL_MAX,
     MIN_SHARES_FOR_SELL,
 )
@@ -178,6 +179,53 @@ class ExitHandler:
                 self._logger.debug(
                     f"Maker SELL rejected for {slug}: {maker_result.error} "
                     f"(falling back to taker)"
+                )
+
+        # =====================================================================
+        # Step c3: FAK SELL for snipe mid_price_stop exits (instant fill)
+        # =====================================================================
+        # Snipe positions at 0.80+ use FAK SELL for fastest exit on thin books.
+        # FAK fills available bids instantly, cancels unfilled portion.
+        # Falls through to standard taker SELL on failure.
+        source = (pos.metadata or {}).get("source", "")
+        use_fak_exit = (
+            source in ("resolution_snipe", "resolution_snipe_15m")
+            and exit_signal.reason == ExitReason.MID_PRICE_STOP.value
+        )
+
+        if use_fak_exit:
+            self._logger.info(
+                f"FAK SELL for {slug}: {shares:.2f} shares | "
+                f"source={source} | reason={exit_signal.reason}"
+            )
+            fak_result = await self._clob.place_fak_order(
+                token_id=token_id,
+                amount=shares,
+                side=SELL,
+            )
+            if fak_result.success and fak_result.order_id:
+                # FAK fills instantly, short poll to confirm settlement
+                fak_fill = await self._poll_for_fill(
+                    order_id=fak_result.order_id,
+                    slug=slug,
+                    sell_price=exit_price,
+                    shares=shares,
+                    exit_reason=exit_signal.reason,
+                    max_polls=3,
+                )
+                if fak_fill.success:
+                    self._logger.info(
+                        f"FAK SELL filled for {slug} | "
+                        f"{fak_fill.fill_size:.1f} shares | exit_mode=fak"
+                    )
+                    return fak_fill
+                self._logger.info(
+                    f"FAK SELL no fill for {slug}, falling back to taker"
+                )
+            elif not fak_result.success:
+                self._logger.info(
+                    f"FAK SELL rejected for {slug}: {fak_result.error} | "
+                    f"falling back to taker"
                 )
 
         # =====================================================================

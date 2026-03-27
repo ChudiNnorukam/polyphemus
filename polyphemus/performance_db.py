@@ -530,6 +530,43 @@ class PerformanceDB:
         finally:
             conn.close()
 
+    def get_direction_wr(self, last_n: int = 50) -> dict:
+        """Return rolling WR by direction from last N resolved trades.
+
+        Returns:
+            {"up": (wr, n), "down": (wr, n)} where wr is float 0-1, n is count.
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                """
+                SELECT json_extract(metadata, '$.direction') AS dir,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS wr
+                FROM (
+                    SELECT metadata, pnl FROM trades
+                    WHERE exit_time IS NOT NULL
+                      AND pnl IS NOT NULL
+                      AND metadata IS NOT NULL
+                    ORDER BY exit_time DESC
+                    LIMIT ?
+                )
+                WHERE dir IS NOT NULL
+                GROUP BY dir
+                """,
+                (last_n,),
+            )
+            result = {"up": (0.0, 0), "down": (0.0, 0)}
+            for row in cur.fetchall():
+                d = (row["dir"] or "").lower()
+                if d in result:
+                    result[d] = (float(row["wr"] or 0), int(row["n"] or 0))
+            return result
+        except Exception:
+            return {"up": (0.0, 0), "down": (0.0, 0)}
+        finally:
+            conn.close()
+
     def get_source_stats(self, source: str) -> dict:
         """Return stats for completed trades matching a source in metadata JSON.
 

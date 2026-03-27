@@ -25,6 +25,7 @@ from .types import (
 from .config import Settings, setup_logger
 from .clob_wrapper import ClobWrapper
 from .state_store import StateStore
+from .vpin_engine import VPINCalculator
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
@@ -123,6 +124,15 @@ class BinanceMomentumFeed:
             symbol: deque(maxlen=1200)  # ~20 min of trade data
             for symbol in BINANCE_SYMBOLS
         }
+
+        # Proper VPIN calculators: volume-synchronized BVC (replaces naive time-bucket VPIN)
+        vpin_bucket = getattr(config, 'mm_rebate_vpin_bucket_vol', 1000.0)
+        vpin_n = getattr(config, 'mm_rebate_vpin_n_buckets', 30)
+        self._vpin_calculators: Dict[str, VPINCalculator] = {
+            symbol: VPINCalculator(bucket_volume=vpin_bucket, n_buckets=vpin_n)
+            for symbol in BINANCE_SYMBOLS
+        }
+        self._vpin_last_prices: Dict[str, float] = {}  # for price_change calc
 
         # Coinbase Premium: concurrent price feed for cross-exchange divergence
         self._coinbase_prices: Dict[str, float] = {}  # symbol -> latest price
@@ -507,6 +517,15 @@ class BinanceMomentumFeed:
             ts = time.time()
         self._taker_buffers[symbol].append((ts, signed_qty))
 
+        # Feed proper VPIN calculator (volume-synchronized BVC)
+        trade_price = float(data.get("p", 0))
+        if symbol in self._vpin_calculators and trade_price > 0 and qty > 0:
+            volume_usdc = trade_price * qty
+            last_price = self._vpin_last_prices.get(symbol, trade_price)
+            price_change = trade_price - last_price
+            self._vpin_last_prices[symbol] = trade_price
+            self._vpin_calculators[symbol].update(price_change, volume_usdc)
+
     def get_taker_delta(self, symbol: str, window_secs: float) -> Optional[float]:
         """Compute net taker delta over the last window_secs seconds."""
         buffer = self._taker_buffers.get(symbol)
@@ -517,37 +536,38 @@ class BinanceMomentumFeed:
         return delta
 
     def get_vpin(self, symbol: str, window_secs: float = 300, n_buckets: int = 10) -> Optional[float]:
-        """Compute VPIN (Volume-Synchronized Probability of Informed Trading).
+        """Get VPIN from the volume-synchronized BVC calculator.
 
-        Splits recent volume into n_buckets time buckets, classifies each as
-        buy-dominated or sell-dominated, then computes the average imbalance.
-        Returns 0.0 (balanced/noise) to 1.0 (fully informed/one-sided).
+        Uses the proper VPINCalculator (Easley, Lopez de Prado, O'Hara 2012)
+        fed incrementally from aggTrade events. Volume-synchronized buckets
+        with Bulk Volume Classification via normal CDF approximation.
+
+        The window_secs and n_buckets params are kept for API compatibility
+        but are ignored - the calculator uses its own bucket_volume and n_buckets
+        configured at init time.
         """
-        buffer = self._taker_buffers.get(symbol)
-        if not buffer:
+        calc = self._vpin_calculators.get(symbol)
+        if calc is None:
             return None
-        now = time.time()
-        cutoff = now - window_secs
-        trades = [(ts, qty) for ts, qty in buffer if ts >= cutoff]
-        if len(trades) < 20:
-            return None  # insufficient data
+        return calc.get_vpin()
 
-        bucket_size = window_secs / n_buckets
-        total_imbalance = 0.0
-        total_volume = 0.0
-        for i in range(n_buckets):
-            bucket_start = cutoff + i * bucket_size
-            bucket_end = bucket_start + bucket_size
-            buy_vol = sum(abs(q) for t, q in trades if bucket_start <= t < bucket_end and q > 0)
-            sell_vol = sum(abs(q) for t, q in trades if bucket_start <= t < bucket_end and q < 0)
-            bucket_vol = buy_vol + sell_vol
-            if bucket_vol > 0:
-                total_imbalance += abs(buy_vol - sell_vol)
-                total_volume += bucket_vol
+    def get_vpin_sustained_alert(self, symbol: str, threshold: float = 0.65, min_bars: int = 5) -> bool:
+        """Check if VPIN has been elevated for consecutive volume bars.
 
-        if total_volume <= 0:
-            return None
-        return total_imbalance / total_volume
+        A single spike is noise. Sustained elevation = informed traders active.
+        Use this to block entries, not just the instantaneous VPIN level.
+        """
+        calc = self._vpin_calculators.get(symbol)
+        if calc is None:
+            return False
+        return calc.get_sustained_alert(threshold, min_bars)
+
+    def get_vpin_ready(self, symbol: str) -> bool:
+        """Check if VPIN calculator has enough data to produce readings."""
+        calc = self._vpin_calculators.get(symbol)
+        if calc is None:
+            return False
+        return calc.ready
 
     def get_coinbase_premium(self, asset: str) -> Optional[float]:
         """Compute Coinbase Premium in basis points.
@@ -981,12 +1001,18 @@ class BinanceMomentumFeed:
         binance_symbol = ASSET_TO_BINANCE.get(asset)
         taker_delta = None
         vpin_5m = None
+        vpin_sustained = False
         coinbase_premium_bps = None
         if binance_symbol:
             taker_delta = self.get_taker_delta(
                 binance_symbol, self._config.momentum_window_secs
             )
-            vpin_5m = self.get_vpin(binance_symbol, window_secs=300, n_buckets=10)
+            vpin_5m = self.get_vpin(binance_symbol)
+            vpin_sustained = self.get_vpin_sustained_alert(
+                binance_symbol,
+                threshold=self._config.vpin_sustained_threshold,
+                min_bars=self._config.vpin_sustained_bars,
+            )
         if self._config.coinbase_premium_enabled:
             coinbase_premium_bps = self.get_coinbase_premium(asset)
 
@@ -1020,6 +1046,7 @@ class BinanceMomentumFeed:
             "liq_bias": liq_bias,
             "funding_rate": funding_rate,
             "vpin_5m": vpin_5m,
+            "vpin_sustained_alert": vpin_sustained,
             "coinbase_premium_bps": coinbase_premium_bps,
             "oracle_epoch_delta": self._get_oracle_epoch_delta(asset, epoch, window),
         }
@@ -1711,7 +1738,12 @@ class BinanceMomentumFeed:
                 "pair_cost": pair_cost_val,
                 "best_ask": ws_best_ask if ws_best_ask > 0 else None,
                 "binance_price": self.get_latest_price(asset) or 0.0,
-                "vpin_5m": self.get_vpin(ASSET_TO_BINANCE.get(asset, ""), window_secs=300, n_buckets=10),
+                "vpin_5m": self.get_vpin(ASSET_TO_BINANCE.get(asset, "")),
+                "vpin_sustained_alert": self.get_vpin_sustained_alert(
+                    ASSET_TO_BINANCE.get(asset, ""),
+                    threshold=self._config.vpin_sustained_threshold,
+                    min_bars=self._config.vpin_sustained_bars,
+                ),
             }
 
             self._logger.info(
