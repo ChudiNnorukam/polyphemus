@@ -1,0 +1,85 @@
+Introduction
+Node.js is a JavaScript runtime built on Chrome's V8 JavaScript engine. It
+enables you to run JavaScript on the server side.
+This guide will walk you through the installation process for Node.js on Linux,
+macOS, and Windows. This guide will also show you how to use npm to install the
+required packages for the sample projects.
+
+Prerequisites
+You need administrative privileges to install software on your machine.
+You must have a stable internet connection to download Node.js and related
+packages.
+
+Node.js Installation Steps:
+
+1. Installing nvm on Linux or MacOS
+
+   a. Installing nvm (node version manager)
+      nvm or node version manager will allow us to install and switch between
+      different versions of node as required.
+
+      To install it, run the following within your terminal :
+
+      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh
+      | bash
+
+   b. Verify Installation
+      Once installed, close and reopen your terminal to access nvm
+      To ensure nvm is installed type
+
+      nvm --version
+
+2. Installing nvm on Windows (skip this step if you are using MacOS or Linux
+
+   a.	To install nvm, node, and npm on Windows you can follow this url 
+	https://github.com/coreybutler/nvm-windows/releases
+	and download the nvm-setup.exe file to download it to your machine
+
+   b.   Launch powershell as an administrator and run 
+
+	nvm -v
+
+	If it is installed correctly you will be able to see an nvm version.
+
+3. Node, npm, and node_module installation
+
+   c. Installing node and npm
+      To get the list of available node versions type,
+
+      nvm ls-remote
+
+      This project supports every version of node, including and after 14.0.0
+      For the purposes of this installation guide, we will be using v16
+
+      To install the LTS version of node 16, type
+
+      nvm install 16
+
+   d. Verify installation of Node and npm
+      To verify this installs node and npm (node package manager) in the
+      console type
+
+      node --version
+      npm --version
+
+      Once installed you may move on to the next step
+      
+   e. Installing node_modules
+
+      Navigate to the samples.js directory in your terminal and then run the
+      following
+
+      npm install protobufjs
+      npm install ws
+
+      This will install the protobuf and websocket node packages to run the
+      sample programs. Once completed, you will be able to run the sample
+      applications: SampleMD.js, SampleBar.js, and SampleOrder.js by running
+
+      node SampleMD.js
+
+      Where the usage for the command will appear
+
+
+
+      

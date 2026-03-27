@@ -10,13 +10,16 @@ import websockets
 import request_login_pb2
 import response_login_pb2
 
+import os, dotenv
+dotenv.load_dotenv(pathlib.Path(__file__).parent / ".env")
+
 URIS = [
+    "wss://rprotocol.rithmic.com:443",
     "wss://rprotocol-beta.rithmic.com:443",
-    "wss://rprotocol-mobile.rithmic.com:443",
 ]
-USERS = ["BX97517", "BX97517-01"]
-PASS = "eOMFdHaXR6"
-SYSTEMS = ["Bulenox", "Rithmic Paper Trading"]
+USERS = [os.environ.get("RITHMIC_USER", "")]
+PASS = os.environ.get("RITHMIC_PASS", "")
+SYSTEMS = ["Rithmic Paper Trading", "Bulenox"]
 
 
 def build_ssl():

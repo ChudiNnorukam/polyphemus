@@ -18,6 +18,7 @@ class BulenoxConfig:
     # Instrument
     symbol: str = "MBT"
     exchange: str = "CME"
+    auto_rollover: bool = True  # auto-detect front month contract symbol
 
     # Strategy
     binance_symbol: str = "BTCUSDT"
@@ -37,11 +38,21 @@ class BulenoxConfig:
     data_dir: str = "data"
     tick_size: float = 0.25
 
-    # Safety
+    # Safety — Bulenox $50K account (verified from dashboard 2026-03-16)
     kill_switch_path: str = ""          # touch this file to halt new entries
-    max_daily_loss_usd: float = 400.0   # Bulenox 25K account: $500/day limit, use $400 buffer
-    max_daily_profit_ratio: float = 0.35  # Bulenox 40% consistency rule: block at 35%
-    point_value: float = 0.1            # MBT: 0.1 BTC per contract = $0.10 per $1 price move
+    max_daily_loss_usd: float = 900.0   # $50K EOD daily limit = $1,100, use $900 buffer
+    max_trailing_drawdown: float = 2500.0  # $50K trailing drawdown limit (ACCOUNT TERMINATION if breached)
+    profit_target: float = 3000.0       # $50K qualification target
+    max_daily_profit_ratio: float = 0.35  # Bulenox consistency rule: no single day > 35% of total profit
+    max_contracts: int = 7              # $50K account limit (start with 1, scale after proven WR)
+    point_value: float = 0.1            # MBT: 0.1 BTC per contract, $0.50 per tick ($5 index points)
+    force_close_ct: str = "15:55"       # Force close all positions by 15:55 CT (4 min buffer before 15:59 rule)
+    fade_start_ct: str = "09:00"       # FADE window start CT (widened from 10:00 for signal volume)
+    fade_end_ct: str = "16:00"         # FADE window end CT (widened from 15:00 for signal volume)
+    max_basis_pct: float = 0.02        # Skip signal if |MBT - spot| / spot > 2% (v2.0 audit: basis divergence risk)
+    directional_gate_wr: float = 0.30  # Skip direction if rolling WR < 30% on n>=10 (Gap #5)
+    extreme_move_pct: float = 0.03     # 3% move in 1h triggers cooldown (Gap #11)
+    extreme_cooldown_secs: int = 1800  # 30 min cooldown after extreme move
 
 
 def load_config() -> BulenoxConfig:
@@ -67,7 +78,17 @@ def load_config() -> BulenoxConfig:
         data_dir=os.getenv("DATA_DIR", "data"),
         tick_size=float(os.getenv("TICK_SIZE", "0.25")),
         kill_switch_path=os.getenv("KILL_SWITCH_PATH", ""),
-        max_daily_loss_usd=float(os.getenv("MAX_DAILY_LOSS_USD", "400.0")),
+        max_daily_loss_usd=float(os.getenv("MAX_DAILY_LOSS_USD", "900.0")),
+        max_trailing_drawdown=float(os.getenv("MAX_TRAILING_DRAWDOWN", "2500.0")),
+        profit_target=float(os.getenv("PROFIT_TARGET", "3000.0")),
         max_daily_profit_ratio=float(os.getenv("MAX_DAILY_PROFIT_RATIO", "0.35")),
+        max_contracts=int(os.getenv("MAX_CONTRACTS", "7")),
         point_value=float(os.getenv("POINT_VALUE", "0.1")),
+        force_close_ct=os.getenv("FORCE_CLOSE_CT", "15:55"),
+        fade_start_ct=os.getenv("FADE_START_CT", "10:00"),
+        fade_end_ct=os.getenv("FADE_END_CT", "15:00"),
+        max_basis_pct=float(os.getenv("MAX_BASIS_PCT", "0.02")),
+        directional_gate_wr=float(os.getenv("DIRECTIONAL_GATE_WR", "0.30")),
+        extreme_move_pct=float(os.getenv("EXTREME_MOVE_PCT", "0.03")),
+        extreme_cooldown_secs=int(os.getenv("EXTREME_COOLDOWN_SECS", "1800")),
     )

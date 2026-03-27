@@ -249,9 +249,17 @@ class RithmicClient:
         return ""  # basket_id comes back in ResponseNewOrder (313)
 
     async def _listen_loop(self) -> None:
-        async for buf in self._ws:
+        self._last_recv_ts = asyncio.get_event_loop().time()
+        while True:
             try:
+                buf = await asyncio.wait_for(self._ws.recv(), timeout=90)
+                self._last_recv_ts = asyncio.get_event_loop().time()
                 await self._dispatch(buf)
+            except asyncio.TimeoutError:
+                elapsed = asyncio.get_event_loop().time() - self._last_recv_ts
+                raise RuntimeError(f"Heartbeat timeout: no message in {elapsed:.0f}s")
+            except websockets.ConnectionClosed:
+                raise RuntimeError("WebSocket connection closed")
             except Exception as e:
                 logger.error(f"Dispatch error: {e}")
 
