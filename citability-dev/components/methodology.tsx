@@ -10,18 +10,18 @@ const points = [
   },
   {
     tag: null,
-    text: "We don't combine real data with estimates into a fake composite score.",
+    text: "85% of websites have zero AI-readable surfaces. No /llms.txt, no /ai.txt, no AI crawler policy.",
+    extra: null,
+  },
+  {
+    tag: null,
+    text: "Even ahrefs.com (DA 92) is 100% AI-visible but only 5% AI-cited. Visibility and citations are different problems.",
     extra: null,
   },
   {
     tag: "[LOW / MODERATE / HIGH]",
     text: 'AI citation results vary by session. We label confidence:',
     extra: 'so you understand the variance.',
-  },
-  {
-    tag: null,
-    text: "The methodology is open and documented. Ask us for the full framework.",
-    extra: null,
   },
 ]
 

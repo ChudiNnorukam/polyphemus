@@ -46,22 +46,36 @@ export function Hero() {
           </span>
         </div>
 
-        {/* Headline */}
-        <h1 className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-semibold text-foreground leading-tight text-balance tracking-tighter">
-          Is Your Website{" "}
-          <span className="text-teal">Visible to AI?</span>
+        {/* Headline - Priestley Frustration Hook */}
+        <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-semibold text-foreground leading-tight text-balance tracking-tighter">
+          Frustrated that AI never mentions your brand,{" "}
+          <span className="text-teal">even though you invest in SEO?</span>
         </h1>
 
-        {/* Subhead */}
+        {/* Subhead - directs to assessment */}
         <p className="max-w-2xl text-base sm:text-lg leading-relaxed text-muted-foreground text-pretty">
-          Most websites are invisible to ChatGPT, Perplexity, and Claude. We measure what Ahrefs and Semrush
-          don&apos;t: whether AI systems can{" "}
-          <span className="text-foreground font-medium">find you</span>,{" "}
-          <span className="text-foreground font-medium">recommend you</span>, and{" "}
-          <span className="text-foreground font-medium">cite you</span>.
+          Answer 15 questions to find out why ChatGPT, Perplexity, and Claude can&apos;t find you,
+          and get a personalized plan to fix it.
         </p>
 
-        {/* Domain input */}
+        {/* Value Proposition - 3 key areas */}
+        <div className="w-full max-w-lg text-left flex flex-col gap-2">
+          <p className="text-sm text-muted-foreground text-center">We&apos;ll measure and improve:</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[
+              { num: "01", label: "AI Infrastructure" },
+              { num: "02", label: "Brand Visibility" },
+              { num: "03", label: "Content Citability" },
+            ].map(({ num, label }) => (
+              <div key={num} className="flex items-center gap-2 border border-border bg-navy-surface rounded-md px-3 py-2">
+                <span className="font-mono text-xs text-teal">{num}</span>
+                <span className="text-sm text-foreground">{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Domain input + CTA */}
         <form
           onSubmit={handleSubmit}
           className="mt-2 w-full max-w-xl flex flex-col sm:flex-row gap-3"
@@ -82,14 +96,14 @@ export function Hero() {
             type="submit"
             className="h-12 px-6 bg-teal text-primary-foreground font-semibold hover:bg-teal-dim transition-colors whitespace-nowrap flex items-center gap-2 rounded-md"
           >
-            Check Your Site Free
+            Start Free Assessment
             <ArrowRight className="w-4 h-4" />
           </Button>
         </form>
 
-        {/* Friction reducer */}
+        {/* Friction reducer - Priestley CTA formula */}
         <p className="text-xs text-muted-foreground font-mono">
-          Instant results. No signup required.
+          Takes 3 minutes. Completely free. Immediate recommendations.
         </p>
 
         {/* Secondary CTA */}
