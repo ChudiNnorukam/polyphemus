@@ -5,7 +5,7 @@ import { ExternalLink } from "lucide-react"
 const links = [
   { label: "Methodology", href: "#how-it-works" },
   { label: "GitHub", href: "https://github.com/ChudiNnorukam/ai-visibility-readiness" },
-  { label: "LinkedIn", href: "https://linkedin.com/in/chudi" },
+  { label: "LinkedIn", href: "https://linkedin.com/in/chudi-nnorukam" },
   { label: "Contact", href: "mailto:hello@citability.dev" },
 ]
 
