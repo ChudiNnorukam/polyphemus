@@ -1,6 +1,6 @@
 "use client"
 
-import { ShieldCheck, ExternalLink } from "lucide-react"
+import { ShieldCheck, ExternalLink, Github } from "lucide-react"
 
 const points = [
   {
@@ -65,13 +65,24 @@ export function Methodology() {
           </ul>
 
           {/* Footer link */}
-          <div className="px-6 py-4 border-t border-border bg-navy-elevated">
+          <div className="px-6 py-4 border-t border-border bg-navy-elevated flex items-center justify-between">
             <a
-              href="#"
+              href="https://github.com/ChudiNnorukam/ai-visibility-readiness/blob/main/FRAMEWORK.md"
+              target="_blank"
+              rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 font-mono text-xs text-teal hover:text-teal-dim transition-colors"
             >
               Read the full methodology
               <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+            <a
+              href="https://github.com/ChudiNnorukam/ai-visibility-readiness"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Github className="w-4 h-4" />
+              View on GitHub
             </a>
           </div>
         </div>
