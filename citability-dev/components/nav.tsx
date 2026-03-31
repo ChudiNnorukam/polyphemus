@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { Star } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -54,13 +55,24 @@ export function Nav() {
           ))}
         </nav>
 
-        {/* CTA */}
-        <Button
-          size="sm"
-          className="bg-teal text-primary-foreground hover:bg-teal-dim font-semibold font-mono text-xs"
-        >
-          Free Scan
-        </Button>
+        {/* CTAs */}
+        <div className="flex items-center gap-3">
+          <a
+            href="https://github.com/ChudiNnorukam/ai-visibility-readiness"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden sm:inline-flex items-center gap-1.5 border border-border bg-navy-surface hover:bg-navy-elevated rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Star className="w-3.5 h-3.5" />
+            <span className="font-mono">Star on GitHub</span>
+          </a>
+          <Button
+            size="sm"
+            className="bg-teal text-primary-foreground hover:bg-teal-dim font-semibold font-mono text-xs"
+          >
+            Free Scan
+          </Button>
+        </div>
       </div>
     </header>
   )
