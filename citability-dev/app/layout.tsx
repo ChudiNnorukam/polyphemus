@@ -1,0 +1,81 @@
+import type { Metadata } from 'next'
+import { Inter, JetBrains_Mono } from 'next/font/google'
+import { Analytics } from '@vercel/analytics/next'
+import './globals.css'
+
+const _inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
+const _jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
+
+export const metadata: Metadata = {
+  title: 'citability.dev — AI Visibility Auditing',
+  description: 'Measure what Ahrefs and Semrush don\'t: whether AI systems like ChatGPT, Perplexity, and Claude can find you, recommend you, and cite you.',
+  metadataBase: new URL('https://citability.dev'),
+  alternates: {
+    canonical: '/',
+  },
+  openGraph: {
+    title: 'citability.dev — AI Visibility Auditing',
+    description: 'Measure what Ahrefs and Semrush don\'t: whether AI systems can find you, recommend you, and cite you.',
+    url: 'https://citability.dev',
+    siteName: 'citability.dev',
+    type: 'website',
+  },
+  icons: {
+    icon: [
+      {
+        url: '/icon-light-32x32.png',
+        media: '(prefers-color-scheme: light)',
+      },
+      {
+        url: '/icon-dark-32x32.png',
+        media: '(prefers-color-scheme: dark)',
+      },
+      {
+        url: '/icon.svg',
+        type: 'image/svg+xml',
+      },
+    ],
+    apple: '/apple-icon.png',
+  },
+}
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode
+}>) {
+  return (
+    <html lang="en">
+      <body className="font-sans antialiased">
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              '@context': 'https://schema.org',
+              '@graph': [
+                {
+                  '@type': 'WebSite',
+                  name: 'citability.dev',
+                  url: 'https://citability.dev',
+                  description: 'AI Visibility Auditing. Measure whether AI systems can find you, recommend you, and cite you.',
+                },
+                {
+                  '@type': 'Organization',
+                  name: 'citability.dev',
+                  url: 'https://citability.dev',
+                  founder: {
+                    '@type': 'Person',
+                    name: 'Chudi Nnorukam',
+                    url: 'https://chudi.dev',
+                  },
+                },
+              ],
+            }),
+          }}
+        />
+        {children}
+        <Analytics />
+      </body>
+    </html>
+  )
+}
