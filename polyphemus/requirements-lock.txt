@@ -1,6 +1,6 @@
 py_clob_client==0.34.5
 py-builder-relayer-client==0.0.1
-aiohttp==3.13.3
+aiohttp==3.13.4
 pydantic==2.11.7
 pydantic-settings==2.10.1
 python-dotenv==1.0.0
