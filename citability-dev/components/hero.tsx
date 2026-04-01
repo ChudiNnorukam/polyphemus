@@ -10,7 +10,8 @@ export function Hero() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    // Wire up later
+    const url = domain.trim() ? `?url=${encodeURIComponent(domain.trim())}` : ""
+    window.location.href = `/assess${url}`
   }
 
   const scrollToComparison = () => {

@@ -194,7 +194,7 @@ export default function AssessPage() {
     }
   }
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     // Calculate score from best practices (Q1-Q10)
     let score = 0
     bestPractices.forEach((q) => {
@@ -202,13 +202,27 @@ export default function AssessPage() {
       if (typeof val === "number") score += val
     })
 
+    // POST to API (fire and forget - don't block redirect)
+    fetch("/api/assess", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        email,
+        website,
+        phone,
+        answers,
+        score,
+        freeText,
+      }),
+    }).catch(() => {})
+
     // Build results URL with params
     const params = new URLSearchParams({
       score: score.toFixed(1),
       name: name,
       q12: (answers.q12 as string) || "",
       q14: (answers.q14 as string) || "",
-      // Pass individual answers for insights
       ...Object.fromEntries(
         bestPractices.map((q) => [q.id, String(answers[q.id] ?? 0)])
       ),

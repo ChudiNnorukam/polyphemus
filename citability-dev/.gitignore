@@ -13,6 +13,9 @@ out/
 .env.local
 .env*.local
 
+# data
+data/
+
 # misc
 .DS_Store
 *.pem

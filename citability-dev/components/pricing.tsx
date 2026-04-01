@@ -10,6 +10,7 @@ const tiers = [
     price: "$0",
     description: "Infrastructure check in 60 seconds.",
     cta: "Scan Now",
+    href: "/assess",
     featured: false,
     features: [
       "12 infrastructure checks",
@@ -23,6 +24,7 @@ const tiers = [
     price: "$147",
     description: "Full AI visibility picture with live data.",
     cta: "Get Report",
+    href: "mailto:hello@citability.dev?subject=Quick%20Report%20Request&body=I%27d%20like%20to%20order%20a%20Quick%20Report%20for%20my%20website.",
     featured: true,
     features: [
       "Everything in Free",
@@ -37,6 +39,7 @@ const tiers = [
     price: "$497",
     description: "Complete audit with roadmap and direct support.",
     cta: "Book Audit",
+    href: "mailto:hello@citability.dev?subject=Full%20Audit%20%2B%20Strategy%20Call&body=I%27d%20like%20to%20book%20a%20Full%20Audit%20with%20Strategy%20Call.",
     featured: false,
     features: [
       "Everything in Quick Report",
@@ -117,17 +120,19 @@ export function Pricing() {
               </ul>
 
               {/* CTA */}
-              <Button
-                className={cn(
-                  "w-full flex items-center gap-2 font-semibold",
-                  tier.featured
-                    ? "bg-teal text-primary-foreground hover:bg-teal-dim"
-                    : "bg-secondary text-foreground hover:bg-secondary/80",
-                )}
-              >
-                {tier.cta}
-                <ArrowRight className="w-4 h-4" />
-              </Button>
+              <a href={tier.href}>
+                <Button
+                  className={cn(
+                    "w-full flex items-center gap-2 font-semibold",
+                    tier.featured
+                      ? "bg-teal text-primary-foreground hover:bg-teal-dim"
+                      : "bg-secondary text-foreground hover:bg-secondary/80",
+                  )}
+                >
+                  {tier.cta}
+                  <ArrowRight className="w-4 h-4" />
+                </Button>
+              </a>
             </div>
           ))}
         </div>

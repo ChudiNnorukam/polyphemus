@@ -1,8 +1,8 @@
 "use client"
 
 import { useSearchParams } from "next/navigation"
-import { Suspense } from "react"
-import { ArrowRight, ExternalLink, TrendingUp, AlertTriangle, Target } from "lucide-react"
+import { Suspense, useState } from "react"
+import { ArrowRight, ExternalLink, TrendingUp, AlertTriangle, Target, Share2, Check as CheckIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -24,6 +24,25 @@ const outcomeLabels: Record<string, string> = {
   benchmark: "understanding your competitive position",
   citations: "getting actual URL citations from AI",
   strategy: "building a complete AI visibility strategy",
+}
+
+function ShareButton() {
+  const [copied, setCopied] = useState(false)
+  const handleShare = () => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+  return (
+    <button
+      onClick={handleShare}
+      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-teal transition-colors"
+    >
+      {copied ? <CheckIcon className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
+      {copied ? "Link copied!" : "Share your results"}
+    </button>
+  )
 }
 
 function ResultsContent() {
@@ -250,6 +269,11 @@ function ResultsContent() {
             })}
           </div>
         </section>
+
+        {/* Share */}
+        <div className="text-center">
+          <ShareButton />
+        </div>
 
         {/* Footer */}
         <footer className="text-center flex flex-col gap-3 pt-6 border-t border-border">
