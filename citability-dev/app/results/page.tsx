@@ -2,26 +2,13 @@
 
 import { useSearchParams } from "next/navigation"
 import { Suspense, useState } from "react"
-import { ArrowRight, ExternalLink, TrendingUp, AlertTriangle, Target, Share2, Check as CheckIcon } from "lucide-react"
+import { ArrowRight, ExternalLink, Shield, AlertTriangle, Target, Share2, Check, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
-const bestPracticeLabels: Record<string, string> = {
-  q1: "robots.txt",
-  q2: "sitemap.xml",
-  q3: "structured data (JSON-LD)",
-  q4: "/llms.txt",
-  q5: "question-format headings",
-  q6: "original data and case studies",
-  q7: "AI brand monitoring",
-  q8: "answer-first introductions",
-  q9: "specific numbers and frameworks",
-  q10: "/ai.txt",
-}
-
-const outcomeLabels: Record<string, string> = {
-  first_mention: "getting mentioned by AI for the first time",
+const goalLabels: Record<string, string> = {
   benchmark: "understanding your competitive position",
+  first_mention: "getting mentioned by AI for the first time",
   citations: "getting actual URL citations from AI",
   strategy: "building a complete AI visibility strategy",
 }
@@ -39,45 +26,30 @@ function ShareButton() {
       onClick={handleShare}
       className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-teal transition-colors"
     >
-      {copied ? <CheckIcon className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
-      {copied ? "Link copied!" : "Share your results"}
+      {copied ? <Check className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
+      {copied ? "Link copied!" : "Share your report"}
     </button>
   )
 }
 
 function ResultsContent() {
   const params = useSearchParams()
-  const score = parseFloat(params.get("score") || "0")
   const name = params.get("name") || "there"
-  const q12 = params.get("q12") || ""
-  const q14 = params.get("q14") || ""
+  const url = params.get("url") || ""
+  const goal = params.get("goal") || ""
+  const solution = params.get("solution") || ""
+  const scanRaw = params.get("scan") || ""
 
-  // Determine tier
+  let scan: { score: number; total: number; checks: Array<{ name: string; slug: string; pass: boolean; detail: string }>; url: string } | null = null
+  try {
+    if (scanRaw) scan = JSON.parse(scanRaw)
+  } catch { /* no scan data */ }
+
+  const score = scan?.score ?? 0
+  const total = scan?.total ?? 10
+  const scorePercent = Math.round((score / total) * 100)
+
   const tier = score >= 8 ? "high" : score >= 5 ? "medium" : "low"
-  const scorePercent = Math.round((score / 10) * 100)
-
-  // Find passes and fails
-  const passes: string[] = []
-  const fails: string[] = []
-  Object.keys(bestPracticeLabels).forEach((key) => {
-    const val = parseFloat(params.get(key) || "0")
-    if (val >= 1) passes.push(bestPracticeLabels[key])
-    else if (val === 0) fails.push(bestPracticeLabels[key])
-  })
-
-  // Dynamic headline
-  const headlines: Record<string, string> = {
-    high: `Congratulations, ${name}. Your AI infrastructure is strong.`,
-    medium: `Well done, ${name}. Strong foundations, but room to improve.`,
-    low: `${name}, you have significant room to improve. Here's your plan.`,
-  }
-
-  // Tier colors
-  const tierColors: Record<string, string> = {
-    high: "text-teal",
-    medium: "text-yellow-400",
-    low: "text-red-400",
-  }
 
   const tierLabels: Record<string, string> = {
     high: "AI-READY",
@@ -85,60 +57,65 @@ function ResultsContent() {
     low: "NOT AI-READY",
   }
 
-  // CTA based on Q14
+  const tierColors: Record<string, string> = {
+    high: "text-teal",
+    medium: "text-yellow-400",
+    low: "text-red-400",
+  }
+
+  const headlines: Record<string, string> = {
+    high: `Great news, ${name}. Your site has strong AI visibility foundations.`,
+    medium: `${name}, your site has a solid start but key AI signals are missing.`,
+    low: `${name}, your site is currently invisible to most AI systems. Here's how to fix it.`,
+  }
+
+  const passes = scan?.checks.filter((c) => c.pass) || []
+  const fails = scan?.checks.filter((c) => !c.pass) || []
+
+  // CTA based on solution preference
   const ctaConfig: Record<string, { label: string; description: string; href: string }> = {
     done_for_you: {
-      label: "Book a Strategy Call",
-      description: "Get a full audit with a personalized implementation roadmap and 30-min call.",
-      href: "#pricing",
+      label: "Book a Strategy Call ($497)",
+      description: "Complete audit with 30-min call, implementation roadmap, and competitor comparison.",
+      href: "mailto:hello@citability.dev?subject=Full%20Audit%20Request&body=I%20just%20took%20the%20free%20assessment%20and%20scored%20" + score + "%2F" + total + ".%20I%27d%20like%20the%20full%20audit%20with%20strategy%20call.",
     },
     consult: {
-      label: "Book a Strategy Call",
+      label: "Book a Strategy Call ($497)",
       description: "30 minutes with an AI visibility expert to map your next steps.",
-      href: "#pricing",
+      href: "mailto:hello@citability.dev?subject=Strategy%20Call%20Request&body=I%20just%20took%20the%20free%20assessment%20and%20scored%20" + score + "%2F" + total + ".%20I%27d%20like%20to%20book%20a%20strategy%20call.",
     },
     report: {
       label: "Get Your Quick Report ($147)",
-      description: "Full AI visibility and citability test with 20 real queries across 3 platforms.",
-      href: "#pricing",
+      description: "Live AI visibility + citability test with 20 real queries across ChatGPT, Perplexity, and Claude.",
+      href: "mailto:hello@citability.dev?subject=Quick%20Report%20Request&body=I%20just%20took%20the%20free%20assessment%20and%20scored%20" + score + "%2F" + total + ".%20I%27d%20like%20to%20order%20a%20Quick%20Report.",
     },
     diy: {
-      label: "Download the Free Checklist",
-      description: "A step-by-step guide to fix the gaps we found, starting with the highest-impact items.",
-      href: "/",
+      label: "Get the Implementation Checklist",
+      description: "A prioritized list of exactly what to fix, starting with the highest-impact items.",
+      href: "https://github.com/ChudiNnorukam/ai-visibility-readiness",
     },
   }
 
-  const cta = ctaConfig[q14] || ctaConfig.diy
+  const cta = ctaConfig[solution] || ctaConfig.diy
 
   return (
     <main className="min-h-screen bg-background text-foreground px-4 py-16">
       <div className="max-w-2xl mx-auto flex flex-col gap-10">
 
-        {/* Big Reveal */}
+        {/* Header */}
         <section className="text-center flex flex-col items-center gap-6">
           <div className="inline-flex items-center gap-2 border border-teal/30 bg-teal/5 rounded-full px-4 py-1.5">
             <span className="font-mono text-xs text-teal tracking-widest uppercase">
-              Your Results
+              Your Free Report
             </span>
           </div>
 
-          {/* Score visualization */}
+          {/* Score ring */}
           <div className="relative w-40 h-40 flex items-center justify-center">
             <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="52" fill="none" stroke="var(--border)" strokeWidth="8" />
               <circle
-                cx="60"
-                cy="60"
-                r="52"
-                fill="none"
-                stroke="var(--border)"
-                strokeWidth="8"
-              />
-              <circle
-                cx="60"
-                cy="60"
-                r="52"
-                fill="none"
+                cx="60" cy="60" r="52" fill="none"
                 stroke={tier === "high" ? "var(--teal)" : tier === "medium" ? "#facc15" : "#f87171"}
                 strokeWidth="8"
                 strokeDasharray={`${scorePercent * 3.27} 327`}
@@ -148,9 +125,9 @@ function ResultsContent() {
             </svg>
             <div className="text-center">
               <span className={cn("font-mono text-3xl font-bold", tierColors[tier])}>
-                {score.toFixed(1)}
+                {score}
               </span>
-              <span className="block font-mono text-xs text-muted-foreground">/10</span>
+              <span className="font-mono text-lg text-muted-foreground">/{total}</span>
             </div>
           </div>
 
@@ -163,67 +140,132 @@ function ResultsContent() {
             {tierLabels[tier]}
           </span>
 
+          {url && (
+            <p className="font-mono text-xs text-muted-foreground">
+              Scanned: {url}
+            </p>
+          )}
+
           <h1 className="text-2xl sm:text-3xl font-semibold text-foreground text-balance leading-snug">
             {headlines[tier]}
           </h1>
         </section>
 
-        {/* Three Insights */}
+        {/* Scan Results - the real data */}
+        {scan && (
+          <section>
+            <h2 className="font-mono text-xs text-teal tracking-widest uppercase mb-4">
+              Infrastructure Scan Results
+            </h2>
+            <div className="border border-border rounded-lg overflow-hidden">
+              <div className="flex items-center gap-2 px-5 py-3 border-b border-border bg-navy-elevated">
+                <Shield className="w-4 h-4 text-teal" />
+                <span className="font-mono text-sm text-foreground">
+                  {score}/{total} checks passed
+                </span>
+              </div>
+              {scan.checks.map((check, i) => (
+                <div
+                  key={check.slug}
+                  className={cn(
+                    "flex items-start justify-between px-5 py-3.5 border-b border-border/60",
+                    i % 2 === 0 ? "bg-background/60" : "bg-navy-surface/60"
+                  )}
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-foreground font-medium">{check.name}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5 truncate">{check.detail}</p>
+                  </div>
+                  <span className={cn(
+                    "font-mono text-xs px-2 py-0.5 rounded border ml-3 flex-shrink-0",
+                    check.pass
+                      ? "text-teal border-teal/30 bg-teal/10"
+                      : "text-red-400 border-red-400/30 bg-red-400/10"
+                  )}>
+                    {check.pass ? "PASS" : "FAIL"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Key Insights */}
         <section className="flex flex-col gap-4">
           <h2 className="font-mono text-xs text-teal tracking-widest uppercase">
-            Your 3 Key Insights
+            What This Means
           </h2>
 
-          {/* Insight 1: Strongest area */}
-          <div className="border border-border bg-navy-surface rounded-lg p-5 flex gap-4">
-            <TrendingUp className="w-5 h-5 text-teal flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium text-foreground mb-1">What you're doing right</p>
-              <p className="text-sm text-muted-foreground">
-                {passes.length > 0
-                  ? `You have ${passes.slice(0, 3).join(", ")}${passes.length > 3 ? `, and ${passes.length - 3} more` : ""} in place. ${passes.length >= 7 ? "That puts you ahead of 90% of sites we audit." : "That's a solid start."}`
-                  : "You're taking this assessment, which means you're already ahead of most. Let's build from here."
-                }
-              </p>
+          {passes.length > 0 && (
+            <div className="border border-border bg-navy-surface rounded-lg p-5 flex gap-4">
+              <Check className="w-5 h-5 text-teal flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-foreground mb-1">What&apos;s working</p>
+                <p className="text-sm text-muted-foreground">
+                  You have {passes.map((p) => p.name).join(", ")} in place.
+                  {passes.length >= 7 ? " That puts you ahead of 85% of sites we scan." : " A solid foundation to build on."}
+                </p>
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Insight 2: Biggest gap */}
-          <div className="border border-border bg-navy-surface rounded-lg p-5 flex gap-4">
-            <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium text-foreground mb-1">Your biggest gap</p>
-              <p className="text-sm text-muted-foreground">
-                {fails.length > 0
-                  ? `You're missing ${fails.slice(0, 3).join(", ")}${fails.length > 3 ? `, and ${fails.length - 3} more` : ""}. ${fails.includes("/llms.txt") || fails.includes("/ai.txt") ? "These AI-specific surfaces are what separate visible sites from invisible ones." : "These are foundational signals that AI crawlers look for."}`
-                  : "No major gaps detected. Your focus should be on content quality and monitoring."
-                }
-              </p>
+          {fails.length > 0 && (
+            <div className="border border-border bg-navy-surface rounded-lg p-5 flex gap-4">
+              <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-foreground mb-1">What&apos;s missing</p>
+                <p className="text-sm text-muted-foreground">
+                  You&apos;re missing {fails.map((f) => f.name).join(", ")}.
+                  {fails.some((f) => f.slug === "llms" || f.slug === "ai_txt")
+                    ? " These AI-specific surfaces are what separate sites AI can find from sites AI ignores."
+                    : " These are foundational signals that help both search engines and AI systems."}
+                </p>
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Insight 3: Connection to goal */}
-          <div className="border border-border bg-navy-surface rounded-lg p-5 flex gap-4">
-            <Target className="w-5 h-5 text-teal flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium text-foreground mb-1">How this connects to your goal</p>
-              <p className="text-sm text-muted-foreground">
-                {q12 && outcomeLabels[q12]
-                  ? `You said your priority is ${outcomeLabels[q12]}. ${
-                      tier === "high"
-                        ? "Your infrastructure supports this. The next step is a targeted strategy to convert infrastructure into actual citations."
-                        : tier === "medium"
-                          ? `Fixing your ${fails.length > 0 ? fails[0] : "gaps"} is the highest-leverage move toward this goal.`
-                          : "The foundation needs to come first. AI systems can't cite what they can't crawl."
-                    }`
-                  : "Getting your infrastructure right is step one. AI visibility follows from a strong technical foundation."
-                }
-              </p>
+          {goal && goalLabels[goal] && (
+            <div className="border border-border bg-navy-surface rounded-lg p-5 flex gap-4">
+              <Target className="w-5 h-5 text-teal flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-foreground mb-1">Your goal</p>
+                <p className="text-sm text-muted-foreground">
+                  You said your priority is {goalLabels[goal]}.
+                  {tier === "high"
+                    ? " Your infrastructure supports this. The next step is live AI testing to measure actual visibility and citations."
+                    : tier === "medium"
+                      ? ` Fixing ${fails.length > 0 ? fails[0].name : "your gaps"} first will give AI systems the signals they need.`
+                      : " The infrastructure foundation needs to come first. AI systems can't cite what they can't crawl."}
+                </p>
+              </div>
             </div>
+          )}
+        </section>
+
+        {/* What this report doesn't cover */}
+        <section className="border border-border bg-navy-surface/50 rounded-lg p-5">
+          <button
+            className="w-full flex items-center justify-between text-left"
+            onClick={(e) => {
+              const content = (e.currentTarget.nextElementSibling as HTMLElement)
+              content.classList.toggle("hidden")
+            }}
+          >
+            <span className="text-sm font-medium text-foreground">What this free report doesn&apos;t cover</span>
+            <ChevronDown className="w-4 h-4 text-muted-foreground" />
+          </button>
+          <div className="hidden mt-3 text-sm text-muted-foreground space-y-2">
+            <p>This scan checks your <strong>infrastructure</strong> (can AI crawlers access your site?). It does NOT test:</p>
+            <ul className="list-disc list-inside space-y-1 ml-2">
+              <li><strong>AI Visibility</strong>: Does ChatGPT/Perplexity actually know your brand? (requires live API queries)</li>
+              <li><strong>AI Recommendability</strong>: Does AI suggest you when asked about your topic? (requires 20+ test queries)</li>
+              <li><strong>AI Citability</strong>: Does AI link to your URL as a source? (requires multi-platform testing)</li>
+            </ul>
+            <p>These require the <strong>Quick Report ($147)</strong> or <strong>Full Audit ($497)</strong>.</p>
           </div>
         </section>
 
-        {/* Next Steps CTA */}
+        {/* CTA */}
         <section className="border border-teal/30 bg-teal/5 rounded-lg p-6 flex flex-col gap-4 items-center text-center">
           <h2 className="text-xl font-semibold text-foreground">Your Recommended Next Step</h2>
           <p className="text-sm text-muted-foreground max-w-md">{cta.description}</p>
@@ -233,41 +275,6 @@ function ResultsContent() {
               <ArrowRight className="w-4 h-4" />
             </Button>
           </a>
-        </section>
-
-        {/* Detailed breakdown */}
-        <section>
-          <h2 className="font-mono text-xs text-muted-foreground tracking-widest uppercase mb-4">
-            Full Breakdown
-          </h2>
-          <div className="border border-border rounded-lg overflow-hidden">
-            {Object.entries(bestPracticeLabels).map(([key, label], i) => {
-              const val = parseFloat(params.get(key) || "0")
-              const passed = val >= 1
-              const partial = val > 0 && val < 1
-              return (
-                <div
-                  key={key}
-                  className={cn(
-                    "flex items-center justify-between px-5 py-3 border-b border-border/60",
-                    i % 2 === 0 ? "bg-background/60" : "bg-navy-surface/60"
-                  )}
-                >
-                  <span className="text-sm text-foreground">{label}</span>
-                  <span
-                    className={cn(
-                      "font-mono text-xs px-2 py-0.5 rounded border",
-                      passed && "text-teal border-teal/30 bg-teal/10",
-                      partial && "text-yellow-400 border-yellow-400/30 bg-yellow-400/10",
-                      !passed && !partial && "text-red-400 border-red-400/30 bg-red-400/10"
-                    )}
-                  >
-                    {passed ? "PASS" : partial ? "PARTIAL" : "FAIL"}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
         </section>
 
         {/* Share */}
