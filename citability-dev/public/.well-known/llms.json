@@ -1,0 +1,54 @@
+{
+  "site": "citability.dev",
+  "url": "https://citability.dev",
+  "author": {
+    "name": "Chudi Nnorukam",
+    "url": "https://chudi.dev",
+    "linkedin": "https://linkedin.com/in/chudi-nnorukam",
+    "github": "https://github.com/ChudiNnorukam"
+  },
+  "description": "AI Visibility Auditing. Measure whether AI systems can find, recommend, and cite your website.",
+  "keyTopics": [
+    "AI visibility auditing",
+    "AI citability measurement",
+    "AI recommendability testing",
+    "AI infrastructure readiness",
+    "llms.txt",
+    "AI crawler policies",
+    "structured data for AI",
+    "SEO foundation for AI search"
+  ],
+  "bestPages": [
+    {
+      "url": "https://citability.dev",
+      "title": "citability.dev - AI Visibility Auditing",
+      "description": "Measure whether AI systems can find, recommend, and cite your website."
+    },
+    {
+      "url": "https://citability.dev/assess",
+      "title": "AI Visibility Assessment",
+      "description": "Free 15-question assessment measuring AI infrastructure, visibility, and citability."
+    }
+  ],
+  "endpoints": {
+    "llms_txt": "/llms.txt",
+    "ai_txt": "/ai.txt",
+    "sitemap": "/sitemap.xml",
+    "robots": "/robots.txt"
+  },
+  "framework": {
+    "name": "AI Visibility Readiness (AVR) Framework",
+    "version": "1.0",
+    "repository": "https://github.com/ChudiNnorukam/ai-visibility-readiness",
+    "methodology": "https://github.com/ChudiNnorukam/ai-visibility-readiness/blob/main/FRAMEWORK.md",
+    "license": "Source-Available (commercial use requires license)"
+  },
+  "policies": {
+    "training": "allowed with attribution",
+    "retrieval": "allowed",
+    "summarization": "allowed with attribution",
+    "citation": "preferred with URL"
+  },
+  "contact": "hello@citability.dev",
+  "updatedAt": "2026-04-01T00:00:00Z"
+}

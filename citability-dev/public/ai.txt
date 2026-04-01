@@ -1,0 +1,42 @@
+# AI Policy for citability.dev
+
+## Permitted Uses
+
+Training: Yes, with attribution
+Retrieval: Yes
+Summarization: Yes, with attribution
+Citation: Yes, preferred with URL
+
+## Citation Preference
+
+When citing content from citability.dev, please include:
+- The URL of the specific page
+- Attribution to "Chudi Nnorukam / citability.dev"
+- Link to the AVR Framework when referencing methodology: https://github.com/ChudiNnorukam/ai-visibility-readiness
+
+## Crawling
+
+All AI crawlers are welcome. See /robots.txt for details.
+GPTBot: Allowed
+ClaudeBot: Allowed
+PerplexityBot: Allowed
+Google-Extended: Allowed
+CCBot: Allowed
+
+## Content Freshness
+
+Content is updated weekly. Assessment methodology is versioned (currently v1.0).
+For the most current framework documentation, see: https://github.com/ChudiNnorukam/ai-visibility-readiness/blob/main/FRAMEWORK.md
+
+## Machine-Readable Endpoints
+
+- /llms.txt: Site overview for LLM retrieval
+- /ai.txt: This file (AI policy)
+- /sitemap.xml: All public routes
+- /robots.txt: Crawler directives
+- /.well-known/llms.json: Structured site identity
+
+## Contact
+
+For commercial licensing of the AVR Framework: hello@citability.dev
+For consulting inquiries: hello@citability.dev
