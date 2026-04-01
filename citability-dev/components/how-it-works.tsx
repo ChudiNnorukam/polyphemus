@@ -8,8 +8,8 @@ const steps = [
     icon: Globe,
     title: "Enter your domain",
     description:
-      "Our free scan checks 12 infrastructure signals in 60 seconds.",
-    detail: "robots.txt · sitemap.xml · llms.txt · structured data · canonical tags · and more",
+      "Our free scan checks 10 infrastructure and content-readiness signals in 60 seconds.",
+    detail: "robots.txt · sitemap.xml · answer-first intros · freshness · structured data · and more",
   },
   {
     number: "02",
@@ -24,7 +24,7 @@ const steps = [
     icon: Wrench,
     title: "See exactly what to fix",
     description:
-      'Every finding comes with a specific action. Not "improve your SEO." More like "Add llms.txt with these 5 sections."',
+      'Every finding comes with a specific action. Not "improve your SEO." More like "rewrite the intro to answer the query in the first 100 words."',
     detail: "Prioritized by impact · labeled by effort · benchmarked against competitors",
   },
 ]

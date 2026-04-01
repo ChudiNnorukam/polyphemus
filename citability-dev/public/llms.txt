@@ -26,7 +26,7 @@ Chudi Nnorukam
 
 ## Services
 
-- Free Scan: 12 infrastructure checks in 60 seconds ($0)
+- Free Scan: 10 infrastructure + content checks in 60 seconds ($0)
 - Quick Report: Full AI visibility + citability test with 20 queries ($147)
 - Full Audit + Strategy Call: Complete audit with roadmap and 30-min call ($497)
 - Implementation Sprint: 4 weeks of guided implementation ($1,997)

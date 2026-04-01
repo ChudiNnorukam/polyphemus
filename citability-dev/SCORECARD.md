@@ -35,7 +35,7 @@ recommend, or cite their website.
 and discovering that even DA 90+ sites like Reddit and Medium fail basic AI readiness checks.
 
 **Research backing**:
-- "85% of websites have zero AI-readable surfaces (no /llms.txt, no /ai.txt)"
+- "Answer-first structure, freshness, and structured data predict citations better than special AI files."
 - "ahrefs.com (DA 92) is 100% AI-visible but only 5% AI-cited. Visibility and citations are different problems."
 - "The average site scores 3/10 on our AI readiness assessment"
 
@@ -67,8 +67,8 @@ and discovering that even DA 90+ sites like Reddit and Medium fail basic AI read
 **Q3**: "Does your website use structured data (JSON-LD schema) on key pages?"
 - Yes, on most pages (1 pt) / On some pages (0.5 pt) / No (0 pt) / I don't know (0 pt)
 
-**Q4**: "Does your website have an /llms.txt file for AI discovery?"
-- Yes (1 pt) / No (0 pt) / What is /llms.txt? (0 pt)
+**Q4**: "Do your key pages answer the main question in the first 100 words?"
+- Yes, consistently (1 pt) / Sometimes (0.5 pt) / Rarely or never (0 pt)
 
 **Q5**: "Do your blog posts or content pages use question-format headings (e.g., 'How does X work?')?"
 - Yes, consistently (1 pt) / Sometimes (0.5 pt) / Rarely or never (0 pt)
@@ -85,8 +85,8 @@ and discovering that even DA 90+ sites like Reddit and Medium fail basic AI read
 **Q9**: "Do your pages include specific numbers, methodologies, or named frameworks (not generic advice)?"
 - Yes, consistently (1 pt) / Occasionally (0.5 pt) / Rarely (0 pt)
 
-**Q10**: "Does your website have an /ai.txt file specifying AI crawler policies and citation preferences?"
-- Yes (1 pt) / No (0 pt) / What is /ai.txt? (0 pt)
+**Q10**: "Have your key pages been updated within the last 18 months?"
+- Yes, most of them (1 pt) / Some of them (0.5 pt) / Rarely (0 pt) / I don't know (0 pt)
 
 ### Part 3: Big Five Qualifying Questions (Q11-Q15, not scored)
 

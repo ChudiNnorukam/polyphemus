@@ -126,9 +126,9 @@ export function Hero() {
             {[
               { check: "robots.txt", pass: true },
               { check: "sitemap.xml", pass: true },
-              { check: "llms.txt", pass: false },
+              { check: "answer-first intro", pass: false },
               { check: "structured data", pass: true },
-              { check: "ai.txt", pass: false },
+              { check: "content freshness", pass: false },
             ].map(({ check, pass }) => (
               <div key={check} className="flex items-center gap-2">
                 <span className={pass ? "text-teal" : "text-red-400"}>
@@ -149,7 +149,7 @@ export function Hero() {
           {[
             { label: "AI Platforms Tested", value: "3" },
             { label: "Queries Per Audit", value: "20" },
-            { label: "Infrastructure Signals", value: "12" },
+            { label: "Free Scan Signals", value: "10" },
           ].map(({ label, value }) => (
             <div
               key={label}

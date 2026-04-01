@@ -199,7 +199,7 @@ export default function AssessPage() {
                 Let&apos;s audit your site
               </h2>
               <p className="text-sm text-muted-foreground">
-                Enter your website and we&apos;ll run a real AI visibility scan while you answer a few questions.
+                Enter your website and we&apos;ll run a real infrastructure and content-readiness scan while you answer a few questions.
               </p>
             </div>
 

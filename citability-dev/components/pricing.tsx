@@ -13,9 +13,9 @@ const tiers = [
     href: "/assess",
     featured: false,
     features: [
-      "12 infrastructure checks",
+      "10 infrastructure + content checks",
       "SEO foundation score",
-      "AI readiness score",
+      "Citation-readiness score",
       "Instant results",
     ],
   },

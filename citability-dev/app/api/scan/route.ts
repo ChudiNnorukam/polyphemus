@@ -7,6 +7,105 @@ interface CheckResult {
   detail: string
 }
 
+const STOP_WORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "your", "from", "into", "about",
+  "have", "has", "are", "was", "were", "you", "our", "their", "they", "them",
+  "will", "can", "not", "but", "too", "out", "all", "any", "how", "what", "when",
+  "where", "why", "who", "its", "it's", "www", "http", "https", "com",
+])
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function extractKeywords(input: string): string[] {
+  return Array.from(
+    new Set(
+      input
+        .toLowerCase()
+        .match(/[a-z0-9]+/g)?.filter((word) => word.length > 3 && !STOP_WORDS.has(word)) ?? []
+    )
+  )
+}
+
+function evaluateAnswerFirst(html: string): { pass: boolean; detail: string } {
+  const text = stripHtml(html)
+  const words = text.split(/\s+/).filter(Boolean)
+  const firstWords = words.slice(0, 100)
+
+  if (firstWords.length < 35) {
+    return {
+      pass: false,
+      detail: "Could not find enough visible body copy in the first 100 words to judge the intro.",
+    }
+  }
+
+  const firstChunk = firstWords.join(" ")
+  const title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ?? ""
+  const h1s = Array.from(html.matchAll(/<h1[^>]*>([\s\S]*?)<\/h1>/gi))
+    .map((match) => stripHtml(match[1]))
+    .join(" ")
+  const topicKeywords = extractKeywords(`${title} ${h1s}`)
+  const overlap = topicKeywords.filter((keyword) => firstChunk.toLowerCase().includes(keyword)).length
+  const hasDeclarativeSentence = /[^.!?]{35,}[.!?]/.test(firstChunk)
+  const hasAnswerVerb = /\b(is|are|helps|help|provides|offer|offers|lets|turns|shows|explains|tracks|measures|improves|builds)\b/i.test(firstChunk)
+
+  if (hasDeclarativeSentence && (overlap >= 2 || hasAnswerVerb)) {
+    return {
+      pass: true,
+      detail: "The first 100 words appear to explain the page's core topic directly.",
+    }
+  }
+
+  return {
+    pass: false,
+    detail: "The first 100 words do not clearly answer the page's core topic. Lead with the answer, then add context.",
+  }
+}
+
+function evaluateFreshness(html: string): { pass: boolean; detail: string } {
+  const candidates = [
+    ...Array.from(html.matchAll(/"dateModified"\s*:\s*"([^"]+)"/gi)).map((match) => match[1]),
+    ...Array.from(html.matchAll(/"datePublished"\s*:\s*"([^"]+)"/gi)).map((match) => match[1]),
+    ...Array.from(html.matchAll(/<meta[^>]+(?:property|name)=["'](?:article:modified_time|og:updated_time|last-modified|dateModified|datePublished)["'][^>]+content=["']([^"']+)["']/gi)).map((match) => match[1]),
+    ...Array.from(html.matchAll(/<time[^>]+datetime=["']([^"']+)["']/gi)).map((match) => match[1]),
+  ]
+
+  const validDates = candidates
+    .map((value) => new Date(value))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((a, b) => b.getTime() - a.getTime())
+
+  if (validDates.length === 0) {
+    return {
+      pass: false,
+      detail: "No publish or update date found in the page HTML. Expose a machine-readable modified date.",
+    }
+  }
+
+  const newest = validDates[0]
+  const ageInDays = Math.floor((Date.now() - newest.getTime()) / (1000 * 60 * 60 * 24))
+  const recent = ageInDays <= 548
+
+  return {
+    pass: recent,
+    detail: recent
+      ? `Latest machine-readable update is ${newest.toISOString().slice(0, 10)} (${ageInDays} days ago).`
+      : `Latest machine-readable update is ${newest.toISOString().slice(0, 10)} (${ageInDays} days ago). Target updates inside 18 months.`,
+  }
+}
+
 async function checkUrl(url: string, timeout = 5000): Promise<{ status: number; body?: string }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeout)
@@ -64,15 +163,11 @@ export async function POST(req: NextRequest) {
     const [
       robotsStatus,
       sitemapStatus,
-      llmsStatus,
-      aiTxtStatus,
       homepage,
       httpCheck,
     ] = await Promise.all([
       headCheck(`${origin}/robots.txt`),
       headCheck(`${origin}/sitemap.xml`),
-      headCheck(`${origin}/llms.txt`),
-      headCheck(`${origin}/ai.txt`),
       checkUrl(origin, 8000),
       checkUrl(`http://${parsed.hostname}`, 5000),
     ])
@@ -99,28 +194,26 @@ export async function POST(req: NextRequest) {
         : "No sitemap.xml found at root",
     })
 
-    // 3. llms.txt
-    checks.push({
-      name: "/llms.txt",
-      slug: "llms",
-      pass: llmsStatus === 200,
-      detail: llmsStatus === 200
-        ? "AI discovery file found"
-        : "No /llms.txt file. AI systems use this to understand your site.",
-    })
-
-    // 4. ai.txt
-    checks.push({
-      name: "/ai.txt",
-      slug: "ai_txt",
-      pass: aiTxtStatus === 200,
-      detail: aiTxtStatus === 200
-        ? "AI policy file found"
-        : "No /ai.txt file. This tells AI crawlers your citation preferences.",
-    })
-
-    // Parse homepage HTML for remaining checks
+    // Parse homepage HTML for content and metadata checks
     const html = homepage.body || ""
+    const answerFirst = evaluateAnswerFirst(html)
+    const freshness = evaluateFreshness(html)
+
+    // 3. Answer-first content
+    checks.push({
+      name: "Answer-First Content",
+      slug: "answer_first",
+      pass: answerFirst.pass,
+      detail: answerFirst.detail,
+    })
+
+    // 4. Content freshness
+    checks.push({
+      name: "Content Freshness",
+      slug: "freshness",
+      pass: freshness.pass,
+      detail: freshness.detail,
+    })
 
     // 5. JSON-LD Schema
     const jsonLdMatches = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>/gi)
@@ -169,29 +262,34 @@ export async function POST(req: NextRequest) {
         : "Site not using HTTPS",
     })
 
-    // 9. H1 count
+    // 9. Heading hierarchy
     const h1Matches = html.match(/<h1[\s>]/gi)
     const h1Count = h1Matches ? h1Matches.length : 0
+    const h2Matches = html.match(/<h2[\s>]/gi)
+    const h2Count = h2Matches ? h2Matches.length : 0
     checks.push({
-      name: "H1 Heading",
-      slug: "h1",
-      pass: h1Count === 1,
-      detail: h1Count === 1
-        ? "Exactly 1 H1 tag found"
+      name: "Heading Hierarchy",
+      slug: "headings",
+      pass: h1Count >= 1,
+      detail: h1Count >= 1
+        ? `Found ${h1Count} H1 tag${h1Count === 1 ? "" : "s"} and ${h2Count} H2 tag${h2Count === 1 ? "" : "s"}.`
         : h1Count === 0
-          ? "No H1 tag found on homepage"
-          : `Found ${h1Count} H1 tags (should be exactly 1)`,
+          ? "No H1 tag found on the homepage."
+          : `Found ${h1Count} H1 tags.`,
     })
 
-    // 10. Open Graph
-    const ogMatch = html.match(/<meta[^>]*property=["']og:title["'][^>]*/i)
+    // 10. Social sharing readiness
+    const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
+    const ogDescription = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i)
+    const ogImage = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+    const socialTagCount = [ogTitle, ogDescription, ogImage].filter(Boolean).length
     checks.push({
-      name: "Open Graph Tags",
-      slug: "og",
-      pass: !!ogMatch,
-      detail: ogMatch
-        ? "Open Graph tags found for social sharing"
-        : "No Open Graph tags. Links shared on social media won't show rich previews.",
+      name: "Social Sharing Readiness",
+      slug: "social_sharing",
+      pass: !!ogTitle && (!!ogDescription || !!ogImage),
+      detail: socialTagCount >= 2
+        ? `Found ${socialTagCount} Open Graph tag(s) supporting richer shared previews.`
+        : "Open Graph coverage is thin. Add og:title plus og:description or og:image.",
     })
 
     // Calculate score

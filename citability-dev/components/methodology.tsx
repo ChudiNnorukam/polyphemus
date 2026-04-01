@@ -10,7 +10,7 @@ const points = [
   },
   {
     tag: null,
-    text: "85% of websites have zero AI-readable surfaces. No /llms.txt, no /ai.txt, no AI crawler policy.",
+    text: "Special AI files are not the strongest predictor of citations. Answer-first structure, freshness, and clear discovery signals matter more.",
     extra: null,
   },
   {

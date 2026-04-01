@@ -52,9 +52,9 @@ function ResultsContent() {
   const tier = score >= 8 ? "high" : score >= 5 ? "medium" : "low"
 
   const tierLabels: Record<string, string> = {
-    high: "AI-READY",
+    high: "FOUNDATION STRONG",
     medium: "FOUNDATION READY",
-    low: "NOT AI-READY",
+    low: "FOUNDATION GAPS",
   }
 
   const tierColors: Record<string, string> = {
@@ -64,9 +64,9 @@ function ResultsContent() {
   }
 
   const headlines: Record<string, string> = {
-    high: `Great news, ${name}. Your site has strong AI visibility foundations.`,
-    medium: `${name}, your site has a solid start but key AI signals are missing.`,
-    low: `${name}, your site is currently invisible to most AI systems. Here's how to fix it.`,
+    high: `Great news, ${name}. Your site has strong citation-readiness foundations.`,
+    medium: `${name}, your site has a solid base but several citation-readiness gaps remain.`,
+    low: `${name}, your site needs foundational work before AI systems are likely to retrieve and cite it consistently.`,
   }
 
   const passes = scan?.checks.filter((c) => c.pass) || []
@@ -216,9 +216,7 @@ function ResultsContent() {
                 <p className="text-sm font-medium text-foreground mb-1">What&apos;s missing</p>
                 <p className="text-sm text-muted-foreground">
                   You&apos;re missing {fails.map((f) => f.name).join(", ")}.
-                  {fails.some((f) => f.slug === "llms" || f.slug === "ai_txt")
-                    ? " These AI-specific surfaces are what separate sites AI can find from sites AI ignores."
-                    : " These are foundational signals that help both search engines and AI systems."}
+                  {" "}These are the discovery and content-quality signals most likely to improve retrieval and citation readiness.
                 </p>
               </div>
             </div>
@@ -234,8 +232,8 @@ function ResultsContent() {
                   {tier === "high"
                     ? " Your infrastructure supports this. The next step is live AI testing to measure actual visibility and citations."
                     : tier === "medium"
-                      ? ` Fixing ${fails.length > 0 ? fails[0].name : "your gaps"} first will give AI systems the signals they need.`
-                      : " The infrastructure foundation needs to come first. AI systems can't cite what they can't crawl."}
+                      ? ` Fixing ${fails.length > 0 ? fails[0].name : "your gaps"} first will strengthen both discovery and citation-worthiness.`
+                      : " The foundation comes first. AI systems are unlikely to cite pages they cannot reliably retrieve or interpret."}
                 </p>
               </div>
             </div>
@@ -255,7 +253,7 @@ function ResultsContent() {
             <ChevronDown className="w-4 h-4 text-muted-foreground" />
           </button>
           <div className="hidden mt-3 text-sm text-muted-foreground space-y-2">
-            <p>This scan checks your <strong>infrastructure</strong> (can AI crawlers access your site?). It does NOT test:</p>
+            <p>This scan checks your <strong>HTML-visible infrastructure and content-readiness signals</strong>. It does NOT test:</p>
             <ul className="list-disc list-inside space-y-1 ml-2">
               <li><strong>AI Visibility</strong>: Does ChatGPT/Perplexity actually know your brand? (requires live API queries)</li>
               <li><strong>AI Recommendability</strong>: Does AI suggest you when asked about your topic? (requires 20+ test queries)</li>

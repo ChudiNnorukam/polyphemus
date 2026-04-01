@@ -42,7 +42,7 @@ const rows = [
   },
   {
     site: "chudi.dev",
-    infra: { label: "AI-READY", variant: "ready" as const },
+    infra: { label: "FOUNDATION-STRONG", variant: "ready" as const },
     visibility: { label: "29% PARTIAL", variant: "partial" as const },
     citability: { label: "0% NOT CITED", variant: "low" as const },
     overall: "Visible, not yet cited",
