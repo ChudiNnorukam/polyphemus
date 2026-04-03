@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils"
 
 const navLinks = [
   { label: "How It Works", href: "#how-it-works" },
+  { label: "Methodology", href: "/methodology" },
   { label: "Benchmark", href: "#comparison" },
   { label: "Pricing", href: "#pricing" },
 ]
@@ -22,6 +23,7 @@ export function Nav() {
   }, [])
 
   const handleScroll = (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+    if (!href.startsWith("#")) return // Allow normal navigation for non-hash links
     e.preventDefault()
     const id = href.replace("#", "")
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth" })
