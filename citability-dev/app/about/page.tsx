@@ -43,7 +43,7 @@ export default function AboutPage() {
             <h2 className="text-2xl font-semibold text-foreground mb-6">Who</h2>
             <div className="space-y-4 text-foreground/90 leading-relaxed">
               <p>
-                I'm <span className="font-semibold">Chudi Nnorukam</span>, an AI-Visible Web Architect. For 8+ years, I've built systems that help websites rank in traditional search. But starting in 2024, I noticed something that nobody was talking about: the explosion of AI search changed the ranking game overnight.
+                I'm <span className="font-semibold">Chudi Nnorukam</span>, an AI-Visible Web Architect. For 2 years, I've been building systems at the intersection of web infrastructure and AI search. I noticed something that nobody was talking about: the explosion of AI search changed the ranking game overnight.
               </p>
               <p>
                 ChatGPT, Perplexity, Claude, and hundreds of smaller AI research assistants are now the first place millions of people look for answers. They don't use Google's ranking algorithm. They don't respect robots.txt. They have their own crawlers, their own indexing rules, and their own citation preferences.
