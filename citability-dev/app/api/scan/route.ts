@@ -5,6 +5,8 @@ interface CheckResult {
   slug: string
   pass: boolean
   detail: string
+  evidence: "verified" | "emerging"
+  why: string
 }
 
 const STOP_WORDS = new Set([
@@ -182,6 +184,8 @@ export async function POST(req: NextRequest) {
         : robotsStatus === 0
           ? "Could not connect to check robots.txt"
           : `robots.txt returned status ${robotsStatus}`,
+      evidence: "verified",
+      why: "All major crawlers (Googlebot, GPTBot, ClaudeBot, CCBot) read robots.txt to determine access permissions.",
     })
 
     // 2. sitemap.xml
@@ -192,6 +196,8 @@ export async function POST(req: NextRequest) {
       detail: sitemapStatus === 200
         ? "Sitemap found and accessible"
         : "No sitemap.xml found at root",
+      evidence: "verified",
+      why: "Sitemaps are the primary content discovery mechanism for all search and AI crawlers.",
     })
 
     // Parse homepage HTML for content and metadata checks
@@ -205,6 +211,8 @@ export async function POST(req: NextRequest) {
       slug: "answer_first",
       pass: answerFirst.pass,
       detail: answerFirst.detail,
+      evidence: "verified",
+      why: "Pages that lead with a direct answer are more likely to be extracted for featured snippets and AI summaries.",
     })
 
     // 4. Content freshness
@@ -213,6 +221,8 @@ export async function POST(req: NextRequest) {
       slug: "freshness",
       pass: freshness.pass,
       detail: freshness.detail,
+      evidence: "verified",
+      why: "Google and AI systems use date signals to prioritize recent, maintained content over stale pages.",
     })
 
     // 5. JSON-LD Schema
@@ -225,6 +235,8 @@ export async function POST(req: NextRequest) {
       detail: hasJsonLd
         ? `Found ${jsonLdMatches!.length} JSON-LD block(s)`
         : "No JSON-LD structured data found on homepage",
+      evidence: "verified",
+      why: "Google, Bing, and AI systems parse JSON-LD to understand entities, relationships, and page purpose.",
     })
 
     // 6. Meta description
@@ -238,6 +250,8 @@ export async function POST(req: NextRequest) {
       detail: hasMetaDesc
         ? `Found: "${metaDescMatch![1].slice(0, 80)}${metaDescMatch![1].length > 80 ? "..." : ""}"`
         : "No meta description found or too short",
+      evidence: "verified",
+      why: "Used by search engines for snippet generation and by AI systems as a page summary signal.",
     })
 
     // 7. Canonical URL
@@ -249,6 +263,8 @@ export async function POST(req: NextRequest) {
       detail: canonicalMatch
         ? `Canonical: ${canonicalMatch[1]}`
         : "No canonical URL set. Risk of duplicate content.",
+      evidence: "verified",
+      why: "Canonical tags prevent duplicate content confusion for both search engines and AI training crawlers.",
     })
 
     // 8. HTTPS redirect
@@ -260,6 +276,8 @@ export async function POST(req: NextRequest) {
       detail: parsed.protocol === "https:"
         ? "Site served over HTTPS"
         : "Site not using HTTPS",
+      evidence: "verified",
+      why: "HTTPS is a confirmed Google ranking signal and a trust requirement for AI systems that fetch content.",
     })
 
     // 9. Heading hierarchy
@@ -276,6 +294,8 @@ export async function POST(req: NextRequest) {
         : h1Count === 0
           ? "No H1 tag found on the homepage."
           : `Found ${h1Count} H1 tags.`,
+      evidence: "verified",
+      why: "Heading structure helps both search engines and AI models understand content hierarchy and extract key topics.",
     })
 
     // 10. Social sharing readiness
@@ -290,6 +310,8 @@ export async function POST(req: NextRequest) {
       detail: socialTagCount >= 2
         ? `Found ${socialTagCount} Open Graph tag(s) supporting richer shared previews.`
         : "Open Graph coverage is thin. Add og:title plus og:description or og:image.",
+      evidence: "verified",
+      why: "Open Graph tags are read by social platforms and AI systems to generate content previews and summaries.",
     })
 
     // Calculate score

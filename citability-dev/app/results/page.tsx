@@ -164,26 +164,43 @@ function ResultsContent() {
                   {score}/{total} checks passed
                 </span>
               </div>
-              {scan.checks.map((check, i) => (
+              {scan.checks.map((check: any, i: number) => (
                 <div
                   key={check.slug}
                   className={cn(
-                    "flex items-start justify-between px-5 py-3.5 border-b border-border/60",
+                    "flex flex-col px-5 py-3.5 border-b border-border/60",
                     i % 2 === 0 ? "bg-background/60" : "bg-navy-surface/60"
                   )}
                 >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-foreground font-medium">{check.name}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5 truncate">{check.detail}</p>
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm text-foreground font-medium">{check.name}</p>
+                        {check.evidence && (
+                          <span className={cn(
+                            "font-mono text-[10px] px-1.5 py-0.5 rounded border",
+                            check.evidence === "verified"
+                              ? "text-teal/70 border-teal/20 bg-teal/5"
+                              : "text-yellow-400/70 border-yellow-400/20 bg-yellow-400/5"
+                          )}>
+                            {check.evidence === "verified" ? "VERIFIED" : "EMERGING"}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-0.5">{check.detail}</p>
+                      {check.why && (
+                        <p className="text-[11px] text-muted-foreground/60 mt-1 italic">{check.why}</p>
+                      )}
+                    </div>
+                    <span className={cn(
+                      "font-mono text-xs px-2 py-0.5 rounded border ml-3 flex-shrink-0",
+                      check.pass
+                        ? "text-teal border-teal/30 bg-teal/10"
+                        : "text-red-400 border-red-400/30 bg-red-400/10"
+                    )}>
+                      {check.pass ? "PASS" : "FAIL"}
+                    </span>
                   </div>
-                  <span className={cn(
-                    "font-mono text-xs px-2 py-0.5 rounded border ml-3 flex-shrink-0",
-                    check.pass
-                      ? "text-teal border-teal/30 bg-teal/10"
-                      : "text-red-400 border-red-400/30 bg-red-400/10"
-                  )}>
-                    {check.pass ? "PASS" : "FAIL"}
-                  </span>
                 </div>
               ))}
             </div>

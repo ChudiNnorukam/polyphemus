@@ -19,6 +19,10 @@ export const metadata: Metadata = {
     url: 'https://citability.dev',
     siteName: 'citability.dev',
     type: 'website',
+    images: [{ url: '/opengraph-image', width: 1200, height: 630, alt: 'citability.dev - AI Visibility Auditing' }],
+  },
+  other: {
+    'article:modified_time': new Date().toISOString().split('T')[0],
   },
   icons: {
     icon: [
@@ -58,6 +62,7 @@ export default function RootLayout({
                   name: 'citability.dev',
                   url: 'https://citability.dev',
                   description: 'AI Visibility Auditing. Measure whether AI systems can find you, recommend you, and cite you.',
+                  dateModified: '2026-04-02',
                 },
                 {
                   '@type': 'Organization',
