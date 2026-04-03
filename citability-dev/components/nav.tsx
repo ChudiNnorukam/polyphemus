@@ -10,6 +10,7 @@ const navLinks = [
   { label: "Methodology", href: "/methodology" },
   { label: "Benchmark", href: "#comparison" },
   { label: "Pricing", href: "#pricing" },
+  { label: "About", href: "/about" },
 ]
 
 export function Nav() {

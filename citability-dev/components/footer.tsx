@@ -3,9 +3,12 @@
 import { ExternalLink } from "lucide-react"
 
 const links = [
-  { label: "Methodology", href: "#how-it-works" },
+  { label: "Methodology", href: "/methodology" },
+  { label: "About", href: "/about" },
   { label: "GitHub", href: "https://github.com/ChudiNnorukam/ai-visibility-readiness" },
   { label: "LinkedIn", href: "https://linkedin.com/in/chudi-nnorukam" },
+  { label: "Privacy", href: "/privacy" },
+  { label: "Terms", href: "/terms" },
   { label: "Contact", href: "mailto:hello@citability.dev" },
 ]
 
