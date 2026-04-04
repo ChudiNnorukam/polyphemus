@@ -174,6 +174,14 @@ export default function AssessPage() {
 
   return (
     <main className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center px-4 py-16">
+      {/* Home nav */}
+      <a
+        href="/"
+        className="fixed top-5 left-6 text-sm font-mono text-muted-foreground hover:text-teal transition-colors z-50"
+      >
+        ← citability.dev
+      </a>
+
       {/* Progress bar */}
       <div className="w-full max-w-xl mb-8">
         <div className="flex items-center justify-between mb-2">
