@@ -4,7 +4,7 @@ import { generateReportPrompt, getIcpLabel, needsConsultation } from "@/lib/repo
 import { createZoomMeeting, getNextConsultSlot } from "@/lib/zoom"
 import { generateIcs, icsToBase64 } from "@/lib/calendar"
 
-const OWNER_EMAIL = "hello@citability.dev"
+const OWNER_EMAIL = "hello@chudi.dev"
 const OWNER_NAME = "Chudi Nnorukam"
 
 async function sendEmail(opts: {

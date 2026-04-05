@@ -3,7 +3,7 @@ import crypto from "crypto"
 import { createZoomMeeting } from "@/lib/zoom"
 import { generateIcs, icsToBase64 } from "@/lib/calendar"
 
-const OWNER_EMAIL = "hello@citability.dev"
+const OWNER_EMAIL = "hello@chudi.dev"
 const OWNER_NAME = "Chudi Nnorukam"
 
 function verifySignature(payload: string, signature: string, secret: string): boolean {
