@@ -54,6 +54,8 @@ class RithmicClient:
         self._account_id: str = ""
         self._trade_route: str = ""
         self._ready: asyncio.Event = asyncio.Event()
+        self._pending_orders: dict[str, asyncio.Event] = {}  # basket_id -> fill event
+        self._last_order_ack: Optional[str] = None  # last acknowledged basket_id
 
     def _build_ssl(self) -> ssl.SSLContext:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -246,7 +248,21 @@ class RithmicClient:
 
         await self._ws.send(rq.SerializeToString())
         logger.info(f"Order sent: side={side} symbol={self._cfg.symbol} trailing_stop=True trail_by_ticks={self._cfg.stop_loss_ticks}")
-        return ""  # basket_id comes back in ResponseNewOrder (313)
+
+        # Wait for order acknowledgment with timeout
+        self._last_order_ack = None
+        try:
+            ack_event = asyncio.Event()
+            self._pending_orders["__next__"] = ack_event
+            await asyncio.wait_for(ack_event.wait(), timeout=10.0)
+            basket_id = self._last_order_ack or ""
+            if basket_id:
+                logger.info(f"Order acknowledged: basket_id={basket_id}")
+            return basket_id
+        except asyncio.TimeoutError:
+            logger.error(f"Order acknowledgment timeout (10s) for {side} {self._cfg.symbol}. Order may be orphaned.")
+            del self._pending_orders["__next__"]
+            return ""
 
     async def _listen_loop(self) -> None:
         self._last_recv_ts = asyncio.get_event_loop().time()
@@ -274,6 +290,12 @@ class RithmicClient:
             rp = response_new_order_pb2.ResponseNewOrder()
             rp.ParseFromString(buf)
             logger.info(f"ResponseNewOrder: basket_id={rp.basket_id} rp_code={list(rp.rp_code)}")
+            # Signal the pending order wait
+            if rp.basket_id:
+                self._last_order_ack = rp.basket_id
+                if "__next__" in self._pending_orders:
+                    self._pending_orders["__next__"].set()
+                    del self._pending_orders["__next__"]
             if rp.basket_id and self._on_order_ack:
                 await self._on_order_ack(rp.basket_id)
         elif tid == 351:

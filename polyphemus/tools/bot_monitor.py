@@ -7,6 +7,7 @@ Run:      python3 tools/bot_monitor.py
 """
 
 import asyncio
+import os
 import aiohttp
 from datetime import datetime
 
@@ -17,26 +18,57 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 
-BOTS = [
+DEFAULT_BOTS = [
     {
+        "instance": "polyphemus",
         "name": "Polyphemus",
-        "label": "PROXY",
+        "label": "Pair Arb",
         "host": "localhost",
-        "port": 8080,
-        "vps": "142.93.143.178",
-        "strategy": "ACCUM",
+        "port": 8083,
+        "vps": "82.24.19.114",
+        "strategy": "ACCUMULATOR",
     },
     {
-        "name": "Lagbot",
-        "label": "EOA",
+        "instance": "emmanuel",
+        "name": "Emmanuel",
+        "label": "Control",
         "host": "localhost",
-        "port": 8081,
+        "port": 8082,
         "vps": "82.24.19.114",
-        "strategy": "ARB+ACCUM",
+        "strategy": "CHEAP_SIDE",
     },
 ]
 
 POLL_INTERVAL = 5
+
+
+def _read_env(path: str) -> dict:
+    env = {}
+    if not os.path.exists(path):
+        return env
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def _load_bots():
+    bots = []
+    for default in DEFAULT_BOTS:
+        env = _read_env(f"/opt/lagbot/instances/{default['instance']}/.env")
+        bot = dict(default)
+        if env.get("DASHBOARD_PORT"):
+            bot["port"] = int(env["DASHBOARD_PORT"])
+        if env.get("INSTANCE_NAME"):
+            bot["name"] = env["INSTANCE_NAME"]
+        bots.append(bot)
+    return bots
+
+
+BOTS = _load_bots()
 
 
 async def poll_bot(session: aiohttp.ClientSession, bot: dict) -> dict:
@@ -96,6 +128,7 @@ def render_bot_panel(cfg: dict, data: dict) -> Panel:
         status_text = Text("LIVE", style="bold green") if not errors else Text("DEGRADED", style="yellow")
         t.add_row("Status", status_text)
         t.add_row("Uptime", f"{float(uptime):.1f}h" if uptime else "?")
+        t.add_row("Dry Run", str(st.get("effective_accumulator_dry_run", st.get("dry_run", "?"))).lower())
         t.add_row("", "")
 
         b = float(bal.get("balance", 0))
@@ -115,6 +148,7 @@ def render_bot_panel(cfg: dict, data: dict) -> Panel:
         pnl = acc.get("total_pnl", 0)
         bid_pair = acc.get("best_bid_pair")
         consec = acc.get("consecutive_unwinds", 0)
+        last_block = acc.get("last_eval_block_reason") or "n/a"
 
         wr = hedged / max(hedged + unwound, 1)
 
@@ -126,6 +160,8 @@ def render_bot_panel(cfg: dict, data: dict) -> Panel:
         t.add_row("Consec Unwinds", str(consec))
         if bid_pair is not None:
             t.add_row("Best Bid Pair", f"${float(bid_pair):.4f}")
+        if last_block != "n/a":
+            t.add_row("Last Block", last_block[:40])
 
         # Last 2 settlements
         settlements = acc.get("settlements", [])

@@ -80,6 +80,18 @@ class Dashboard:
         self._adaptive_tuner = adaptive_tuner
         self._executor = executor
         self._logger = setup_logger("polyphemus.dashboard")
+        self._dashboard_build_id = f"{int(os.path.getmtime(__file__))}-{os.getpid()}"
+
+    def _get_accumulator_targets(self) -> tuple[list[str], list[str]]:
+        assets = [a.strip().upper() for a in self._config.accum_assets.split(",") if a.strip()]
+        windows = [w.strip() for w in self._config.accum_window_types.split(",") if w.strip()]
+        return assets, windows
+
+    def _use_accumulator_pipeline_summary(self) -> bool:
+        if not self._accumulator_engine or not bool(getattr(self._config, "enable_accumulator", False)):
+            return False
+        assets, windows = self._get_accumulator_targets()
+        return bool(assets) and (assets != ["BTC"] or windows != ["5m"])
 
     async def start(self) -> None:
         """Start the dashboard web server."""
@@ -119,15 +131,35 @@ class Dashboard:
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         uptime_h = self._health.get_uptime_hours()
+        accum_stats = self._accumulator_engine.stats if self._accumulator_engine else {}
         data = {
             "status": "running",
+            "state": "running",
             "uptime_hours": round(uptime_h, 2),
             "errors": self._health._error_count,
             "binance_connected": (
                 (self._binance_feed is not None and not self._binance_feed.circuit_open)
-                or (self._momentum_feed is not None and self._momentum_feed._consecutive_failures == 0)
+                or (self._momentum_feed is not None and getattr(self._momentum_feed, '_consecutive_failures', 0) == 0)
             ),
+            "dry_run": bool(self._dry_run),
+            "enable_accumulator": bool(self._accumulator_engine is not None),
+            "accum_dry_run": bool(self._config.accum_dry_run),
+            "effective_accumulator_dry_run": bool(
+                accum_stats.get("effective_accumulator_dry_run", self._dry_run)
+            ),
+            "accum_mode_enabled": bool(getattr(self._config, "accum_mode_enabled", False)),
+            "accumulator_state": accum_stats.get("state", "disabled"),
+            "accumulator_assets": accum_stats.get("assets", []),
+            "accumulator_window_types": accum_stats.get("window_types", []),
+            "accumulator_active_positions": accum_stats.get("active_positions", 0),
+            "accumulator_circuit_tripped": bool(accum_stats.get("circuit_tripped", False)),
+            "accumulator_entry_mode": accum_stats.get("entry_mode", "unknown"),
+            "accumulator_daily_loss_limit": accum_stats.get("daily_loss_limit", 0.0),
+            "accumulator_total_pnl": accum_stats.get("total_pnl", 0.0),
+            "open_positions": self._store.count_open(),
+            "balance": round(self._balance._cached_balance, 2),
             "timestamp": time.time(),
+            "dashboard_build_id": self._dashboard_build_id,
         }
         return web.json_response(data)
 
@@ -154,12 +186,15 @@ class Dashboard:
         if self._binance_feed:
             for asset, symbol in ASSET_TO_BINANCE.items():
                 m = self._binance_feed.get_momentum(asset)
-                readings[asset] = {
-                    "direction": m.direction,
-                    "momentum_pct": round(m.momentum_pct * 100, 4),
-                    "confidence": round(m.confidence, 3),
-                    "age_secs": round(m.age_secs, 1),
-                }
+                if m:
+                    readings[asset] = {
+                        "direction": m.direction,
+                        "momentum_pct": round(m.momentum_pct * 100, 4),
+                        "confidence": round(m.confidence, 3),
+                        "age_secs": round(m.age_secs, 1),
+                    }
+                else:
+                    readings[asset] = {"direction": "UNKNOWN", "momentum_pct": 0, "confidence": 0, "age_secs": 0}
         elif self._momentum_feed:
             now = time.time()
             window = self._config.momentum_window_secs
@@ -208,7 +243,12 @@ class Dashboard:
     async def _handle_accumulator(self, request: web.Request) -> web.Response:
         if not self._accumulator_engine:
             return web.json_response({"enabled": False})
-        return web.json_response({"enabled": True, **self._accumulator_engine.stats})
+        payload = {"enabled": True, **self._accumulator_engine.stats}
+        payload["settlements"] = self._get_recent_accumulator_settlements(
+            runtime_stats=payload,
+            limit=20,
+        )
+        return web.json_response(payload)
 
     async def _handle_gabagool(self, request: web.Request) -> web.Response:
         if not self._gabagool_tracker:
@@ -440,6 +480,142 @@ class Dashboard:
                 "open": trade.get("exit_time") is None,
             })
         return trades
+
+    def _normalize_accumulator_settlement(self, settlement: dict) -> dict | None:
+        """Normalize runtime settlement rows into a stable dashboard shape."""
+        if not settlement:
+            return None
+        slug = settlement.get("slug")
+        timestamp = settlement.get("timestamp")
+        if not slug or timestamp is None:
+            return None
+        try:
+            pnl = float(settlement.get("pnl", 0.0) or 0.0)
+        except Exception:
+            pnl = 0.0
+        return {
+            "slug": slug,
+            "exit_reason": settlement.get("exit_reason", "unknown"),
+            "matched": float(settlement.get("matched", 0.0) or 0.0),
+            "up_qty": float(settlement.get("up_qty", 0.0) or 0.0),
+            "down_qty": float(settlement.get("down_qty", 0.0) or 0.0),
+            "up_avg": float(settlement.get("up_avg", 0.0) or 0.0),
+            "down_avg": float(settlement.get("down_avg", 0.0) or 0.0),
+            "pair_cost": float(settlement.get("pair_cost", 0.0) or 0.0),
+            "pnl": pnl,
+            "timestamp": float(timestamp),
+        }
+
+    def _trade_to_accumulator_settlement(self, trade: dict) -> dict | None:
+        """Project a closed accumulator trade row into dashboard settlement shape."""
+        if not trade or trade.get("exit_time") is None:
+            return None
+
+        slug = trade.get("slug") or ""
+        if "-updown-" not in slug:
+            return None
+
+        exit_reason = str(trade.get("exit_reason") or "")
+        strategy = str(trade.get("strategy") or "")
+        allowed_reasons = {
+            "hedged_settlement",
+            "orphaned_settlement",
+            "held_to_settlement",
+            "sellback",
+            "unwound",
+            "forced_hold_clob_unindexed",
+            "forced_hold_sell_failed",
+        }
+        if strategy != "pair_arb" and exit_reason not in allowed_reasons:
+            return None
+
+        metadata = {}
+        raw_metadata = trade.get("metadata")
+        if raw_metadata:
+            try:
+                metadata = json.loads(raw_metadata)
+            except Exception:
+                metadata = {}
+
+        pnl = trade.get("pnl")
+        if pnl is None:
+            pnl = trade.get("profit_loss")
+        try:
+            pnl_value = float(pnl or 0.0)
+        except Exception:
+            pnl_value = 0.0
+
+        entry_size = float(trade.get("entry_size", 0.0) or 0.0)
+        up_qty = float(metadata.get("up_qty", 0.0) or 0.0)
+        down_qty = float(metadata.get("down_qty", 0.0) or 0.0)
+        if not up_qty and not down_qty and entry_size > 0:
+            if (trade.get("outcome") or "").upper() == "PAIR":
+                up_qty = entry_size
+                down_qty = entry_size
+            else:
+                up_qty = entry_size
+
+        return {
+            "slug": slug,
+            "exit_reason": exit_reason or "unknown",
+            "matched": entry_size if (trade.get("outcome") or "").upper() == "PAIR" else 0.0,
+            "up_qty": up_qty,
+            "down_qty": down_qty,
+            "up_avg": float(metadata.get("up_price", 0.0) or 0.0),
+            "down_avg": float(metadata.get("down_price", 0.0) or 0.0),
+            "pair_cost": float(
+                metadata.get("pair_cost", trade.get("entry_price", 0.0)) or 0.0
+            ),
+            "pnl": pnl_value,
+            "timestamp": float(trade.get("exit_time") or trade.get("entry_time") or 0.0),
+        }
+
+    def _get_recent_accumulator_settlements(
+        self,
+        runtime_stats: dict | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return recent accumulator settlements, rehydrating from performance.db after restarts."""
+        runtime_rows = []
+        if runtime_stats is not None:
+            runtime_rows = list(runtime_stats.get("settlements") or [])
+        elif self._accumulator_engine:
+            runtime_rows = list(getattr(self._accumulator_engine, "_settlements", []) or [])
+
+        settlements: list[dict] = []
+        seen: set[tuple[str, str, int, int]] = set()
+
+        def add_row(row: dict | None) -> None:
+            normalized = self._normalize_accumulator_settlement(row) if row else None
+            if not normalized:
+                return
+            key = (
+                normalized["slug"],
+                normalized["exit_reason"],
+                int(normalized["timestamp"]),
+                int(round(normalized["pnl"] * 10000)),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            settlements.append(normalized)
+
+        for row in runtime_rows:
+            add_row(row)
+
+        need_db_backfill = (
+            len(settlements) < limit
+            and self._perf_db is not None
+            and hasattr(self._perf_db, "get_recent_trades")
+        )
+        if need_db_backfill:
+            for trade in self._perf_db.get_recent_trades(limit=max(limit * 5, 50)):
+                add_row(self._trade_to_accumulator_settlement(trade))
+                if len(settlements) >= limit:
+                    break
+
+        settlements.sort(key=lambda row: float(row.get("timestamp", 0.0)))
+        return settlements[-limit:]
 
     def _get_filter_summary(self, hours: int = 24) -> dict:
         """Aggregate recent BTC 5m filtered/rejected signals."""
@@ -740,6 +916,7 @@ class Dashboard:
                 if self._executor and hasattr(self._executor, "get_entry_retry_stats")
                 else {}
             )
+            accum_stats = self._accumulator_engine.stats if self._accumulator_engine else {}
             retry_skip_reasons = [
                 {"reason": reason, "count": count}
                 for reason, count in sorted(
@@ -752,7 +929,44 @@ class Dashboard:
             stage = "healthy"
             headline = "BTC pipeline is flowing"
             summary = "Recent BTC decisions, passed signals, and trades are present."
-            if counts["decisions_15m"] == 0:
+            if accum_stats.get("circuit_tripped", False):
+                stage = "circuit_breaker"
+                headline = "Accumulator circuit breaker is active"
+                summary = (
+                    f"New entries are halted because realized accumulator P&L is "
+                    f"${float(accum_stats.get('total_pnl', 0.0)):.2f} versus the daily loss limit "
+                    f"${float(accum_stats.get('daily_loss_limit', 0.0)):.2f}. "
+                    "Trade silence is expected until operator review and reset."
+                )
+            elif self._use_accumulator_pipeline_summary():
+                assets, windows_cfg = self._get_accumulator_targets()
+                target_label = f"{'/'.join(assets)} {'/'.join(windows_cfg)}".strip()
+                active_positions = int(accum_stats.get("active_positions", 0) or 0)
+                scan_count = int(accum_stats.get("scan_count", 0) or 0)
+                candidates_seen = int(accum_stats.get("candidates_seen", 0) or 0)
+                last_block = str(accum_stats.get("last_eval_block_reason", "") or "").strip()
+                if active_positions > 0:
+                    stage = "accumulating"
+                    headline = f"Accumulator active on {target_label}"
+                    summary = (
+                        f"{active_positions} active paired position(s); "
+                        f"entry_mode={accum_stats.get('entry_mode', 'unknown')}."
+                    )
+                elif scan_count == 0:
+                    stage = "starting"
+                    headline = f"Accumulator starting on {target_label}"
+                    summary = "No shadow scans recorded yet."
+                else:
+                    stage = "accumulator_scanning"
+                    headline = f"Accumulator scanning {target_label} markets"
+                    summary = (
+                        f"scan_count={scan_count}, candidates_seen={candidates_seen}, "
+                        f"hedged={int(accum_stats.get('hedged_count', 0) or 0)}, "
+                        f"unwound={int(accum_stats.get('unwound_count', 0) or 0)}."
+                    )
+                    if last_block:
+                        summary = f"{summary} Last eval block: {last_block}."
+            elif counts["decisions_15m"] == 0:
                 stage = "stalled"
                 headline = "No BTC 5m decision in 15 minutes"
                 summary = "Market discovery or signal generation may be stalled."
@@ -796,6 +1010,9 @@ class Dashboard:
                 "retry_recovered": retry_stats.get("retry_recovered", 0),
                 "retry_skip_reasons": retry_skip_reasons,
                 "stage_stops": stage_stops,
+                "accumulator_circuit_tripped": bool(accum_stats.get("circuit_tripped", False)),
+                "accumulator_total_pnl": float(accum_stats.get("total_pnl", 0.0)),
+                "accumulator_daily_loss_limit": float(accum_stats.get("daily_loss_limit", 0.0)),
             }
         finally:
             sig_conn.close()
@@ -872,7 +1089,8 @@ class Dashboard:
         return "180s+"
 
     async def _handle_index(self, request: web.Request) -> web.Response:
-        return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+        html = DASHBOARD_HTML.replace("__DASHBOARD_BUILD_ID__", self._dashboard_build_id)
+        return web.Response(text=html, content_type="text/html")
 
 
 # ── Embedded HTML Dashboard ──────────────────────────────────────
@@ -881,11 +1099,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lagbot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Polyphemus Shadow Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;width:100%;overflow-x:hidden}
 :root{
   --bg:#0d1117;--card:#161b22;--border:#21262d;--hover:#1c2128;
   --text:#c9d1d9;--dim:#484f58;--bright:#f0f6fc;
@@ -899,92 +1118,103 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   --green:#1a7f37;--red:#cf222e;--blue:#0969da;--amber:#9a6700;--purple:#8250df;
   --shadow:0 1px 3px rgba(27,31,36,0.12);
 }
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:13px;line-height:1.5;padding-bottom:40px}
 a{color:var(--blue);text-decoration:none}
-.wrap{max-width:1200px;margin:0 auto;padding:16px 20px}
+.wrap{max-width:1400px;margin:0 auto;padding:12px 16px}
 
-/* Header */
-header{display:flex;justify-content:space-between;align-items:center;padding:12px 0 20px;border-bottom:1px solid var(--border);margin-bottom:20px}
-.header-left{display:flex;align-items:center;gap:12px}
-header h1{font-size:16px;font-weight:600;color:var(--bright)}
-.badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-family:var(--mono);padding:2px 10px;border:1px solid var(--border);border-radius:16px;color:var(--dim)}
-.badge .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
-.badge .dot.on{background:var(--green);box-shadow:0 0 4px var(--green)}
+header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--border);padding:10px 0 12px;margin-bottom:16px;z-index:100;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.header-left{display:flex;align-items:center;gap:8px}
+header h1{font-size:14px;font-weight:700;color:var(--bright)}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-family:var(--mono);padding:2px 8px;border:1px solid var(--border);border-radius:12px;color:var(--dim)}
+.badge .dot{width:5px;height:5px;border-radius:50%;display:inline-block}
+.badge .dot.on{background:var(--green)}
 .badge .dot.off{background:var(--red)}
-.badge .dot.warn{background:var(--amber)}
-.header-right{display:flex;align-items:center;gap:10px}
-.header-right .ago{font-size:11px;color:var(--dim);font-family:var(--mono)}
-.theme-btn{background:none;border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;color:var(--dim)}
-.theme-btn:hover{color:var(--bright);border-color:var(--bright)}
+.header-right{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--dim)}
+.theme-btn{background:none;border:1px solid var(--border);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px;color:var(--dim);min-height:28px}
+.theme-btn:hover{color:var(--bright)}
 
-/* Grid */
 .grid{display:grid;gap:12px;margin-bottom:12px}
-.g4{grid-template-columns:repeat(4,1fr)}
-.g2{grid-template-columns:1fr 1fr}
 .g1{grid-template-columns:1fr}
-@media(max-width:900px){.g4,.g2{grid-template-columns:1fr 1fr}}
-@media(max-width:540px){.g4,.g2,.g1{grid-template-columns:1fr}}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:1fr 1fr 1fr}
+.g4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:1200px){.g4{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:1fr 1fr}}
+@media(max-width:768px){.g2,.g3,.g4{grid-template-columns:1fr}}
 
-/* Cards */
-.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}
-.card-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--dim);margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:12px}
+.card-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;color:var(--dim);margin-bottom:10px}
+.card-sub{font-size:9px;color:var(--dim);margin-bottom:4px}
 
-/* Metrics */
-.big-num{font-family:var(--mono);font-size:28px;font-weight:700;color:var(--bright);letter-spacing:-0.5px}
-.big-num.sm{font-size:22px}
-.big-sub{font-size:12px;color:var(--dim);font-family:var(--mono);margin-top:2px;margin-bottom:10px}
-.row{display:flex;justify-content:space-between;align-items:baseline;padding:4px 0}
-.row .lbl{color:var(--dim);font-size:12px}
-.row .val{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--bright)}
-.green{color:var(--green) !important}.red{color:var(--red) !important}
-.blue{color:var(--blue) !important}.amber{color:var(--amber) !important}.purple{color:var(--purple) !important}.dim{color:var(--dim) !important}
+.hero-metric{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.hero-item{flex:1;text-align:center;padding:8px}
+.hero-val{font-family:var(--mono);font-size:20px;font-weight:700;line-height:1;margin-bottom:2px}
+.hero-val.green{color:var(--green)}
+.hero-val.red{color:var(--red)}
+.hero-lbl{font-size:9px;color:var(--dim);text-transform:uppercase;font-weight:600}
 
-/* State pill */
-.state-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;font-family:var(--mono)}
-.state-pill.hedged{background:#3fb95020;color:var(--green)}
-.state-pill.accumulating{background:#58a6ff20;color:var(--blue)}
-.state-pill.settling{background:#d2992220;color:var(--amber)}
-.state-pill.scanning,.state-pill.idle{background:#484f5820;color:var(--dim)}
-.state-pill.active{background:#3fb95020;color:var(--green)}
+.pos-card{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px}
+.pos-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:6px}
+.pos-market{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--bright)}
+.countdown{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--amber);min-width:45px;text-align:right}
+.countdown.settling{color:var(--green)}
+.pos-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:10px}
+.pos-stat{display:flex;justify-content:space-between}
+.pos-stat-lbl{color:var(--dim)}
+.pos-stat-val{font-family:var(--mono);font-weight:600;color:var(--bright)}
 
-/* Countdown */
-.countdown{font-family:var(--mono);font-size:20px;font-weight:700;color:var(--amber);text-align:center;padding:6px 0}
+.chart-wrap{position:relative;height:120px;margin-bottom:6px}
 
-/* Chart */
-.chart-wrap{position:relative;height:140px}
-
-/* Table */
-table{width:100%;border-collapse:collapse;font-size:12px}
-th{text-align:left;padding:6px 8px;color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);font-weight:600}
-td{padding:6px 8px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--text)}
-tr:last-child td{border-bottom:none}
+table{width:100%;border-collapse:collapse;font-size:10px}
+th{text-align:left;padding:6px 4px;color:var(--dim);font-size:9px;text-transform:uppercase;border-bottom:1px solid var(--border);font-weight:700}
+td{padding:6px 4px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:10px;color:var(--text)}
 tr:hover td{background:var(--hover)}
-.tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px}
+
+.tag{display:inline-block;padding:1px 6px;border-radius:8px;font-size:8px;font-weight:600;text-transform:uppercase}
 .tag.hedged{background:#3fb95018;color:var(--green)}
 .tag.orphan{background:#f8514918;color:var(--red)}
 .tag.unwound{background:#d2992218;color:var(--amber)}
-.tag.allow,.tag.executed,.tag.closed{background:#3fb95018;color:var(--green)}
-.tag.shadow,.tag.open{background:#58a6ff20;color:var(--blue)}
-.tag.block,.tag.filtered{background:#f8514918;color:var(--red)}
-.tag.unknown{background:#484f5820;color:var(--dim)}
-.tag.active{background:#d2992218;color:var(--amber)}
-.kv{display:grid;gap:6px}
-.kv div{display:flex;justify-content:space-between;gap:12px}
-.kv .label{color:var(--dim);font-size:12px}
-.empty{text-align:center;padding:20px;color:var(--dim);font-size:12px}
+.tag.allow{background:#3fb95018;color:var(--green)}
+.tag.block{background:#f8514918;color:var(--red)}
+.tag.open{background:#58a6ff20;color:var(--blue)}
 
-/* Momentum */
-.momentum-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px}
-.m-item{text-align:center;padding:10px 6px;background:var(--bg);border-radius:6px;border:1px solid var(--border)}
-.m-item .m-asset{font-size:10px;color:var(--dim);font-weight:700;letter-spacing:0.5px;margin-bottom:2px}
-.m-item .m-dir{font-family:var(--mono);font-size:16px;font-weight:700}
-.m-item .m-pct{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:1px}
-.m-dir.UP{color:var(--green)}.m-dir.DOWN{color:var(--red)}.m-dir.NEUTRAL,.m-dir.UNKNOWN{color:var(--dim)}
+.row{display:flex;justify-content:space-between;align-items:baseline;padding:4px 0;font-size:10px}
+.row .lbl{color:var(--dim)}
+.row .val{font-family:var(--mono);font-weight:600;color:var(--bright)}
 
-/* Separator */
-.sep{height:1px;background:var(--border);margin:8px 0}
+.kv{display:grid;gap:6px;font-size:10px}
+.kv>div{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+.kv .label{color:var(--dim)}
+.kv .val{font-family:var(--mono);font-weight:600;color:var(--bright)}
 
-footer{text-align:center;padding:16px 0;color:var(--dim);font-size:10px;margin-top:8px}
+.empty{text-align:center;padding:20px;color:var(--dim);font-size:10px}
+
+.momentum-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(60px,1fr));gap:6px}
+.m-item{text-align:center;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px}
+.m-asset{font-size:8px;color:var(--dim);font-weight:700;margin-bottom:2px}
+.m-dir{font-family:var(--mono);font-size:14px;font-weight:700;color:var(--bright)}
+.m-dir.UP{color:var(--green)}
+.m-dir.DOWN{color:var(--red)}
+.m-pct{font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:2px}
+
+.analytics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:12px}
+.stat-box{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;text-align:center}
+.stat-box-val{font-family:var(--mono);font-size:18px;font-weight:700;line-height:1;margin-bottom:4px}
+.stat-box-lbl{font-size:8px;color:var(--dim);text-transform:uppercase;font-weight:600}
+
+.collapsible{cursor:pointer;user-select:none;padding:8px;background:var(--hover);border:1px solid var(--border);border-radius:4px;margin-bottom:8px}
+.collapsible::before{content:'▼';display:inline-block;margin-right:6px;transition:transform 0.2s}
+.collapsible.closed::before{transform:rotate(-90deg)}
+.collapsible-content{display:none}
+.collapsible.closed .collapsible-content{display:none}
+.collapsible:not(.closed) .collapsible-content{display:block}
+
+.green{color:var(--green)!important}
+.red{color:var(--red)!important}
+.blue{color:var(--blue)!important}
+.amber{color:var(--amber)!important}
+.dim{color:var(--dim)!important}
+
+footer{text-align:center;padding:8px;color:var(--dim);font-size:8px;margin-top:24px;border-top:1px solid var(--border)}
 </style>
 </head>
 <body>
@@ -992,219 +1222,230 @@ footer{text-align:center;padding:16px 0;color:var(--dim);font-size:10px;margin-t
 
 <header>
   <div class="header-left">
-    <h1>Lagbot</h1>
-    <span class="badge"><span class="dot" id="dot"></span><span id="status-text">...</span></span>
-    <span class="badge" id="mode-badge"></span>
+    <h1>Polyphemus</h1>
+    <span class="badge"><span class="dot on" id="dot"></span><span id="status-text">...</span></span>
   </div>
   <div class="header-right">
-    <span class="ago" id="refresh">--</span>
-    <button class="theme-btn" id="theme-toggle" onclick="toggleTheme()">Light</button>
+    <span id="refresh">--</span>
+    <button class="theme-btn" onclick="toggleTheme()">Light</button>
   </div>
 </header>
 
-<!-- Row 1: Key numbers -->
+<!-- Hero metrics row -->
 <div class="grid g4">
   <div class="card">
-    <div class="card-title">CLOB Balance</div>
-    <div class="big-num" id="balance">--</div>
-    <div class="big-sub" id="balance-sub"></div>
-    <div class="row"><span class="lbl">Deployed</span><span class="val blue" id="deployed">--</span></div>
-    <div class="row"><span class="lbl">Available</span><span class="val" id="available">--</span></div>
+    <div class="card-title">Balance</div>
+    <div class="hero-metric">
+      <div class="hero-item">
+        <div class="hero-val" id="balance">--</div>
+        <div class="hero-lbl">Wallet</div>
+      </div>
+    </div>
+    <div class="row" style="font-size:9px"><span class="lbl">Deployed</span><span class="val blue" id="deployed">--</span></div>
+    <div class="row" style="font-size:9px"><span class="lbl">Available</span><span class="val" id="available">--</span></div>
   </div>
 
   <div class="card">
-    <div class="card-title">Session P&amp;L</div>
-    <div class="big-num" id="accum-pnl">--</div>
-    <div class="big-sub" id="pnl-sub"></div>
-    <div class="row"><span class="lbl">Win Rate</span><span class="val" id="win-rate">--</span></div>
-    <div class="row"><span class="lbl">Avg Profit</span><span class="val" id="avg-profit">--</span></div>
-    <div class="row"><span class="lbl">Fill Rate</span><span class="val" id="fill-rate">--</span></div>
+    <div class="card-title">Session P&L</div>
+    <div class="hero-val" id="accum-pnl" style="margin-bottom:8px">--</div>
+    <div class="row" style="font-size:9px"><span class="lbl">Win Rate</span><span class="val" id="win-rate">--</span></div>
+    <div class="row" style="font-size:9px"><span class="lbl">Hedge Rate</span><span class="val blue" id="hedge-rate">--</span></div>
   </div>
 
   <div class="card">
-    <div class="card-title">Current Cycle</div>
-    <div id="cycle-content"><p class="empty">Scanning...</p></div>
+    <div class="card-title">Cycles/Hour</div>
+    <div class="hero-val" id="cycles-per-hour" style="margin-bottom:8px">--</div>
+    <div class="row" style="font-size:9px"><span class="lbl">Completed</span><span class="val" id="completed-cycles">--</span></div>
+    <div class="row" style="font-size:9px"><span class="lbl">Hedged</span><span class="val blue" id="hedged-cycles">--</span></div>
   </div>
 
   <div class="card">
     <div class="card-title">System</div>
-    <div class="row"><span class="lbl">Uptime</span><span class="val" id="uptime">--</span></div>
-    <div class="row"><span class="lbl">Errors</span><span class="val" id="errors">0</span></div>
-    <div class="row"><span class="lbl">Binance WS</span><span class="val" id="binance-status">--</span></div>
-    <div class="sep"></div>
-    <div class="row"><span class="lbl">Scans</span><span class="val" id="scan-count">0</span></div>
-    <div class="row"><span class="lbl">Hedged</span><span class="val green" id="accum-hedged">0</span></div>
-    <div class="row"><span class="lbl">Orphaned</span><span class="val red" id="accum-orphaned">0</span></div>
-    <div class="row"><span class="lbl">Unwound</span><span class="val amber" id="accum-unwound">0</span></div>
+    <div class="row" style="font-size:9px"><span class="lbl">Status</span><span class="val" id="system-status">--</span></div>
+    <div class="row" style="font-size:9px"><span class="lbl">Uptime</span><span class="val" id="uptime">--</span></div>
+    <div class="row" style="font-size:9px"><span class="lbl">Errors</span><span class="val" id="errors">0</span></div>
+    <div class="row" style="font-size:9px"><span class="lbl">Binance</span><span class="val" id="binance-status">--</span></div>
   </div>
 </div>
 
-<!-- Row 2: Chart + Momentum -->
-<div class="grid g2">
+<!-- Active positions -->
+<div class="grid g1">
   <div class="card">
-    <div class="card-title">Cumulative P&amp;L</div>
+    <div class="card-title">Active Positions</div>
+    <div id="positions-container"><p class="empty">Scanning...</p></div>
+  </div>
+</div>
+
+<!-- Live activity -->
+<div class="analytics-grid">
+  <div class="stat-box">
+    <div class="stat-box-val" id="scan-count">--</div>
+    <div class="stat-box-lbl">Scan Count</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="candidates-seen">--</div>
+    <div class="stat-box-lbl">Candidates Seen</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="last-candidate-time">--</div>
+    <div class="stat-box-lbl">Last Candidate</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="last-block-short">--</div>
+    <div class="stat-box-lbl">Last Block</div>
+  </div>
+</div>
+
+<!-- Cumulative P&L chart -->
+<div class="grid g1">
+  <div class="card">
+    <div class="card-title">Cumulative P&L</div>
     <div class="chart-wrap"><canvas id="pnl-chart"></canvas></div>
   </div>
+</div>
+
+<!-- Walk-forward analytics -->
+<div class="analytics-grid">
+  <div class="stat-box">
+    <div class="stat-box-val" id="hedge-rate-5m">--</div>
+    <div class="stat-box-lbl">Hedge Rate 5m</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="hedge-rate-15m">--</div>
+    <div class="stat-box-lbl">Hedge Rate 15m</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="rolling-wr">--</div>
+    <div class="stat-box-lbl">Rolling WR (20)</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="rolling-pnl">--</div>
+    <div class="stat-box-lbl">Avg PnL (20)</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="avg-fill-time">--</div>
+    <div class="stat-box-lbl">Avg Fill Time</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-val" id="sellback-rate">--</div>
+    <div class="stat-box-lbl">Sellback %</div>
+  </div>
+</div>
+
+<!-- P&L by hour -->
+<div class="grid g1">
+  <div class="card">
+    <div class="card-title">P&L by Hour (UTC)</div>
+    <table id="hourly-table">
+      <tr><th>Hour</th><th>Trades</th><th>WR</th><th>P&L</th></tr>
+    </table>
+  </div>
+</div>
+
+<!-- Settlement history -->
+<div class="grid g1">
+  <div class="card">
+    <div class="card-title">Settlement History</div>
+    <table id="settlements-table">
+      <tr><th>Time</th><th>Asset</th><th>Window</th><th>Type</th><th>P&L</th></tr>
+    </table>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <div class="card-title">Recent Backend Alerts</div>
+    <table id="alerts-table">
+      <tr><th>When</th><th>Message</th></tr>
+    </table>
+  </div>
+  <div class="card">
+    <div class="card-title">Recent Closed Trades</div>
+    <table id="recent-trades-table">
+      <tr><th>Time</th><th>Asset</th><th>Window</th><th>Reason</th><th>P&L</th></tr>
+    </table>
+  </div>
+</div>
+
+<!-- Momentum + Advanced sections -->
+<div class="grid g2">
   <div class="card">
     <div class="card-title">Momentum Feed</div>
     <div class="momentum-grid" id="momentum-grid"></div>
   </div>
-</div>
-
-<!-- Row 3: Settlements -->
-<div class="grid g1">
   <div class="card">
-    <div class="card-title">Settlement Log</div>
-    <div id="settlements-container"><p class="empty">No settlements yet</p></div>
+    <div class="card-title">Runtime Detail</div>
+    <div class="collapsible closed" id="advanced-toggle">
+      <span style="font-size:11px;font-weight:600">Pipeline, runtime, and guard detail</span>
+      <div class="collapsible-content" style="padding-top:10px;font-size:10px">
+        <div id="advanced-content"><p class="empty">Loading...</p></div>
+      </div>
+    </div>
   </div>
 </div>
 
-<!-- Row 4: Learning Stack -->
-<div class="grid g2">
-  <div class="card">
-    <div class="card-title">Gabagool Tracker</div>
-    <div id="gabagool-container"><p class="empty">Loading...</p></div>
-  </div>
-  <div class="card">
-    <div class="card-title">Adaptive Tuner</div>
-    <div id="tuning-container"><p class="empty">Loading...</p></div>
-  </div>
-</div>
-
-<!-- Row 5: Evidence + Trades -->
-<div class="grid g2">
-  <div class="card">
-    <div class="card-title">BTC Pipeline Watchdog</div>
-    <div id="pipeline-container"><p class="empty">Loading...</p></div>
-  </div>
-  <div class="card">
-    <div class="card-title">BTC 5m Evidence</div>
-    <div id="evidence-container"><p class="empty">Loading...</p></div>
-  </div>
-</div>
-
-<!-- Row 6: Trades + Filters -->
-<div class="grid g2">
-  <div class="card">
-    <div class="card-title">Recent Trades</div>
-    <div id="recent-trades-container"><p class="empty">Loading...</p></div>
-  </div>
-  <div class="card">
-    <div class="card-title">Why Signals Were Rejected</div>
-    <div id="filters-container"><p class="empty">Loading...</p></div>
-  </div>
-</div>
-
-<!-- Row 7: Recent Error Stream -->
-<div class="grid g1">
-  <div class="card">
-    <div class="card-title">Recent Error Stream</div>
-    <div id="errors-container"><p class="empty">Loading...</p></div>
-  </div>
-</div>
-
-<!-- Row 8: Recent Signals -->
-<div class="grid g1">
-  <div class="card">
-    <div class="card-title">Recent Signal Decisions</div>
-    <div id="recent-signals-container"><p class="empty">Loading...</p></div>
-  </div>
-</div>
-
-<footer>Lagbot Live Observability</footer>
+<footer>Polyphemus Shadow Dashboard · build <span id="dashboard-build">__DASHBOARD_BUILD_ID__</span></footer>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 const fmt = (n,d=2) => n != null ? Number(n).toFixed(d) : '--';
 const pnlSign = n => n > 0 ? '+$'+fmt(n) : n < 0 ? '-$'+fmt(Math.abs(n)) : '$0.00';
+const CURRENT_DASHBOARD_BUILD_ID = "__DASHBOARD_BUILD_ID__";
 let lastUpdate = Date.now();
 let pnlChart = null;
 
-// Parse epoch from slug like "btc-updown-5m-1771050900"
-function slugEpoch(slug) {
-  const m = slug.match(/(\\d{10})$/);
-  return m ? parseInt(m[1]) : 0;
+function slugEpoch(slug){const m=slug.match(/(\\d{10})$/);return m?parseInt(m[1]):0}
+function slugTime(slug){const ep=slugEpoch(slug);if(!ep)return slug;const d=new Date(ep*1000);return d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true,timeZone:'UTC'})}
+function slugAsset(slug){const m=slug.match(/^([a-z]+)-/);return m?m[1].toUpperCase():'--'}
+function slugWindow(slug){const m=slug.match(/(5m|15m|1h)/);return m?m[1]:'--'}
+function fmtTimestamp(ts){if(!ts)return '--';const d=new Date(ts*1000);return d.toLocaleString('en-US',{timeZone:'UTC',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true})}
+function fmtAgo(ts){if(!ts)return 'never';const secs=Math.max(0,Math.floor(Date.now()/1000-ts));if(secs<60)return secs+'s';if(secs<3600)return(secs/60).toFixed(0)+'m';return(secs/3600).toFixed(0)+'h'}
+function escapeHtml(str){return String(str||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}
+function cycleType(reason){
+  const r=(reason||'').toLowerCase();
+  if(r.includes('hedged'))return 'HEDGED';
+  if(r.includes('sellback')||r.includes('unwound'))return 'SELLBACK';
+  if(r.includes('orphan')||r.includes('held_to_settlement')||r.includes('forced_hold'))return 'ORPHAN';
+  return 'UNKNOWN';
 }
-function slugTime(slug) {
-  const ep = slugEpoch(slug);
-  if (!ep) return slug;
-  const d = new Date(ep * 1000);
-  return d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true,timeZone:'UTC'});
+function normalizeTradeToSettlement(trade){
+  if(!trade||trade.open||!trade.slug)return null;
+  const reason=trade.exit_reason||'';
+  const allowed=['hedged_settlement','orphaned_settlement','held_to_settlement','sellback','unwound','forced_hold_clob_unindexed','forced_hold_sell_failed'];
+  if(!allowed.includes(reason))return null;
+  return {
+    slug:trade.slug,
+    exit_reason:reason,
+    matched:0,
+    up_qty:0,
+    down_qty:0,
+    up_avg:0,
+    down_avg:0,
+    pair_cost:Number(trade.entry_price||0),
+    pnl:Number(trade.pnl||0),
+    timestamp:Number(trade.exit_time||trade.entry_time||0),
+  };
 }
-function fmtTimestamp(ts) {
-  if (!ts) return '--';
-  const d = new Date(ts * 1000);
-  return d.toLocaleString('en-US',{timeZone:'UTC',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
-}
-function fmtAgo(ts) {
-  if(!ts) return 'never';
-  const secs = Math.max(0, Math.floor(Date.now()/1000 - ts));
-  if(secs < 60) return secs+'s ago';
-  if(secs < 3600) return (secs/60).toFixed(1)+'m ago';
-  return (secs/3600).toFixed(1)+'h ago';
-}
-function tagCls(value) {
-  const v = (value || 'unknown').toLowerCase();
-  if(v.includes('filtered')) return 'block';
-  if(['allow','executed','closed'].includes(v)) return 'allow';
-  if(['shadow','open'].includes(v)) return 'shadow';
-  if(['block','filtered'].includes(v)) return 'block';
-  if(['active'].includes(v)) return 'active';
-  if(['healthy'].includes(v)) return 'allow';
-  if(['guard_blocked','stalled','starved','execution_gap','trade_silent'].includes(v)) return 'block';
-  return 'unknown';
-}
-function clipReason(text, maxLen=72) {
-  if(!text) return '--';
-  const base = text.split('|')[0].trim();
-  return base.length > maxLen ? base.slice(0, maxLen-1) + '…' : base;
+function settlementsFromTrades(trades){
+  return (trades||[]).map(normalizeTradeToSettlement).filter(Boolean).sort((a,b)=>(a.timestamp||0)-(b.timestamp||0));
 }
 
 function toggleTheme(){
-  const el = document.documentElement;
-  const isLight = el.classList.contains('light');
-  el.classList.toggle('dark', isLight);
-  el.classList.toggle('light', !isLight);
-  localStorage.setItem('lagbot-theme', isLight ? 'dark' : 'light');
-  $('theme-toggle').textContent = isLight ? 'Light' : 'Dark';
-  if(pnlChart) updateChartColors();
+  const el=document.documentElement;
+  el.classList.toggle('light');
+  el.classList.toggle('dark');
+  localStorage.setItem('lagbot-theme',el.classList.contains('light')?'light':'dark');
 }
-(function(){
-  const s = localStorage.getItem('lagbot-theme');
-  if(s==='light'){
-    document.documentElement.classList.remove('dark');
-    document.documentElement.classList.add('light');
-    $('theme-toggle').textContent = 'Dark';
-  }
-})();
+(()=>{const s=localStorage.getItem('lagbot-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.classList.remove('dark')}})();
 
-function getC(){
-  const s = getComputedStyle(document.documentElement);
-  return {green:s.getPropertyValue('--green').trim(),red:s.getPropertyValue('--red').trim(),
-    blue:s.getPropertyValue('--blue').trim(),dim:s.getPropertyValue('--dim').trim(),
-    border:s.getPropertyValue('--border').trim(),text:s.getPropertyValue('--text').trim()};
-}
+function getC(){const s=getComputedStyle(document.documentElement);return{green:s.getPropertyValue('--green').trim(),red:s.getPropertyValue('--red').trim(),blue:s.getPropertyValue('--blue').trim(),dim:s.getPropertyValue('--dim').trim(),border:s.getPropertyValue('--border').trim()}}
 
-function initChart(){
-  const c = getC();
-  pnlChart = new Chart($('pnl-chart').getContext('2d'), {
-    type:'line',
-    data:{labels:[],datasets:[{data:[],borderColor:c.green,backgroundColor:c.green+'18',fill:true,tension:0.3,pointRadius:2,pointHoverRadius:4,borderWidth:2}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
-      scales:{x:{display:false},y:{grid:{color:c.border+'60'},ticks:{color:c.dim,font:{size:10,family:'var(--mono)'},callback:v=>'$'+v}}}}
-  });
-}
-function updateChartColors(){
-  const c=getC();
-  pnlChart.options.scales.y.grid.color=c.border+'60';
-  pnlChart.options.scales.y.ticks.color=c.dim;
-  pnlChart.update('none');
-}
+function initChart(){const c=getC();pnlChart=new Chart($('pnl-chart').getContext('2d'),{type:'line',data:{labels:[],datasets:[{data:[],borderColor:c.green,backgroundColor:c.green+'18',fill:true,tension:0.3,pointRadius:2,pointHoverRadius:4,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{grid:{color:c.border+'60'},ticks:{color:c.dim,font:{size:9,family:'var(--mono)'},callback:v=>'$'+v}}}}});}
 
 async function fetchAll(){
   try{
-    const [status,balance,momentum,accum,gabagool,tuning,signals,evidence,trades,filters,errors,pipeline] = await Promise.all([
+    const[status,balance,momentum,accum,gabagool,tuning,signals,evidence,trades,filters,errors,pipeline]=await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/balance').then(r=>r.json()),
       fetch('/api/momentum').then(r=>r.json()),
@@ -1219,97 +1460,102 @@ async function fetchAll(){
       fetch('/api/pipeline').then(r=>r.json()).catch(()=>({enabled:false,stage:'unknown',headline:'Pipeline unavailable',summary:'No pipeline data'})),
     ]);
 
-    // Status
-    const dot=$('dot'), stxt=$('status-text');
-    if(status.errors>5){dot.className='dot off';stxt.textContent='ERROR';}
-    else{dot.className='dot on';stxt.textContent='LIVE';}
+    const setts=((accum.settlements&&accum.settlements.length)?accum.settlements:settlementsFromTrades(trades.trades||[]));
+    const hedgedCnt=Number(accum.hedged_count||0)||setts.filter(s=>(s.exit_reason||'').includes('hedged')).length;
+    const orphanedCnt=Number(accum.orphaned_count||0)||setts.filter(s=>cycleType(s.exit_reason)==='ORPHAN').length;
+    const unwoundCnt=Number(accum.unwound_count||0)||setts.filter(s=>cycleType(s.exit_reason)==='SELLBACK').length;
+    const totalSettled=(hedgedCnt+orphanedCnt+unwoundCnt)||setts.length;
+    const winCnt=setts.filter(s=>s.pnl>0).length;
+    const apnl=accum.total_pnl||0;
 
-    // Mode badge
-    const st = accum.state||'idle';
-    $('mode-badge').innerHTML = '<span class="state-pill '+st+'">'+st+'</span>';
+    const accumTripped=!!status.accumulator_circuit_tripped;
+    const effectiveDryRun=!!(status.effective_accumulator_dry_run ?? status.dry_run);
+    const serverBuildId=status.dashboard_build_id||CURRENT_DASHBOARD_BUILD_ID;
+    if(serverBuildId!==CURRENT_DASHBOARD_BUILD_ID){
+      window.location.reload();
+      return;
+    }
+    const systemState=accumTripped?'HALTED':(status.errors>5?'ERROR':(effectiveDryRun?'SHADOW':'LIVE'));
+    $('status-text').textContent=systemState;
+    $('dot').className='dot '+((status.errors>5||accumTripped)?'off':'on');
+    $('balance').textContent='$'+fmt(balance.balance||0,0);
+    $('deployed').textContent='$'+fmt(balance.deployed||0,0);
+    $('available').textContent='$'+fmt(balance.available||0,0);
 
-    // Balance
-    $('balance').textContent = '$'+fmt(balance.balance||0);
-    const dep = balance.deployed||0;
-    $('deployed').textContent = '$'+fmt(dep);
-    $('available').textContent = '$'+fmt(balance.available||0);
+    const apnlEl=$('accum-pnl');
+    apnlEl.textContent=pnlSign(apnl);
+    apnlEl.className='hero-val '+(apnl>=0?'green':'red');
 
-    // Session P&L
-    const apnl = accum.total_pnl||0;
-    const apnlEl = $('accum-pnl');
-    apnlEl.textContent = pnlSign(apnl);
-    apnlEl.className = 'big-num ' + (apnl >= 0 ? 'green' : 'red');
+    const wr=totalSettled>0?(winCnt/totalSettled*100).toFixed(0)+'%':'--';
+    $('win-rate').textContent=wr;
+    $('win-rate').className='val '+(winCnt/Math.max(totalSettled,1)>=0.5?'green':'red');
 
-    const setts = accum.settlements||[];
-    const totalSettled = setts.length;
-    const hedgedCnt = setts.filter(s=>(s.exit_reason||'').includes('hedged')).length;
-    const orphanCnt = setts.filter(s=>(s.exit_reason||'').includes('orphan')).length;
-    const unwoundCnt = setts.filter(s=>(s.exit_reason||'').includes('unwound')).length;
-    const winCnt = setts.filter(s=>s.pnl>0).length;
-    const wr = totalSettled > 0 ? (winCnt/totalSettled*100).toFixed(0)+'%' : '--';
-    const avgP = totalSettled > 0 ? pnlSign(apnl/totalSettled) : '--';
-    const placed = accum.orders_placed||0;
-    const filled = accum.orders_filled||0;
-    const fr = placed > 0 ? (filled/placed*100).toFixed(0)+'%' : '--';
+    const hedgeRate=totalSettled>0?(hedgedCnt/totalSettled*100).toFixed(0)+'%':'--';
+    $('hedge-rate').textContent=hedgeRate;
+    $('hedge-rate').className='val blue';
 
-    $('pnl-sub').textContent = totalSettled+' settled / '+hedgedCnt+'W '+orphanCnt+'O '+unwoundCnt+'U';
-    $('win-rate').textContent = wr;
-    $('win-rate').className = 'val '+(winCnt/Math.max(totalSettled,1)>=0.5?'green':'red');
-    $('avg-profit').textContent = avgP;
-    $('avg-profit').className = 'val '+(apnl>=0?'green':'red');
-    $('fill-rate').textContent = fr + ' ('+filled+'/'+placed+')';
-    $('fill-rate').className = 'val '+(filled/Math.max(placed,1)>=0.5?'green':'amber');
+    const hrs=status.uptime_hours||0;
+    $('cycles-per-hour').textContent=totalSettled>0?(totalSettled/Math.max(hrs||1,0.25)).toFixed(2):'0.00';
+    $('completed-cycles').textContent=String(totalSettled);
+    $('hedged-cycles').textContent=String(hedgedCnt);
+    $('uptime').textContent=hrs>=24?fmt(hrs/24,1)+'d':fmt(hrs,1)+'h';
+    $('errors').textContent=status.errors||0;
+    $('errors').className='val '+(status.errors>0?'red':'green');
+    $('binance-status').textContent=status.binance_connected?'OK':'OFFLINE';
+    $('binance-status').className='val '+(status.binance_connected?'green':'red');
+    $('system-status').textContent=systemState;
+    $('system-status').className='val '+(accumTripped?'amber':(status.errors>5?'red':'green'));
+    $('dashboard-build').textContent=serverBuildId;
 
-    // Counters
-    $('accum-hedged').textContent = accum.hedged_count||0;
-    $('accum-orphaned').textContent = accum.orphaned_count||0;
-    $('accum-unwound').textContent = accum.unwound_count||0;
-    $('scan-count').textContent = accum.scan_count||0;
-
-    // Current cycle(s)
-    const cycleEl = $('cycle-content');
-    const positions = accum.positions || [];
-    if(positions.length > 0){
-      let cycleHtml = '<div class="row"><span class="lbl">Slots</span><span class="val blue">'+positions.length+'/'+(accum.max_concurrent||1)+'</span></div><div class="sep"></div>';
-      for(const cp of positions){
-        const profit = cp.pair_cost > 0 ? (1.0 - cp.pair_cost) : 0;
-        const ep = slugEpoch(cp.slug);
-        let countdownHtml = '';
-        if(ep > 0){
-          const secsLeft = ep + 300 - Math.floor(Date.now()/1000);
-          if(secsLeft > 0){
-            const mm = Math.floor(secsLeft/60), ss = secsLeft%60;
-            countdownHtml = '<div class="countdown">'+mm+':'+String(ss).padStart(2,'0')+'</div>';
-          } else {
-            countdownHtml = '<div class="countdown green">SETTLING</div>';
-          }
+    // Positions
+    const positions=accum.positions||[];
+    const posCont=$('positions-container');
+    if(positions.length>0){
+      let posHtml='';
+      for(const p of positions){
+        const ep=slugEpoch(p.slug);
+        let cntdn='--';
+        if(ep>0){
+          const secs=Math.max(0,ep+300-Math.floor(Date.now()/1000));
+          if(secs>0)cntdn=Math.floor(secs/60)+':'+ String(secs%60).padStart(2,'0');
+          else cntdn='SETTLING';
         }
-        cycleHtml += countdownHtml
-          +'<div class="row"><span class="lbl">Market</span><span class="val">'+slugTime(cp.slug)+' <span class="state-pill '+cp.state+'">'+cp.state+'</span></span></div>'
-          +'<div class="row"><span class="lbl">Shares</span><span class="val">'+fmt(cp.up_qty,1)+' / '+fmt(cp.down_qty,1)+'</span></div>'
-          +'<div class="row"><span class="lbl">Pair Cost</span><span class="val blue">$'+fmt(cp.pair_cost,4)+'</span></div>'
-          +'<div class="row"><span class="lbl">Profit/share</span><span class="val '+(profit>0?'green':'red')+'">$'+fmt(profit,4)+'</span></div>'
-          +'<div class="row"><span class="lbl">Reprices</span><span class="val">'+cp.reprice_count+'/15</span></div>'
-          +(cp.is_hedged?'<div style="text-align:center;margin-top:4px"><span class="state-pill hedged">HEDGED</span></div>':'')
-          +'<div class="sep"></div>';
+        const profit=p.pair_cost>0?(1.0-p.pair_cost):0;
+        posHtml+='<div class="pos-card"><div class="pos-header">'
+          +'<span class="pos-market">'+slugTime(p.slug)+' '+slugAsset(p.slug)+'</span>'
+          +'<span class="countdown '+(cntdn==='SETTLING'?'settling':'')+'">'+cntdn+'</span></div>'
+          +'<div class="pos-stats">'
+          +'<div class="pos-stat"><span class="pos-stat-lbl">UP/DOWN:</span><span class="pos-stat-val">'+fmt(p.up_qty,0)+'/'+fmt(p.down_qty,0)+'</span></div>'
+          +'<div class="pos-stat"><span class="pos-stat-lbl">Pair Cost:</span><span class="pos-stat-val">$'+fmt(p.pair_cost,3)+'</span></div>'
+          +'<div class="pos-stat"><span class="pos-stat-lbl">Profit/sh:</span><span class="pos-stat-val '+(profit>0?'green':'red')+'">$'+fmt(profit,4)+'</span></div>'
+          +'<div class="pos-stat"><span class="pos-stat-lbl">State:</span><span class="pos-stat-val">'+p.state+'</span></div>'
+          +'</div></div>';
       }
-      cycleEl.innerHTML = cycleHtml;
-    } else {
-      cycleEl.innerHTML = '<p class="empty">Scanning for opportunities...</p>';
+      posCont.innerHTML=posHtml;
+    }else{
+      if(accum.circuit_tripped){
+        posCont.innerHTML='<p class="empty amber">Accumulator halted by circuit breaker. Session P&L '
+          +pnlSign(accum.total_pnl||0)+' is below the daily limit $'+fmt(accum.daily_loss_limit||0,2)
+          +'. No new entries are expected until operator reset.</p>';
+      }else{
+        posCont.innerHTML='<p class="empty">Scanning for opportunities...</p>';
+      }
     }
 
-    // System
-    const hrs = status.uptime_hours||0;
-    $('uptime').textContent = hrs >= 24 ? fmt(hrs/24,1)+'d' : fmt(hrs,1)+'h';
-    const errEl = $('errors');
-    errEl.textContent = status.errors||0;
-    errEl.className = 'val '+(status.errors>0?'red':'green');
-    const bEl = $('binance-status');
-    bEl.textContent = status.binance_connected?'Connected':'Offline';
-    bEl.className = 'val '+(status.binance_connected?'green':'red');
+    // Live activity
+    const lastCandidateSlug=accum.last_candidate_slug||'';
+    const lastCandidateTime=lastCandidateSlug?slugTime(lastCandidateSlug)+' '+slugAsset(lastCandidateSlug)+' '+slugWindow(lastCandidateSlug):'--';
+    const lastBlock=(accum.last_eval_block_reason||'').trim();
+    const lastBlockShort=lastBlock?(lastBlock.length>36?lastBlock.slice(0,36)+'…':lastBlock):'clear';
+    $('scan-count').textContent=String(accum.scan_count||0);
+    $('candidates-seen').textContent=String(accum.candidates_seen||0);
+    $('last-candidate-time').textContent=lastCandidateTime;
+    $('last-candidate-time').className='stat-box-val '+(lastCandidateSlug?'blue':'dim');
+    $('last-block-short').textContent=lastBlockShort;
+    $('last-block-short').className='stat-box-val '+(lastBlock?'amber':'green');
 
     // Chart
-    if(pnlChart && setts.length){
+    if(pnlChart&&setts.length){
       let cum=0;const labels=[],data=[];
       for(const s of setts){cum+=s.pnl||0;labels.push(slugTime(s.slug));data.push(+cum.toFixed(2));}
       pnlChart.data.labels=labels;
@@ -1318,325 +1564,170 @@ async function fetchAll(){
       pnlChart.data.datasets[0].borderColor=cum>=0?c.green:c.red;
       pnlChart.data.datasets[0].backgroundColor=(cum>=0?c.green:c.red)+'18';
       pnlChart.update('none');
+    }else if(pnlChart){
+      pnlChart.data.labels=[];
+      pnlChart.data.datasets[0].data=[];
+      pnlChart.update('none');
     }
 
-    // Momentum — dynamic from API keys
-    const mGrid = $('momentum-grid');
-    mGrid.innerHTML = '';
-    const readings = momentum.readings||{};
-    for(const asset of Object.keys(readings).sort()){
-      const r = readings[asset];
-      const arrow = r.direction==='UP'?'&#8593;':r.direction==='DOWN'?'&#8595;':'&#8212;';
-      mGrid.innerHTML += '<div class="m-item"><div class="m-asset">'+asset+'</div>'
-        +'<div class="m-dir '+r.direction+'">'+arrow+' '+r.direction+'</div>'
-        +'<div class="m-pct">'+(r.momentum_pct>=0?'+':'')+fmt(r.momentum_pct,3)+'%</div></div>';
+    // Analytics: hedge rate by window, rolling metrics, etc
+    const setts5m=setts.filter(s=>slugWindow(s.slug)==='5m');
+    const setts15m=setts.filter(s=>slugWindow(s.slug)==='15m');
+    const hedged5m=setts5m.filter(s=>(s.exit_reason||'').includes('hedged')).length;
+    const hedged15m=setts15m.filter(s=>(s.exit_reason||'').includes('hedged')).length;
+
+    $('hedge-rate-5m').textContent=setts5m.length>0?(hedged5m/setts5m.length*100).toFixed(0)+'%':'--';
+    $('hedge-rate-15m').textContent=setts15m.length>0?(hedged15m/setts15m.length*100).toFixed(0)+'%':'--';
+
+    // Rolling 20
+    const last20=setts.slice(-20);
+    if(last20.length>0){
+      const rollWin=last20.filter(s=>s.pnl>0).length;
+      const rollPnl=last20.reduce((a,s)=>a+(s.pnl||0),0);
+      $('rolling-wr').textContent=(rollWin/last20.length*100).toFixed(0)+'%';
+      $('rolling-wr').className='stat-box-val '+(rollWin/last20.length>=0.5?'green':'red');
+      $('rolling-pnl').textContent=pnlSign(rollPnl/last20.length);
+      $('rolling-pnl').className='stat-box-val '+(rollPnl>=0?'green':'red');
     }
+
+    // Avg fill time (rough: time from settlement to next settle if hedged)
+    let totalFillTime=0,fillCount=0;
+    for(let i=0;i<setts.length-1;i++){
+      if((setts[i].exit_reason||'').includes('hedged')){
+        const diff=(setts[i+1].timestamp||setts[i].timestamp)-(setts[i].timestamp||0);
+        if(diff>0){totalFillTime+=diff;fillCount++}
+      }
+    }
+    $('avg-fill-time').textContent=fillCount>0?fmt(totalFillTime/fillCount,0)+'s':'--';
+
+    // Sellback rate
+    const sellbacks=unwoundCnt;
+    const sellbackRate=totalSettled>0?(sellbacks/totalSettled*100).toFixed(0)+'%':'--';
+    $('sellback-rate').textContent=sellbackRate;
+
+    // Hourly P&L table
+    const hourlyBuckets={};
+    for(const s of setts){
+      const epoch=slugEpoch(s.slug);
+      if(epoch){
+        const d=new Date(epoch*1000);
+        const hour=d.getUTCHours();
+        if(!hourlyBuckets[hour])hourlyBuckets[hour]={trades:0,pnl:0,wins:0};
+        hourlyBuckets[hour].trades++;
+        hourlyBuckets[hour].pnl+=s.pnl||0;
+        if(s.pnl>0)hourlyBuckets[hour].wins++;
+      }
+    }
+    let hourlyHtml='<tr><th>Hour (UTC)</th><th>Trades</th><th>WR</th><th>P&L</th></tr>';
+    let renderedHourly=false;
+    for(let h=0;h<24;h++){
+      if(hourlyBuckets[h]){
+        renderedHourly=true;
+        const hb=hourlyBuckets[h];
+        const wr=(hb.wins/hb.trades*100).toFixed(0);
+        hourlyHtml+='<tr><td>'+String(h).padStart(2,'0')+':00</td><td>'+hb.trades+'</td><td class="'+(wr>=50?'green':'red')+'">'+wr+'%</td><td class="'+(hb.pnl>=0?'green':'red')+'">'+pnlSign(hb.pnl)+'</td></tr>';
+      }
+    }
+    if(!renderedHourly){
+      hourlyHtml+='<tr><td colspan="4" class="dim">No completed cycles yet</td></tr>';
+    }
+    $('hourly-table').innerHTML=hourlyHtml;
 
     // Settlement table
-    const sCont = $('settlements-container');
+    let settHtml='<tr><th>Time</th><th>Asset</th><th>Window</th><th>Type</th><th>P&L</th></tr>';
     if(!setts.length){
-      sCont.innerHTML = '<p class="empty">No settlements yet</p>';
-    } else {
-      let h = '<table><tr><th>Time</th><th>Market</th><th>Type</th><th>Shares</th><th>Pair Cost</th><th>P&amp;L</th></tr>';
-      for(const s of setts.slice().reverse()){
-        const reason = s.exit_reason||'';
-        const shares = s.matched > 0 ? fmt(s.matched,0) : fmt(Math.max(s.up_qty,s.down_qty),0);
-        const typeLabel = reason.includes('hedged')?'HEDGED':reason.includes('orphan')?'ORPHAN':'UNWOUND';
-        const tagCls = reason.includes('hedged')?'hedged':reason.includes('orphan')?'orphan':'unwound';
-        const timeStr = fmtTimestamp(s.timestamp);
-        h += '<tr><td>'+timeStr+'</td><td>'+slugTime(s.slug)+'</td>'
-          +'<td><span class="tag '+tagCls+'">'+typeLabel+'</span></td>'
-          +'<td>'+shares+'</td>'
-          +'<td>'+(s.pair_cost>0?'$'+fmt(s.pair_cost,4):'--')+'</td>'
-          +'<td class="'+(s.pnl>=0?'green':'red')+'">'+pnlSign(s.pnl)+'</td></tr>';
-      }
-      sCont.innerHTML = h+'</table>';
-    }
-
-    // Gabagool tracker
-    const gCont = $('gabagool-container');
-    if(gabagool.enabled && gCont){
-      const g = gabagool;
-      const pc = g.pair_cost||{};
-      const pnl = g.pnl||{};
-      const lastSeen = g.last_seen > 0 ? new Date(g.last_seen*1000).toLocaleTimeString() : 'never';
-      const activeClass = g.active_now ? 'green' : 'dim';
-      const assetStr = Object.entries(g.asset_distribution||{}).map(([k,v])=>k+': '+v+'%').join(', ')||'--';
-      const sideRange = g.side_price_range||[0,0];
-      gCont.innerHTML = '<div class="kv">'
-        +'<div><span class="label">Status</span><span class="'+activeClass+'">'+(g.active_now?'ACTIVE':'IDLE')+'</span></div>'
-        +'<div><span class="label">Last Seen</span><span>'+lastSeen+'</span></div>'
-        +'<div><span class="label">Tracked / Pairs</span><span>'+g.total_tracked+' / '+g.total_pairs+'</span></div>'
-        +'<div><span class="label">Trades/Hour</span><span>'+fmt(g.trades_per_hour,1)+'</span></div>'
-        +'<div><span class="label">Pair Cost</span><span>'+(pc.median>0?'$'+fmt(pc.median,4)+' ('+fmt(pc.min,3)+'-'+fmt(pc.max,3)+')':'--')+'</span></div>'
-        +'<div><span class="label">Fill Rate</span><span>'+(g.fill_rate>0?g.fill_rate+'%':'--')+'</span></div>'
-        +'<div><span class="label">Fill Gap</span><span>'+(g.avg_fill_gap_secs>0?fmt(g.avg_fill_gap_secs,1)+'s (max '+fmt(g.max_fill_gap_secs,0)+'s)':'--')+'</span></div>'
-        +'<div><span class="label">Side Range</span><span>'+(sideRange[1]>0?'$'+fmt(sideRange[0],3)+'-$'+fmt(sideRange[1],3):'--')+'</span></div>'
-        +'<div><span class="label">PnL</span><span class="'+(pnl.total>=0?'green':'red')+'">'+(pnl.total!=null?pnlSign(pnl.total)+' ($'+fmt(pnl.hourly||0,2)+'/hr)':'--')+'</span></div>'
-        +'<div><span class="label">Assets</span><span>'+assetStr+'</span></div>'
-        +'<div><span class="label">Window</span><span>'+(g.preferred_window||'--')+'</span></div>'
-        +'<div><span class="label">Avg Size</span><span>'+fmt(g.avg_size_per_side,0)+' shares</span></div>'
-        +'</div>';
-    } else if(gCont) {
-      gCont.innerHTML = '<p class="empty">Tracker disabled</p>';
-    }
-
-    // Adaptive tuner
-    const tCont = $('tuning-container');
-    if(tuning.enabled && tCont){
-      const t = tuning;
-      const frozen = t.frozen ? '<span class="red">FROZEN: '+t.frozen_reason+'</span>' : '<span class="green">ACTIVE</span>';
-      let oh = '<div class="kv">'
-        +'<div><span class="label">Status</span>'+frozen+'</div>'
-        +'<div><span class="label">Tune Cycles</span><span>'+t.tune_count+'</span></div>';
-      // Current overrides
-      const ov = t.current_overrides||{};
-      const ovKeys = Object.keys(ov);
-      if(ovKeys.length>0){
-        oh += '<div><span class="label">Overrides</span><span>'+ovKeys.map(k=>k.replace('accum_','')+': '+ov[k]).join(', ')+'</span></div>';
-      } else {
-        oh += '<div><span class="label">Overrides</span><span class="dim">none (using defaults)</span></div>';
-      }
-      // Hourly stats
-      const hs = t.hourly_stats||{};
-      oh += '<div><span class="label">Hedge Rate (1h)</span><span>'+(hs.hedge_rate!=null?Math.round(hs.hedge_rate*100)+'%':'--')+'</span></div>'
-        +'<div><span class="label">PnL (1h)</span><span class="'+(hs.total_pnl>=0?'green':'red')+'">'+pnlSign(hs.total_pnl||0)+'</span></div>'
-        +'</div>';
-      // Recent adjustments
-      const adjs = t.last_5_adjustments||[];
-      if(adjs.length>0){
-        oh += '<div style="margin-top:8px;font-size:11px;color:var(--dim)">';
-        for(const a of adjs.slice().reverse()){
-          const ts = new Date(a.ts*1000).toLocaleTimeString();
-          oh += '<div>'+ts+' '+a.param.replace('accum_','')+': '+a.old+' &rarr; '+a.new+' ('+a.reason+')</div>';
-        }
-        oh += '</div>';
-      }
-      tCont.innerHTML = oh;
-    } else if(tCont) {
-      tCont.innerHTML = '<p class="empty">Tuner disabled</p>';
-    }
-
-    // Pipeline watchdog
-    const pCont = $('pipeline-container');
-    if(pCont){
-      const counts = pipeline.counts || {};
-      const blockers = pipeline.blockers || [];
-      const passes = pipeline.recent_passes || [];
-      const retrySkips = pipeline.retry_skip_reasons || [];
-      const stageStops = pipeline.stage_stops || [];
-      let ph = '<div class="kv">'
-        +'<div><span class="label">Stage</span><span><span class="tag '+tagCls(pipeline.stage)+'">'+(pipeline.stage||'unknown')+'</span></span></div>'
-        +'<div><span class="label">Headline</span><span>'+(pipeline.headline || '--')+'</span></div>'
-        +'<div><span class="label">Summary</span><span>'+(pipeline.summary || '--')+'</span></div>'
-        +'<div><span class="label">Last BTC decision</span><span>'+fmtAgo(pipeline.last_btc_decision_ts)+'</span></div>'
-        +'<div><span class="label">Last BTC momentum signal</span><span>'+fmtAgo(pipeline.last_btc_momentum_ts)+'</span></div>'
-        +'<div><span class="label">Last BTC guard pass</span><span>'+fmtAgo(pipeline.last_btc_pass_ts)+'</span></div>'
-        +'<div><span class="label">Last BTC trade</span><span>'+fmtAgo(pipeline.last_trade_ts)+'</span></div>'
-        +'<div><span class="label">Passed BTC candidates</span><span>'+(pipeline.passed_btc_candidates||0)+'</span></div>'
-        +'<div><span class="label">Placement failures</span><span>'+(pipeline.placement_failures||0)+'</span></div>'
-        +'<div><span class="label">Fill timeouts</span><span>'+(pipeline.fill_timeouts||0)+'</span></div>'
-        +'<div><span class="label">Retry recovered</span><span>'+(pipeline.retry_recovered||0)+'</span></div>'
-        +'<div><span class="label">Decisions 15m / 1h</span><span>'+(counts.decisions_15m||0)+' / '+(counts.decisions_1h||0)+'</span></div>'
-        +'<div><span class="label">Momentum 1h</span><span>'+(counts.momentum_1h||0)+'</span></div>'
-        +'<div><span class="label">Passed 1h / 6h</span><span>'+(counts.passed_1h||0)+' / '+(counts.passed_6h||0)+'</span></div>'
-        +'<div><span class="label">Current Guarded 1h / 6h</span><span>'+(counts.current_guarded_1h||0)+' / '+(counts.current_guarded_6h||0)+'</span></div>'
-        +'<div><span class="label">Ensemble Selected 1h / 6h</span><span>'+(counts.ensemble_selected_1h||0)+' / '+(counts.ensemble_selected_6h||0)+'</span></div>'
-        +'<div><span class="label">Trades 1h / 6h</span><span>'+(counts.trades_1h||0)+' / '+(counts.trades_6h||0)+'</span></div>'
-        +'</div>';
-      if(blockers.length){
-        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Top BTC Guard Blockers (6h)</div>';
-        for(const row of blockers){
-          ph += '<div class="row"><span class="lbl">'+clipReason(row.reason, 46)+'</span><span class="val">'+row.count+'</span></div>';
-        }
-        ph += '</div>';
-      }
-      if(passes.length){
-        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Recent Passed BTC Signals</div><table><tr><th>Time</th><th>Price</th><th>Left</th></tr>';
-        for(const row of passes){
-          ph += '<tr><td>'+slugTime(row.slug||'')+'</td><td>'+(row.midpoint!=null?'$'+fmt(row.midpoint,3):'--')+'</td><td>'+(row.time_remaining_secs!=null?row.time_remaining_secs+'s':'--')+'</td></tr>';
-        }
-        ph += '</table></div>';
-      }
-      if(retrySkips.length){
-        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Retry Skip Reasons</div>';
-        for(const row of retrySkips){
-          ph += '<div class="row"><span class="lbl">'+clipReason(row.reason, 46)+'</span><span class="val">'+row.count+'</span></div>';
-        }
-        ph += '</div>';
-      }
-      if(stageStops.length){
-        ph += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Pipeline Stage Mix (6h)</div>';
-        for(const row of stageStops){
-          ph += '<div class="row"><span class="lbl">'+clipReason((row.stage||'unknown')+' / '+(row.status||'unknown'), 46)+'</span><span class="val">'+row.n+'</span></div>';
-        }
-        ph += '</div>';
-      }
-      pCont.innerHTML = ph;
-    }
-
-    // Evidence summary
-    const eCont = $('evidence-container');
-    if(eCont){
-      const verdicts = evidence.verdict_counts || {};
-      const recentVerdicts = evidence.recent || [];
-      const reasons = evidence.reason_counts || [];
-      const counts = Object.keys(verdicts).length
-        ? Object.entries(verdicts).map(([k,v]) => '<span class="tag '+tagCls(k)+'">'+k+': '+v+'</span>').join(' ')
-        : '<span class="dim">no verdicts yet</span>';
-      let eh = '<div class="kv">'
-        +'<div><span class="label">Mode</span><span>'+(evidence.enabled ? 'shadow' : 'disabled')+'</span></div>'
-        +'<div><span class="label">Signals (24h)</span><span>'+ (evidence.signals_scanned || 0) +'</span></div>'
-        +'<div><span class="label">Verdicts</span><span>'+counts+'</span></div>'
-        +'</div>';
-      if(reasons.length){
-        eh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Top Reasons</div>';
-        for(const item of reasons){
-          eh += '<div class="row"><span class="lbl">'+clipReason(item.reason, 44)+'</span><span class="val">'+item.count+'</span></div>';
-        }
-        eh += '</div>';
-      }
-      if(recentVerdicts.length){
-        eh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Recent Verdicts</div>'
-          +'<table><tr><th>Time</th><th>Verdict</th><th>R8</th><th>Reason</th></tr>';
-        for(const row of recentVerdicts){
-          eh += '<tr><td>'+slugTime(row.slug)+'</td>'
-            +'<td><span class="tag '+tagCls(row.evidence_verdict)+'">'+(row.evidence_verdict||'--')+'</span></td>'
-            +'<td>'+(row.evidence_r8_label||'--')+'</td>'
-            +'<td>'+clipReason(row.evidence_reason, 52)+'</td></tr>';
-        }
-        eh += '</table></div>';
-      }
-      eCont.innerHTML = eh;
-    }
-
-    // Recent trades
-    const trCont = $('recent-trades-container');
-    if(trCont){
-      const rows = trades.trades || [];
-      if(!rows.length){
-        trCont.innerHTML = '<p class="empty">No recent trades</p>';
-      } else {
-        let h = '<table><tr><th>Entry</th><th>Market</th><th>Source</th><th>Status</th><th>P&amp;L</th></tr>';
-        for(const row of rows.slice(0, 12)){
-          const status = row.open ? 'open' : 'closed';
-          const reason = row.open ? 'open' : (row.exit_reason || 'closed');
-          h += '<tr><td>'+fmtTimestamp(row.entry_time)+'</td>'
-            +'<td>'+slugTime(row.slug||'')+'</td>'
-            +'<td>'+(row.source || '--')+'</td>'
-            +'<td><span class="tag '+tagCls(status)+'">'+reason+'</span></td>'
-            +'<td class="'+((row.pnl||0)>=0?'green':'red')+'">'+(row.pnl != null ? pnlSign(row.pnl) : '--')+'</td></tr>';
-        }
-        h += '</table>';
-        trCont.innerHTML = h;
+      settHtml+='<tr><td colspan="5" class="dim">No settlements loaded</td></tr>';
+    }else{
+      for(const s of setts.slice(-15).reverse()){
+        const type=cycleType(s.exit_reason);
+        settHtml+='<tr><td>'+fmtTimestamp(s.timestamp)+'</td><td>'+slugAsset(s.slug)+'</td><td>'+slugWindow(s.slug)+'</td>'
+          +'<td>'+type+'</td><td class="'+(s.pnl>=0?'green':'red')+'">'+pnlSign(s.pnl)+'</td></tr>';
       }
     }
+    $('settlements-table').innerHTML=settHtml;
 
-    // Filter reasons / rejection panel
-    const fCont = $('filters-container');
-    if(fCont){
-      const reasons = filters.reason_counts || [];
-      const priceBuckets = filters.price_buckets || [];
-      const timeBuckets = filters.time_buckets || [];
-      const recentFiltered = filters.recent || [];
-      let fh = '<div class="kv">'
-        +'<div><span class="label">Filtered signals (24h)</span><span>'+(filters.filtered_signals || 0)+'</span></div>'
-        +'<div><span class="label">Top price buckets</span><span>'+(priceBuckets.length ? priceBuckets.map(b=>b.bucket+': '+b.count).join(', ') : '--')+'</span></div>'
-        +'<div><span class="label">Top time buckets</span><span>'+(timeBuckets.length ? timeBuckets.map(b=>b.bucket+': '+b.count).join(', ') : '--')+'</span></div>'
-        +'</div>';
-      if(reasons.length){
-        fh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Top Rejection Reasons</div>';
-        for(const item of reasons){
-          fh += '<div class="row"><span class="lbl">'+item.reason+'</span><span class="val">'+item.count+'</span></div>';
-        }
-        fh += '</div>';
-      }
-      if(recentFiltered.length){
-        fh += '<div style="margin-top:10px"><div class="card-title" style="margin-bottom:8px">Recent Filtered Signals</div>'
-          +'<table><tr><th>Time</th><th>Source</th><th>Outcome</th><th>Bucket</th><th>Reason</th></tr>';
-        for(const row of recentFiltered.slice(0,8)){
-          fh += '<tr><td>'+slugTime(row.slug||'')+'</td>'
-            +'<td>'+(row.source || '--')+'</td>'
-            +'<td><span class="tag '+tagCls(row.outcome || 'filtered')+'">'+(row.outcome || 'filtered')+'</span></td>'
-            +'<td>'+row.price_bucket+' / '+row.time_bucket+'</td>'
-            +'<td>'+clipReason(row.guard_reasons, 46)+'</td></tr>';
-        }
-        fh += '</table></div>';
-      }
-      fCont.innerHTML = fh;
-    }
-
-    // Recent error stream
-    const erCont = $('errors-container');
-    if(erCont){
-      const rows = errors.errors || [];
-      if(!rows.length){
-        erCont.innerHTML = '<div class="kv"><div><span class="label">Unit</span><span>'+(errors.unit || '--')+'</span></div></div><p class="empty">No recent error lines</p>';
-      } else {
-        let eh = '<div class="kv"><div><span class="label">Unit</span><span>'+(errors.unit || '--')+'</span></div></div>'
-          +'<div style="margin-top:10px"><table><tr><th>Recent Error Lines</th></tr>';
-        for(const line of rows.slice().reverse()){
-          eh += '<tr><td style="white-space:normal;word-break:break-word;font-family:var(--mono)">'+line.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')+'</td></tr>';
-        }
-        eh += '</table></div>';
-        erCont.innerHTML = eh;
+    let alertHtml='<tr><th>When</th><th>Message</th></tr>';
+    const alertRows=errors.errors||[];
+    if(!alertRows.length){
+      alertHtml+='<tr><td colspan="2" class="dim">No recent backend alerts</td></tr>';
+    }else{
+      for(const line of alertRows.slice().reverse()){
+        const split=line.split(' polyphemus.');
+        const when=split[0]||'recent';
+        const message=split.length>1?split.slice(1).join(' polyphemus.'):line;
+        alertHtml+='<tr><td>'+escapeHtml(when)+'</td><td style="white-space:normal;word-break:break-word">'+escapeHtml(message)+'</td></tr>';
       }
     }
+    $('alerts-table').innerHTML=alertHtml;
 
-    // Recent signals
-    const sigCont = $('recent-signals-container');
-    if(sigCont){
-      const rows = signals.signals || [];
-      if(!rows.length){
-        sigCont.innerHTML = '<p class="empty">No signal history available</p>';
-      } else {
-        let h = '<table><tr><th>Time</th><th>Asset</th><th>Source</th><th>Outcome</th><th>Price</th><th>Left</th><th>Evidence</th><th>Reason</th></tr>';
-        for(const row of rows.slice(0, 14)){
-          const price = row.entry_price != null ? row.entry_price : row.midpoint;
-          const outcomeTag = row.outcome || 'unknown';
-          const evidenceTag = row.evidence_verdict || '--';
-          const reason = row.evidence_reason || row.guard_reasons || '--';
-          h += '<tr><td>'+slugTime(row.slug||'')+'</td>'
-            +'<td>'+(row.asset || '--')+'</td>'
-            +'<td>'+(row.source || '--')+'</td>'
-            +'<td><span class="tag '+tagCls(outcomeTag)+'">'+outcomeTag+'</span></td>'
-            +'<td>'+(price != null ? '$'+fmt(price,3) : '--')+'</td>'
-            +'<td>'+(row.time_remaining_secs != null ? row.time_remaining_secs+'s' : '--')+'</td>'
-            +'<td>'+(row.evidence_verdict ? '<span class="tag '+tagCls(evidenceTag)+'">'+evidenceTag+'</span>' : '--')+'</td>'
-            +'<td>'+clipReason(reason, 54)+'</td></tr>';
-        }
-        h += '</table>';
-        sigCont.innerHTML = h;
+    let tradeHtml='<tr><th>Time</th><th>Asset</th><th>Window</th><th>Reason</th><th>P&L</th></tr>';
+    const closedTrades=(trades.trades||[]).filter(t=>!t.open);
+    if(!closedTrades.length){
+      tradeHtml+='<tr><td colspan="5" class="dim">No recent closed trades</td></tr>';
+    }else{
+      for(const trade of closedTrades.slice(0,12)){
+        tradeHtml+='<tr><td>'+fmtTimestamp(trade.exit_time||trade.entry_time)+'</td><td>'+slugAsset(trade.slug)+'</td><td>'+slugWindow(trade.slug)+'</td>'
+          +'<td>'+escapeHtml(trade.exit_reason||'closed')+'</td><td class="'+((trade.pnl||0)>=0?'green':'red')+'">'+(trade.pnl!=null?pnlSign(trade.pnl):'--')+'</td></tr>';
       }
     }
+    $('recent-trades-table').innerHTML=tradeHtml;
 
-    lastUpdate = Date.now();
-  }catch(e){console.error('Fetch error:',e);}
+    // Momentum
+    const mGrid=$('momentum-grid');
+    mGrid.innerHTML='';
+    const readings=momentum.readings||{};
+    for(const asset of Object.keys(readings).sort()){
+      const r=readings[asset];
+      const arrow=r.direction==='UP'?'↑':r.direction==='DOWN'?'↓':'−';
+      mGrid.innerHTML+='<div class="m-item"><div class="m-asset">'+asset+'</div><div class="m-dir '+r.direction+'">'+arrow+'</div><div class="m-pct">'+(r.momentum_pct>=0?'+':'')+fmt(r.momentum_pct,2)+'%</div></div>';
+    }
+
+    // Advanced section
+    let advHtml='<div class="kv">'
+      +'<div><span class="label">Hedged Count</span><span class="val green">'+hedgedCnt+'</span></div>'
+      +'<div><span class="label">Orphaned Count</span><span class="val amber">'+orphanedCnt+'</span></div>'
+      +'<div><span class="label">Sellback Count</span><span class="val red">'+unwoundCnt+'</span></div>'
+      +'<div><span class="label">Total Settled</span><span class="val">'+totalSettled+'</span></div>'
+      +'<div><span class="label">Circuit Breaker</span><span class="val '+(accum.circuit_tripped?'amber':'green')+'">'+(accum.circuit_tripped?'TRIPPED':'ARMED')+'</span></div>'
+      +'<div><span class="label">Entry Mode</span><span class="val">'+(accum.entry_mode||'unknown').toUpperCase()+'</span></div>'
+      +'<div><span class="label">Pipeline</span><span class="val '+(pipeline.stage==='circuit_breaker'?'amber':'')+'">'+(pipeline.headline||'--')+'</span></div>'
+      +'<div><span class="label">Last Candidate Slug</span><span class="val">'+(lastCandidateSlug||'--')+'</span></div>'
+      +'<div><span class="label">Last Eval Block</span><span class="val amber">'+(lastBlock||'clear')+'</span></div>'
+      +'</div>';
+    $('advanced-content').innerHTML=advHtml;
+
+    lastUpdate=Date.now();
+  }catch(e){console.error('Fetch error:',e)}
 }
 
 function updateRefresh(){
-  const s = Math.floor((Date.now()-lastUpdate)/1000);
-  $('refresh').textContent = s<3?'just now':s+'s ago';
+  const s=Math.floor((Date.now()-lastUpdate)/1000);
+  $('refresh').textContent=s<3?'now':s+'s';
 }
 
-// Countdown ticker (updates every second without refetch)
 function tickCountdown(){
-  document.querySelectorAll('.countdown').forEach(cd => {
-    if(cd.classList.contains('green')) return;
-    const txt = cd.textContent;
-    const m = txt.match(/(\\d+):(\\d+)/);
-    if(!m) return;
-    let secs = parseInt(m[1])*60 + parseInt(m[2]) - 1;
-    if(secs <= 0){ cd.textContent = 'SETTLING'; cd.classList.add('green'); return; }
-    cd.textContent = Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0');
+  document.querySelectorAll('.countdown').forEach(cd=>{
+    if(cd.classList.contains('settling'))return;
+    const txt=cd.textContent;
+    const m=txt.match(/(\\d+):(\\d+)/);
+    if(!m)return;
+    let secs=parseInt(m[1])*60+parseInt(m[2])-1;
+    if(secs<=0){cd.textContent='SETTLING';cd.classList.add('settling');return}
+    cd.textContent=Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0');
   });
 }
 
+document.addEventListener('click',e=>{
+  if(e.target.id==='advanced-toggle'||e.target.closest('#advanced-toggle')){
+    $('advanced-toggle').classList.toggle('closed');
+  }
+});
+
 initChart();
 fetchAll();
-setInterval(fetchAll, 5000);
-setInterval(updateRefresh, 1000);
-setInterval(tickCountdown, 1000);
+setInterval(fetchAll,5000);
+setInterval(updateRefresh,1000);
+setInterval(tickCountdown,1000);
 </script>
 </body>
 </html>"""

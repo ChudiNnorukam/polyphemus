@@ -32,6 +32,13 @@ def get_front_month_symbol() -> str:
 
 from config import BulenoxConfig
 from binance_feed import BinanceFeed
+from research_store import (
+    ResearchStore,
+    consistency_risk_label,
+    derive_regime_label,
+    sample_quality_label,
+    session_bucket,
+)
 from rithmic_client import RithmicClient
 from ticker_plant import TickerPlant
 from trade_store import TradeStore
@@ -51,6 +58,8 @@ class Position:
         self.closed = False
         self.mfe: float = 0.0  # max favorable excursion in price points
         self.mae: float = 0.0  # max adverse excursion in price points
+        self.breakeven_activated: bool = False  # SL moved to entry after threshold
+        self.trailing_peak: float = 0.0  # peak excursion seen while trailing is active
 
 
 MAX_CONSECUTIVE_LOSSES = 5  # At 40% loss rate: P(5 consecutive) = 1%. Was 2 (16% = halted every 6 trades)
@@ -76,9 +85,14 @@ class BulenoxBot:
         self._halted: bool = False
         self._recent_raw_dirs: list = []  # last N raw signal directions for trend detection
         self._extreme_cooldown_until: float = 0.0  # monotonic time when extreme event cooldown expires
+        self._last_signal_dir: str = ""  # direction of last signal for whipsaw detection
+        self._last_signal_ts: float = 0.0  # timestamp of last signal
         os.makedirs(cfg.data_dir, exist_ok=True)
         self._store = TradeStore(os.path.join(cfg.data_dir, "trades.db"))
+        self._research = ResearchStore(os.path.join(cfg.data_dir, "research.db"))
         self._state_path = os.path.join(cfg.data_dir, "bot_state.json")
+        self._pending_snapshots: dict[str, int] = {}
+        self._pending_signal_context: dict[str, dict] = {}
         # Trailing drawdown: tracks peak balance. Account terminates if balance drops
         # more than max_trailing_drawdown below peak.
         self._starting_balance: float = 50000.0  # Bulenox $50K account
@@ -191,6 +205,7 @@ class BulenoxBot:
 
     async def start(self) -> None:
         self._store.setup()
+        self._research.setup()
         self._seed_positions()
 
         # Auto-rollover: detect front month contract
@@ -226,6 +241,16 @@ class BulenoxBot:
                 f"Do NOT optimize TP/SL until 50+ trades establish baseline WR."
             )
 
+        # Position reconciliation check on startup
+        if not self._cfg.dry_run and self._positions:
+            logger.warning(
+                f"POSITION RECONCILIATION: {len(self._positions)} open position(s) from DB "
+                f"at startup with DRY_RUN=false. Verify these match exchange state. "
+                f"Positions: {[f'{k}:{v.direction}' for k,v in self._positions.items()]}"
+            )
+        elif not self._cfg.dry_run:
+            logger.info("POSITION RECONCILIATION: No open positions in DB. Clean start.")
+
         balance = self._current_balance
         drawdown_room = self._cfg.max_trailing_drawdown - (self._peak_balance - balance)
         logger.info(
@@ -240,6 +265,99 @@ class BulenoxBot:
             self._feed.start(),
             self._position_monitor(),
         )
+
+    def _build_feature_snapshot(
+        self,
+        *,
+        ts: float,
+        signal_id: int,
+        raw_direction: str,
+        fade_direction: str,
+        signal_pct: float,
+        action: str,
+        reason: Optional[str],
+        basket_id: Optional[str] = None,
+        trade_id: Optional[int] = None,
+        execution_quality: Optional[str] = None,
+    ) -> dict:
+        dt_ct = datetime.fromtimestamp(ts, _CENTRAL)
+        cutoff_minutes = (_MARKET_CLOSE.hour * 60 + _MARKET_CLOSE.minute) - (dt_ct.hour * 60 + dt_ct.minute)
+        basis_pts = None
+        spread_ticks = None
+        mbt_price = self._ticker.last_trade_price
+        spot_price = self._feed.last_price
+        if mbt_price > 0 and spot_price > 0:
+            basis_pts = mbt_price - spot_price
+        if self._ticker.best_bid > 0 and self._ticker.best_ask > 0 and self._cfg.tick_size > 0:
+            spread_ticks = (self._ticker.best_ask - self._ticker.best_bid) / self._cfg.tick_size
+        feed_features = self._feed.get_feature_snapshot(self._cfg.tick_size)
+        total_trades = self._store.get_total_trades()
+        daily_rows = self._store._get_con().execute(  # local analytics, same sqlite handle
+            "SELECT date(exit_ts, 'unixepoch', 'localtime') AS trade_day, "
+            "SUM(CASE WHEN pnl_pts > 0 THEN pnl_pts ELSE 0 END) AS pos_pts "
+            "FROM trades WHERE exit_ts IS NOT NULL GROUP BY 1"
+        ).fetchall()
+        positive_days = [float(row[1] or 0.0) for row in daily_rows if (row[1] or 0.0) > 0]
+        best_share = 0.0
+        if positive_days:
+            best_share = max(positive_days) / sum(positive_days) * 100.0
+
+        return {
+            "ts": ts,
+            "signal_id": signal_id,
+            "trade_id": trade_id,
+            "basket_id": basket_id,
+            "raw_direction": raw_direction,
+            "fade_direction": fade_direction,
+            "signal_pct": signal_pct,
+            "session_bucket": session_bucket(dt_ct),
+            "day_of_week": dt_ct.weekday(),
+            "minutes_to_cutoff": cutoff_minutes,
+            "atr_5m_ticks": feed_features.get("atr_5m_ticks"),
+            "atr_1h_ticks": feed_features.get("atr_1h_ticks"),
+            "atr_24h_median_ticks": feed_features.get("atr_24h_median_ticks"),
+            "atr_ratio_1h_24h": feed_features.get("atr_ratio_1h_24h"),
+            "realized_vol_15m": feed_features.get("realized_vol_15m"),
+            "realized_vol_1h": feed_features.get("realized_vol_1h"),
+            "hurst_48h": feed_features.get("hurst_48h"),
+            "ou_half_life_min": feed_features.get("ou_half_life_min"),
+            "vwap_distance_ticks": None,
+            "basis_pts": basis_pts,
+            "basis_change_15m_pts": None,
+            "spread_ticks": spread_ticks,
+            "regime_label": derive_regime_label(action, reason),
+            "execution_quality_label": execution_quality,
+            "consistency_risk_label": consistency_risk_label(best_share),
+            "sample_quality_label": sample_quality_label(total_trades, len(daily_rows)),
+        }
+
+    def _record_research_snapshot(
+        self,
+        *,
+        ts: float,
+        signal_id: int,
+        raw_direction: str,
+        fade_direction: str,
+        signal_pct: float,
+        action: str,
+        reason: Optional[str],
+        basket_id: Optional[str] = None,
+        trade_id: Optional[int] = None,
+        execution_quality: Optional[str] = None,
+    ) -> int:
+        snapshot = self._build_feature_snapshot(
+            ts=ts,
+            signal_id=signal_id,
+            raw_direction=raw_direction,
+            fade_direction=fade_direction,
+            signal_pct=signal_pct,
+            action=action,
+            reason=reason,
+            basket_id=basket_id,
+            trade_id=trade_id,
+            execution_quality=execution_quality,
+        )
+        return self._research.record_feature_snapshot(snapshot)
 
     def _spawn_shadow(self, direction: str, pct: float, reason: str) -> None:
         """Record a counterfactual shadow trade for a rejected signal.
@@ -264,7 +382,7 @@ class BulenoxBot:
             if price <= 0:
                 continue
             if (sign > 0 and price >= tp_price) or (sign < 0 and price <= tp_price):
-                pnl = abs(tp_price - entry_price) * sign
+                pnl = abs(tp_price - entry_price)
                 self._store.resolve_shadow_trade(row_id, "win", pnl)
                 logger.debug(f"Shadow trade {row_id}: WIN (TP hit at {price:.2f})")
                 return
@@ -283,15 +401,24 @@ class BulenoxBot:
     async def _on_signal(self, direction: str, pct: float) -> None:
         # direction is already FADED by binance_feed.py
         raw_dir = "DOWN" if direction == "UP" else "UP"  # reverse the fade to get raw
+        signal_ts = time.time()
 
         if self._cfg.kill_switch_path and os.path.exists(self._cfg.kill_switch_path):
             logger.warning("Kill switch active — no new trades")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="kill_switch")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="kill_switch", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="kill_switch", execution_quality="invalid",
+            )
             return
 
         if self._halted:
             logger.warning(f"Signal {direction} ignored: bot halted after {self._consecutive_losses} consecutive losses")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="halted")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="halted", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="halted", execution_quality="invalid",
+            )
             return
 
         now_ct = datetime.now(_CENTRAL).time()
@@ -299,7 +426,11 @@ class BulenoxBot:
         in_market_hours = (now_ct >= _MARKET_OPEN or now_ct < _MARKET_CLOSE)
         if not in_market_hours:
             logger.info(f"Signal {direction} ignored: outside market hours ({now_ct.strftime('%H:%M')} CT, halt 15:55-17:00)")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="market_hours")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="market_hours", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="market_hours", execution_quality="invalid",
+            )
             return
 
         # Session filter: optimal FADE window (v2.0 audit - mid-day mean reversion strongest)
@@ -308,9 +439,32 @@ class BulenoxBot:
         if not (fade_start <= now_ct <= fade_end):
             logger.info(f"Signal {direction} skipped: outside FADE window "
                         f"({now_ct.strftime('%H:%M')} CT, window {self._cfg.fade_start_ct}-{self._cfg.fade_end_ct})")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="session_filter")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="session_filter", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="session_filter", execution_quality="clean",
+            )
             self._spawn_shadow(direction, pct, "session_filter")
             return
+
+        # Whipsaw guard: if previous signal was opposite direction within 5 min, it's chop
+        now_mono = time.monotonic()
+        if (self._last_signal_dir and self._last_signal_dir != direction
+                and now_mono - self._last_signal_ts < 300):
+            elapsed = int(now_mono - self._last_signal_ts)
+            logger.info(f"Signal {direction} skipped: whipsaw guard "
+                        f"(opposite of {self._last_signal_dir} {elapsed}s ago, need 300s spacing)")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="whipsaw", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="whipsaw", execution_quality="clean",
+            )
+            self._spawn_shadow(direction, pct, "whipsaw")
+            self._last_signal_dir = direction
+            self._last_signal_ts = now_mono
+            return
+        self._last_signal_dir = direction
+        self._last_signal_ts = now_mono
 
         # Basis check: MBT futures vs Coinbase spot (v2.0 audit - basis divergence risk)
         mbt_price = self._ticker.last_trade_price
@@ -322,15 +476,49 @@ class BulenoxBot:
             if basis_pct > self._cfg.max_basis_pct:
                 logger.warning(f"Signal {direction} skipped: basis too wide "
                                f"({basis_pct:.2%} > {self._cfg.max_basis_pct:.0%})")
-                self._store.record_signal(raw_dir, direction, pct, "rejected", reason="basis_wide")
+                signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="basis_wide", ts=signal_ts)
+                self._record_research_snapshot(
+                    ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                    signal_pct=pct, action="rejected", reason="basis_wide", execution_quality="degraded",
+                )
                 self._spawn_shadow(direction, pct, "basis_wide")
+                return
+
+        # ATR regime filter: skip fades AGAINST the 1h trend in trending markets (Gap P0)
+        # Only blocks the losing direction (e.g., longing during downtrend). Fades WITH trend still fire.
+        atr_ratio = self._feed.get_atr_ratio()
+        if atr_ratio > self._cfg.atr_regime_threshold:
+            trend = self._feed.get_trend_direction()
+            against_trend = (
+                (direction == "UP" and trend == "DOWN")
+                or (direction == "DOWN" and trend == "UP")
+            )
+            logger.info(
+                f"ATR regime check: ratio={atr_ratio:.2f}x threshold={self._cfg.atr_regime_threshold:.1f}x "
+                f"trend={trend} direction={direction} against_trend={against_trend}"
+            )
+            if against_trend:
+                logger.info(
+                    f"Signal {direction} skipped: ATR trending regime — "
+                    f"fade-against-{trend}-trend blocked (ratio={atr_ratio:.2f}x)"
+                )
+                signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="atr_regime", ts=signal_ts)
+                self._record_research_snapshot(
+                    ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                    signal_pct=pct, action="rejected", reason="atr_regime", execution_quality="clean",
+                )
+                self._spawn_shadow(direction, pct, "atr_regime")
                 return
 
         # Extreme event cooldown: skip all signals for N seconds after a 3%+ move (Gap #11)
         if time.monotonic() < self._extreme_cooldown_until:
             remaining = int(self._extreme_cooldown_until - time.monotonic())
             logger.warning(f"Signal {direction} skipped: extreme event cooldown ({remaining}s remaining)")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="extreme_event")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="extreme_event", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="extreme_event", execution_quality="degraded",
+            )
             self._spawn_shadow(direction, pct, "extreme_event")
             return
         # Check if current signal itself is extreme (|pct| > threshold)
@@ -339,7 +527,11 @@ class BulenoxBot:
             logger.warning(f"EXTREME EVENT: {pct:.2%} move exceeds {self._cfg.extreme_move_pct:.0%}. "
                            f"Cooldown {self._cfg.extreme_cooldown_secs}s activated.")
             self._send_alert(f"Extreme event: {pct:.2%} move. Cooldown {self._cfg.extreme_cooldown_secs}s.")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="extreme_event")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="extreme_event", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="extreme_event", execution_quality="degraded",
+            )
             self._spawn_shadow(direction, pct, "extreme_event")
             return
 
@@ -352,7 +544,11 @@ class BulenoxBot:
             if self._recent_raw_dirs.count(dominant) >= 4:
                 logger.info(f"Signal {direction} skipped: trend filter "
                             f"({self._recent_raw_dirs.count(dominant)}/5 {dominant} signals)")
-                self._store.record_signal(raw_dir, direction, pct, "rejected", reason="trend_filter")
+                signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="trend_filter", ts=signal_ts)
+                self._record_research_snapshot(
+                    ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                    signal_pct=pct, action="rejected", reason="trend_filter", execution_quality="clean",
+                )
                 self._spawn_shadow(direction, pct, "trend_filter")
                 return
 
@@ -361,7 +557,11 @@ class BulenoxBot:
         if dir_n >= 10 and dir_wr < self._cfg.directional_gate_wr:
             logger.warning(f"Signal {direction} skipped: directional gate "
                            f"(WR={dir_wr:.0%} on last {dir_n} {direction} trades, threshold={self._cfg.directional_gate_wr:.0%})")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="directional_gate")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="directional_gate", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="directional_gate", execution_quality="clean",
+            )
             self._spawn_shadow(direction, pct, "directional_gate")
             return
 
@@ -391,6 +591,7 @@ class BulenoxBot:
                 logger.warning(f"[DRY RUN] Signal {direction} skipped: no price available")
                 return
             side = "BUY" if direction == "UP" else "SELL"
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "executed", basket_id=None, ts=signal_ts)
             basket_id = await self._rithmic.place_order(side)
             pos = Position(basket_id, direction, signal_pct=pct)
             pos.entry_price = sim_price
@@ -399,29 +600,99 @@ class BulenoxBot:
             pos.tp_price = sim_price + tick * self._cfg.take_profit_ticks * sign
             pos.sl_price = sim_price - tick * self._cfg.stop_loss_ticks * sign
             self._positions[basket_id] = pos
-            self._store.record_entry(
+            trade_id = self._store.record_entry(
                 basket_id, self._cfg.symbol, direction, side,
-                pct, sim_price, time.time(),
+                pct, sim_price, signal_ts,
             )
+            snapshot_id = self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="executed", reason=None, basket_id=basket_id, trade_id=trade_id,
+                execution_quality="clean",
+            )
+            self._pending_snapshots[basket_id] = snapshot_id
+            self._pending_signal_context[basket_id] = {
+                "signal_ts": signal_ts,
+                "intended_price": sim_price,
+            }
+            self._research.record_execution_event({
+                "basket_id": basket_id,
+                "trade_id": trade_id,
+                "ts_local": signal_ts,
+                "event_type": "intent",
+                "price_intended": sim_price,
+                "qty": self._cfg.contracts,
+                "spread_ticks_at_send": self._build_feature_snapshot(
+                    ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                    signal_pct=pct, action="executed", reason=None,
+                ).get("spread_ticks"),
+            })
+            self._research.record_execution_event({
+                "basket_id": basket_id,
+                "trade_id": trade_id,
+                "ts_local": signal_ts,
+                "event_type": "fill",
+                "price_intended": sim_price,
+                "price_reported": sim_price,
+                "qty": self._cfg.contracts,
+                "ack_latency_ms": 0.0,
+                "fill_latency_ms": 0.0,
+                "slippage_ticks": 0.0,
+            })
             logger.info(
                 f"[DRY RUN] Entry: {side} basket_id={basket_id} price={sim_price:.2f} "
                 f"TP={pos.tp_price:.2f} SL={pos.sl_price:.2f} signal={pct:.4%}"
             )
-            self._store.record_signal(raw_dir, direction, pct, "executed", basket_id=basket_id)
             return
 
         if not self._rithmic._ready.is_set():
             logger.warning("Signal fired but Rithmic not ready, skipping")
-            self._store.record_signal(raw_dir, direction, pct, "rejected", reason="rithmic_not_ready")
+            signal_id = self._store.record_signal(raw_dir, direction, pct, "rejected", reason="rithmic_not_ready", ts=signal_ts)
+            self._record_research_snapshot(
+                ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+                signal_pct=pct, action="rejected", reason="rithmic_not_ready", execution_quality="invalid",
+            )
             return
 
         side = "BUY" if direction == "UP" else "SELL"
         logger.info(f"Placing {side} order for signal {direction} {pct:.4%}")
+        signal_id = self._store.record_signal(raw_dir, direction, pct, "executed", basket_id=None, ts=signal_ts)
         basket_id = await self._rithmic.place_order(side)
         # basket_id may be empty here — filled in via ResponseNewOrder (313)
         # We track a placeholder; basket_id gets confirmed on fill callback
         pos = Position(basket_id or f"PENDING-{time.monotonic():.0f}", direction, signal_pct=pct)
         self._positions[pos.basket_id] = pos
+        snapshot_id = self._record_research_snapshot(
+            ts=signal_ts, signal_id=signal_id, raw_direction=raw_dir, fade_direction=direction,
+            signal_pct=pct, action="executed", reason=None, basket_id=pos.basket_id, execution_quality="degraded",
+        )
+        self._pending_snapshots[pos.basket_id] = snapshot_id
+        spread_ticks = None
+        if self._ticker.best_bid > 0 and self._ticker.best_ask > 0 and self._cfg.tick_size > 0:
+            spread_ticks = (self._ticker.best_ask - self._ticker.best_bid) / self._cfg.tick_size
+        self._pending_signal_context[pos.basket_id] = {
+            "signal_ts": signal_ts,
+            "intended_price": self._ticker.last_trade_price or self._feed.last_price or None,
+            "spread_ticks": spread_ticks,
+            "signal_id": signal_id,
+        }
+        if basket_id:
+            self._research.record_execution_event({
+                "basket_id": basket_id,
+                "ts_local": time.time(),
+                "event_type": "ack",
+                "price_intended": self._pending_signal_context[pos.basket_id]["intended_price"],
+                "qty": self._cfg.contracts,
+                "ack_latency_ms": (time.time() - signal_ts) * 1000.0,
+                "spread_ticks_at_send": spread_ticks,
+            })
+        self._research.record_execution_event({
+            "basket_id": pos.basket_id,
+            "ts_local": signal_ts,
+            "event_type": "intent",
+            "price_intended": self._pending_signal_context[pos.basket_id]["intended_price"],
+            "qty": self._cfg.contracts,
+            "spread_ticks_at_send": spread_ticks,
+        })
         logger.info(f"Position opened: basket_id={pos.basket_id} direction={direction}")
 
     async def _on_order_ack(self, basket_id: str) -> None:
@@ -431,6 +702,23 @@ class BulenoxBot:
                 del self._positions[key]
                 pos.basket_id = basket_id
                 self._positions[basket_id] = pos
+                snapshot_id = self._pending_snapshots.pop(key, None)
+                if snapshot_id is not None:
+                    self._pending_snapshots[basket_id] = snapshot_id
+                    self._research.move_basket(key, basket_id)
+                ctx = self._pending_signal_context.pop(key, None)
+                if ctx is not None:
+                    self._pending_signal_context[basket_id] = ctx
+                    ack_latency_ms = (time.time() - ctx["signal_ts"]) * 1000.0
+                    self._research.record_execution_event({
+                        "basket_id": basket_id,
+                        "ts_local": time.time(),
+                        "event_type": "ack",
+                        "price_intended": ctx.get("intended_price"),
+                        "qty": self._cfg.contracts,
+                        "ack_latency_ms": ack_latency_ms,
+                        "spread_ticks_at_send": ctx.get("spread_ticks"),
+                    })
                 logger.info(f"basket_id resolved: {key} -> {basket_id}")
                 return
         # Resolve a pending closing order
@@ -478,10 +766,33 @@ class BulenoxBot:
                 f"TP={pos.tp_price:.2f} SL={pos.sl_price:.2f}"
             )
             side = fill.get("transaction_type", "BUY" if pos.direction == "UP" else "SELL")
-            self._store.record_entry(
+            trade_id = self._store.record_entry(
                 basket_id, self._cfg.symbol, pos.direction, side,
                 pos.signal_pct, fill_price, time.time(),
             )
+            snapshot_id = self._pending_snapshots.get(basket_id)
+            if snapshot_id is not None:
+                self._research.attach_trade(snapshot_id, trade_id, basket_id)
+            ctx = self._pending_signal_context.get(basket_id, {})
+            fill_latency_ms = None
+            if ctx.get("signal_ts") is not None:
+                fill_latency_ms = (time.time() - ctx["signal_ts"]) * 1000.0
+            slippage_ticks = None
+            if ctx.get("intended_price") is not None and self._cfg.tick_size > 0:
+                signed_delta = (fill_price - ctx["intended_price"]) * (1 if pos.direction == "UP" else -1)
+                slippage_ticks = signed_delta / self._cfg.tick_size
+            self._research.record_execution_event({
+                "basket_id": basket_id,
+                "trade_id": trade_id,
+                "ts_local": time.time(),
+                "event_type": "fill",
+                "price_intended": ctx.get("intended_price"),
+                "price_reported": fill_price,
+                "qty": self._cfg.contracts,
+                "fill_latency_ms": fill_latency_ms,
+                "slippage_ticks": slippage_ticks,
+                "spread_ticks_at_send": ctx.get("spread_ticks"),
+            })
         else:
             # Closing fill
             pnl_ticks = (fill_price - pos.entry_price) * (1 if pos.direction == "UP" else -1)
@@ -500,6 +811,13 @@ class BulenoxBot:
                 logger.info(f"Close fill WIN: basket_id={basket_id} price={fill_price} pnl~={pnl_ticks:.2f}")
             self._save_state()
             self._store.record_exit(basket_id, fill_price, "fill", time.time())
+            self._research.record_execution_event({
+                "basket_id": basket_id,
+                "ts_local": time.time(),
+                "event_type": "flatten",
+                "price_reported": fill_price,
+                "qty": self._cfg.contracts,
+            })
             pos.closed = True
 
     async def _on_tick(self, price: float) -> None:
@@ -518,6 +836,30 @@ class BulenoxBot:
                 pos.mfe = excursion
             if excursion < pos.mae:
                 pos.mae = excursion
+            # Breakeven stop: move SL to entry after +breakeven_ticks favorable
+            breakeven_threshold = self._cfg.breakeven_ticks * self._cfg.tick_size
+            if not pos.breakeven_activated and excursion >= breakeven_threshold and pos.entry_price is not None:
+                pos.sl_price = pos.entry_price
+                pos.breakeven_activated = True
+                logger.info(
+                    f"BREAKEVEN STOP activated: basket_id={pos.basket_id} "
+                    f"excursion={excursion:.1f}pts >= {breakeven_threshold:.0f}pts ({self._cfg.breakeven_ticks}t) — SL moved to entry {pos.entry_price:.2f}"
+                )
+            # Trailing stop: once excursion >= trailing_activation_ticks, trail SL by trailing_stop_ticks
+            if self._cfg.trailing_stop_ticks > 0 and pos.entry_price is not None:
+                activation_pts = self._cfg.trailing_activation_ticks * self._cfg.tick_size
+                if excursion >= activation_pts:
+                    if excursion > pos.trailing_peak:
+                        pos.trailing_peak = excursion
+                        trail_pts = self._cfg.trailing_stop_ticks * self._cfg.tick_size
+                        sign = 1 if pos.direction == "UP" else -1
+                        new_sl = pos.entry_price + (pos.trailing_peak - trail_pts) * sign
+                        if pos.sl_price is None or (sign > 0 and new_sl > pos.sl_price) or (sign < 0 and new_sl < pos.sl_price):
+                            pos.sl_price = new_sl
+                            logger.info(
+                                f"TRAILING STOP updated: basket_id={pos.basket_id} "
+                                f"peak={pos.trailing_peak:.1f}pts trail={trail_pts:.0f}pts new_sl={new_sl:.2f}"
+                            )
             # SL check
             if pos.sl_price is not None:
                 sl_hit = (
@@ -609,6 +951,13 @@ class BulenoxBot:
                 mfe_tk = pos.mfe / self._cfg.tick_size if self._cfg.tick_size else 0
                 mae_tk = pos.mae / self._cfg.tick_size if self._cfg.tick_size else 0
                 self._store.record_exit(pos.basket_id, sim_price, exit_reason, time.time(), mfe_ticks=mfe_tk, mae_ticks=mae_tk)
+                self._research.record_execution_event({
+                    "basket_id": pos.basket_id,
+                    "ts_local": time.time(),
+                    "event_type": "flatten",
+                    "price_reported": sim_price,
+                    "qty": self._cfg.contracts,
+                })
                 self._update_drawdown()
                 self._save_state()
                 logger.info(

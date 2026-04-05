@@ -83,6 +83,8 @@ class TickerPlant:
         self._ssl_context = self._build_ssl()
         uri = self._cfg.rithmic_uri
         backoff = 5
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 5
 
         while True:
             try:
@@ -96,6 +98,7 @@ class TickerPlant:
                 self._ready.clear()
                 await self._login()
                 await self._subscribe_market_data()
+                consecutive_failures = 0  # only reset after subscribe succeeds
                 self._ready.set()
                 logger.info(
                     f"TICKER_PLANT ready | symbol={self._cfg.symbol} exchange={self._cfg.exchange}"
@@ -108,13 +111,31 @@ class TickerPlant:
             except RuntimeError as e:
                 self._ready.clear()
                 self._ws = None
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        f"TICKER_PLANT disabled after {MAX_CONSECUTIVE_FAILURES} consecutive failures: {e}. "
+                        f"Bot will use Binance/Coinbase feed for price data."
+                    )
+                    self._ready.set()  # unblock anything waiting
+                    while True:
+                        await asyncio.sleep(3600)
                 backoff = min(backoff * 2, 120)
-                logger.warning(f"TICKER_PLANT disconnected: {e} - reconnecting in {backoff}s")
+                logger.warning(f"TICKER_PLANT disconnected: {e} - reconnecting in {backoff}s (attempt {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
                 await asyncio.sleep(backoff)
             except Exception as e:
                 self._ready.clear()
                 self._ws = None
-                logger.warning(f"TICKER_PLANT disconnected: {e} - reconnecting in {backoff}s")
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        f"TICKER_PLANT disabled after {MAX_CONSECUTIVE_FAILURES} consecutive failures: {e}. "
+                        f"Bot will use Binance/Coinbase feed for price data."
+                    )
+                    self._ready.set()
+                    while True:
+                        await asyncio.sleep(3600)
+                logger.warning(f"TICKER_PLANT disconnected: {e} - reconnecting in {backoff}s (attempt {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
                 await asyncio.sleep(backoff)
 
     async def wait_ready(self) -> None:

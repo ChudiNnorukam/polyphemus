@@ -83,14 +83,18 @@ class TradeStore:
         action: str,
         basket_id: Optional[str] = None,
         reason: Optional[str] = None,
-    ) -> None:
+        ts: Optional[float] = None,
+    ) -> int:
         """Log every signal: executed, rejected, ignored."""
+        if ts is None:
+            ts = time.time()
         con = self._get_con()
-        con.execute(
+        cur = con.execute(
             "INSERT INTO signals (ts, raw_direction, fade_direction, signal_pct, action, basket_id, reason) VALUES (?,?,?,?,?,?,?)",
-            (time.time(), raw_direction, fade_direction, signal_pct, action, basket_id, reason),
+            (ts, raw_direction, fade_direction, signal_pct, action, basket_id, reason),
         )
         con.commit()
+        return int(cur.lastrowid)
 
     def record_entry(
         self,
@@ -101,11 +105,11 @@ class TradeStore:
         signal_pct: float,
         entry_price: float,
         entry_ts: Optional[float] = None,
-    ) -> None:
+    ) -> int:
         if entry_ts is None:
             entry_ts = time.time()
         con = self._get_con()
-        con.execute(
+        cur = con.execute(
             """
             INSERT INTO trades (basket_id, symbol, direction, side, signal_pct, entry_price, entry_ts)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -113,6 +117,7 @@ class TradeStore:
             (basket_id, symbol, direction, side, signal_pct, entry_price, entry_ts),
         )
         con.commit()
+        return int(cur.lastrowid)
 
     def record_exit(
         self,

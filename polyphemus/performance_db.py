@@ -114,6 +114,11 @@ class PerformanceDB:
                 ('hold_seconds', 'INTEGER'),
                 ('pnl', 'REAL'),
                 ('metadata', 'TEXT DEFAULT NULL'),
+                ('binance_price_at_fill', 'REAL'),
+                ('binance_price_30s', 'REAL'),
+                ('adverse_fill', 'INTEGER'),
+                ('adverse_fill_bps', 'REAL'),
+                ('check_window_secs', 'INTEGER'),
             ]
 
             for col_name, col_def in columns_to_add:
@@ -152,6 +157,7 @@ class PerformanceDB:
         market_title: str,
         filter_score: float = None,
         metadata: Optional[dict] = None,
+        strategy: str = "signal_bot",
     ) -> None:
         """
         Record a new trade entry.
@@ -181,7 +187,7 @@ class PerformanceDB:
             ''', (
                 trade_id, token_id, slug, entry_time, entry_price, entry_size,
                 entry_tx_hash, outcome, market_title, 0, 0,
-                'BUY', entry_price * entry_size, 'signal_bot', filter_score, metadata_json
+                'BUY', entry_price * entry_size, strategy, filter_score, metadata_json
             ))
             conn.commit()
             self.logger.info(f'Recorded entry: {trade_id} @ {entry_price:.4f} x {entry_size} score={filter_score}')
@@ -564,6 +570,49 @@ class PerformanceDB:
             return result
         except Exception:
             return {"up": (0.0, 0), "down": (0.0, 0)}
+        finally:
+            conn.close()
+
+    def update_adverse_selection(
+        self,
+        trade_id: str,
+        binance_at_fill: float,
+        binance_at_check: Optional[float],
+        direction: str,
+        check_window_secs: int,
+    ) -> None:
+        """Record Binance adverse selection data after fill.
+
+        Args:
+            trade_id: Trade to update.
+            binance_at_fill: Binance spot price at fill time.
+            binance_at_check: Binance spot price at check time. None on timeout.
+            direction: 'up' or 'down' (signal direction).
+            check_window_secs: Actual measurement window used (capped at epoch boundary).
+        """
+        if binance_at_fill <= 0:
+            return
+
+        adverse_fill_bps: Optional[float] = None
+        adverse: Optional[int] = None
+        if binance_at_check is not None and binance_at_check > 0:
+            move = (binance_at_check - binance_at_fill) / binance_at_fill
+            adverse_fill_bps = round(move * 10000, 4)  # signed bps delta
+            adverse = int(
+                (direction.lower() == "up" and move < 0) or
+                (direction.lower() == "down" and move > 0)
+            )
+
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE trades SET binance_price_at_fill=?, binance_price_30s=?, "
+                "adverse_fill=?, adverse_fill_bps=?, check_window_secs=? "
+                "WHERE trade_id=?",
+                (binance_at_fill, binance_at_check, adverse, adverse_fill_bps,
+                 check_window_secs, trade_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 

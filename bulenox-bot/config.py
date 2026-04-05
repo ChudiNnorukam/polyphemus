@@ -53,6 +53,10 @@ class BulenoxConfig:
     directional_gate_wr: float = 0.30  # Skip direction if rolling WR < 30% on n>=10 (Gap #5)
     extreme_move_pct: float = 0.03     # 3% move in 1h triggers cooldown (Gap #11)
     extreme_cooldown_secs: int = 1800  # 30 min cooldown after extreme move
+    atr_regime_threshold: float = 1.5  # Skip fade-against-trend if 1h ATR / 24h median ATR > threshold
+    breakeven_ticks: int = 10           # Move SL to entry after N ticks favorable (was stop_loss_ticks=15)
+    trailing_stop_ticks: int = 0        # Trail SL by N ticks from peak (0 = disabled)
+    trailing_activation_ticks: int = 20 # Ticks in profit required before trailing activates
 
 
 def load_config() -> BulenoxConfig:
@@ -85,10 +89,14 @@ def load_config() -> BulenoxConfig:
         max_contracts=int(os.getenv("MAX_CONTRACTS", "7")),
         point_value=float(os.getenv("POINT_VALUE", "0.1")),
         force_close_ct=os.getenv("FORCE_CLOSE_CT", "15:55"),
-        fade_start_ct=os.getenv("FADE_START_CT", "10:00"),
-        fade_end_ct=os.getenv("FADE_END_CT", "15:00"),
+        fade_start_ct=os.getenv("FADE_START_CT", "09:00"),
+        fade_end_ct=os.getenv("FADE_END_CT", "16:00"),
         max_basis_pct=float(os.getenv("MAX_BASIS_PCT", "0.02")),
         directional_gate_wr=float(os.getenv("DIRECTIONAL_GATE_WR", "0.30")),
         extreme_move_pct=float(os.getenv("EXTREME_MOVE_PCT", "0.03")),
         extreme_cooldown_secs=int(os.getenv("EXTREME_COOLDOWN_SECS", "1800")),
+        atr_regime_threshold=float(os.getenv("ATR_REGIME_THRESHOLD", "1.5")),
+        breakeven_ticks=int(os.getenv("BREAKEVEN_TICKS", "10")),
+        trailing_stop_ticks=int(os.getenv("TRAILING_STOP_TICKS", "0")),
+        trailing_activation_ticks=int(os.getenv("TRAILING_ACTIVATION_TICKS", "20")),
     )

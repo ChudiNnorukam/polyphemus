@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import ssl
 import time
 from collections import deque
@@ -8,6 +9,7 @@ from typing import Callable, Awaitable, Optional
 
 import aiohttp
 import certifi
+import statistics
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,10 @@ class BinanceFeed:
         self._fallback_active: bool = False
         self._FALLBACK_AFTER_SECS = 6 * 3600  # lower threshold after 6 hours of silence
         self.last_price: float = 0.0
+        # ATR regime tracking: 1h rolling prices + 24 hourly range snapshots
+        self._prices_1h: deque = deque()
+        self._hourly_ranges: deque = deque(maxlen=24)
+        self._last_hourly_ts: float = 0.0
 
     async def start(self) -> None:
         backoff = 5
@@ -89,6 +95,20 @@ class BinanceFeed:
             await self._on_price(price)
         now = time.monotonic()
 
+        # ATR regime: maintain 1h rolling price window and take hourly range snapshots
+        self._prices_1h.append((now, price))
+        cutoff_1h = now - 3600
+        while self._prices_1h and self._prices_1h[0][0] < cutoff_1h:
+            self._prices_1h.popleft()
+        if self._last_hourly_ts == 0.0:
+            self._last_hourly_ts = now
+        elif now - self._last_hourly_ts >= 3600:
+            prices_1h = [p for _, p in self._prices_1h]
+            if len(prices_1h) >= 2:
+                self._hourly_ranges.append(max(prices_1h) - min(prices_1h))
+                logger.debug(f"ATR snapshot: 1h_range=${self._hourly_ranges[-1]:.0f} n={len(self._hourly_ranges)}/24")
+            self._last_hourly_ts = now
+
         self._prices.append((now, price))
 
         if len(self._prices) < 2:
@@ -130,6 +150,62 @@ class BinanceFeed:
         thresh_label = "fallback" if abs(pct) < self._trigger_pct else "primary"
         logger.info(f"Signal: raw={raw_direction} {pct:.4%} -> FADE entry={direction} [{thresh_label}] in {self._window_secs}s")
         await self._on_signal(direction, pct)
+
+    def get_atr_ratio(self) -> float:
+        """Return 1h ATR / median 24h hourly ATR. Returns 0.0 if < 4h of baseline data."""
+        if len(self._hourly_ranges) < 4 or len(self._prices_1h) < 2:
+            return 0.0
+        prices = [p for _, p in self._prices_1h]
+        atr_1h = max(prices) - min(prices)
+        median_atr = statistics.median(self._hourly_ranges)
+        if median_atr <= 0:
+            return 0.0
+        return atr_1h / median_atr
+
+    def get_trend_direction(self) -> str:
+        """Return 1h price trend: 'UP', 'DOWN', or 'NEUTRAL' (< ±0.5% change)."""
+        if len(self._prices_1h) < 2:
+            return "NEUTRAL"
+        prices = [p for _, p in self._prices_1h]
+        pct = (prices[-1] - prices[0]) / prices[0]
+        if pct < -0.005:
+            return "DOWN"
+        if pct > 0.005:
+            return "UP"
+        return "NEUTRAL"
+
+    def get_feature_snapshot(self, tick_size: float) -> dict:
+        prices_1h = [p for _, p in self._prices_1h]
+        atr_1h = (max(prices_1h) - min(prices_1h)) if len(prices_1h) >= 2 else None
+        atr_24h_median = statistics.median(self._hourly_ranges) if self._hourly_ranges else None
+        prices_15m = [p for ts, p in self._prices_1h if ts >= time.monotonic() - 900]
+        atr_5m = None
+        prices_5m = [p for ts, p in self._prices_1h if ts >= time.monotonic() - 300]
+        if len(prices_5m) >= 2:
+            atr_5m = max(prices_5m) - min(prices_5m)
+
+        def realized_vol(prices: list[float]) -> Optional[float]:
+            if len(prices) < 3:
+                return None
+            returns = []
+            for prev, curr in zip(prices, prices[1:]):
+                if prev > 0 and curr > 0:
+                    returns.append(math.log(curr / prev))
+            if len(returns) < 2:
+                return None
+            return statistics.pstdev(returns)
+
+        return {
+            "atr_5m_ticks": (atr_5m / tick_size) if atr_5m is not None and tick_size else None,
+            "atr_1h_ticks": (atr_1h / tick_size) if atr_1h is not None and tick_size else None,
+            "atr_24h_median_ticks": (atr_24h_median / tick_size) if atr_24h_median is not None and tick_size else None,
+            "atr_ratio_1h_24h": self.get_atr_ratio(),
+            "realized_vol_15m": realized_vol(prices_15m),
+            "realized_vol_1h": realized_vol(prices_1h),
+            "hurst_48h": None,
+            "ou_half_life_min": None,
+            "trend_direction": self.get_trend_direction(),
+        }
 
     def _trim(self, now: float) -> None:
         cutoff = now - self._window_secs

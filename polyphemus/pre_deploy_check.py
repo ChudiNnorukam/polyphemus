@@ -14,6 +14,15 @@ Usage:
     python3 polyphemus/pre_deploy_check.py audit emmanuel
 """
 
+if __package__ in (None, ""):
+    import os as _os
+    import sys as _sys
+
+    _script_dir = _os.path.dirname(_os.path.abspath(__file__))
+    _repo_parent = _os.path.dirname(_script_dir)
+    _sys.path = [p for p in _sys.path if p not in ("", _script_dir)]
+    _sys.path.insert(0, _repo_parent)
+
 import json
 import os
 import re
@@ -61,6 +70,48 @@ def local(cmd, timeout=60):
         return f"ERROR: {e}", 1
 
 
+def _parse_env_blob(env_out):
+    env = {}
+    for raw_line in env_out.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env[key.strip()] = value.strip().strip("'\"")
+    return env
+
+
+def _service_start_epoch(instance):
+    start = ssh(
+        f"systemctl show lagbot@{instance} -p ActiveEnterTimestamp --value",
+        timeout=10,
+    )
+    if not start or "SSH_ERROR" in start or start.strip().lower() == "n/a":
+        return None
+    epoch = ssh(f"date -d '{start.strip()}' +%s", timeout=10)
+    return int(epoch) if epoch.isdigit() else None
+
+
+def _accumulator_runtime(instance):
+    env_out = ssh(f"cat {VPS_INSTANCES}/{instance}/.env 2>/dev/null")
+    if "SSH_ERROR" in env_out or not env_out:
+        return None, None, None
+
+    env = _parse_env_blob(env_out)
+    if env.get("ENABLE_ACCUMULATOR", "").lower() != "true":
+        return env, None, None
+
+    port = env.get("DASHBOARD_PORT", "8080")
+    payload = ssh(f"curl -fsS http://127.0.0.1:{port}/api/accumulator", timeout=15)
+    if not payload or "SSH_ERROR" in payload:
+        return env, port, None
+
+    try:
+        return env, port, json.loads(payload)
+    except json.JSONDecodeError:
+        return env, port, None
+
+
 # ========== PRE-DEPLOY CHECKS ==========
 
 def check_py_compile():
@@ -81,17 +132,19 @@ def check_py_compile():
 
 def check_tests():
     """Run test suite."""
-    test_file = LOCAL_CODE / "test_accumulator.py"
-    if not test_file.exists():
-        # Try alternate test files
-        test_files = list(LOCAL_CODE.glob("test_*.py"))
-        if not test_files:
-            record(WARN, "tests", "No test files found")
-            return
-        test_file = test_files[0]
+    test_targets = []
+    for candidate in (
+        LOCAL_CODE / "test_accumulator.py",
+        LOCAL_CODE / "tests" / "test_operator_tooling.py",
+    ):
+        if candidate.exists():
+            test_targets.append(f"polyphemus/{candidate.relative_to(LOCAL_CODE)}")
+    if not test_targets:
+        record(WARN, "tests", "No hardening test files found")
+        return
 
     out, rc = local(
-        f"cd {LOCAL_CODE.parent} && python3 -m pytest {test_file} -q --tb=no 2>&1 | tail -5",
+        f"cd {LOCAL_CODE.parent} && python3 -m pytest {' '.join(test_targets)} -q --tb=no 2>&1",
         timeout=120
     )
     if rc == 0:
@@ -259,8 +312,14 @@ def check_service_active(instance):
 
 def check_startup_errors(instance):
     """Check for errors in first 60 seconds after restart."""
+    start_epoch = _service_start_epoch(instance)
+    if start_epoch is None:
+        window = "--since '90 seconds ago'"
+    else:
+        window = f"--since '@{start_epoch}' --until '@{start_epoch + 90}'"
+
     errors = ssh(
-        f"journalctl -u lagbot@{instance} --since '90 seconds ago' --no-pager 2>/dev/null"
+        f"journalctl -u lagbot@{instance} {window} --no-pager 2>/dev/null"
         f" | grep -iE 'Traceback|AttributeError|KeyError|NameError|TypeError|ImportError|RuntimeError|\\[ERROR\\]'"
     )
     if errors and "SSH_ERROR" not in errors:
@@ -292,27 +351,43 @@ def check_error_delta(instance):
 
 def check_circuit_breaker(instance):
     """Verify circuit breaker state and daily P&L."""
-    daily_pnl = ssh(
-        f"sqlite3 /opt/lagbot/instances/{instance}/data/performance.db "
-        f"\"SELECT COALESCE(SUM(pnl), 0.0) FROM trades "
-        f"WHERE exit_time >= $(python3 -c 'from datetime import datetime,timezone; "
-        f"print(int(datetime.now(timezone.utc).replace(hour=0,minute=0,second=0).timestamp()))')\""
-    )
-    pnl = float(daily_pnl) if daily_pnl.replace("-", "").replace(".", "").isdigit() else 0.0
-
-    # Get max_daily_loss from .env
-    max_loss = ssh(f"grep -i MAX_DAILY_LOSS /opt/lagbot/instances/{instance}/.env 2>/dev/null | head -1")
+    env, port, accum_stats = _accumulator_runtime(instance)
     max_loss_val = 0.0
-    if max_loss:
-        match = re.search(r"=\s*([\d.]+)", max_loss)
-        if match:
-            max_loss_val = float(match.group(1))
+    if env:
+        try:
+            max_loss_val = float(env.get("MAX_DAILY_LOSS", "0") or 0)
+        except ValueError:
+            max_loss_val = 0.0
 
-    kill_switch = ssh(f"ls /opt/lagbot/instances/{instance}/data/KILL_SWITCH 2>/dev/null")
+    kill_switch_path = (
+        env.get("KILL_SWITCH_PATH")
+        if env and env.get("KILL_SWITCH_PATH")
+        else f"{VPS_INSTANCES}/{instance}/data/KILL_SWITCH"
+    )
+    kill_switch = ssh(f"test -f {kill_switch_path} && echo exists || true")
+
+    using_accumulator = bool(env and env.get("ENABLE_ACCUMULATOR", "").lower() == "true")
+    if using_accumulator:
+        if accum_stats is None:
+            record(
+                FAIL,
+                "circuit_breaker",
+                f"Accumulator enabled but /api/accumulator unavailable on 127.0.0.1:{port}",
+            )
+            return
+        pnl = float(accum_stats.get("total_pnl", 0.0) or 0.0)
+    else:
+        daily_pnl = ssh(
+            f"sqlite3 /opt/lagbot/instances/{instance}/data/performance.db "
+            f"\"SELECT COALESCE(SUM(pnl), 0.0) FROM trades "
+            f"WHERE exit_time >= $(python3 -c 'from datetime import datetime,timezone; "
+            f"print(int(datetime.now(timezone.utc).replace(hour=0,minute=0,second=0).timestamp()))')\""
+        )
+        pnl = float(daily_pnl) if daily_pnl.replace("-", "").replace(".", "").isdigit() else 0.0
 
     issues = []
-    if kill_switch and "No such file" not in kill_switch:
-        issues.append("KILL_SWITCH file exists")
+    if kill_switch.strip() == "exists":
+        issues.append(f"KILL_SWITCH file exists at {kill_switch_path}")
     if max_loss_val > 0 and pnl <= -max_loss_val:
         issues.append(f"daily P&L ${pnl:.2f} exceeds limit -${max_loss_val:.0f}")
 
@@ -376,23 +451,35 @@ def check_config_drift(instance):
 
     issues = []
 
-    # CRITICAL: accum_dry_run must be false on live instances
-    adr = env.get("ACCUM_DRY_RUN", "").lower()
-    if adr == "true" or (not adr and env.get("DRY_RUN", "").lower() == "false"):
-        issues.append("ACCUM_DRY_RUN=true (or missing) on live instance - balance returns fake $400")
-
     # DRY_RUN should match intent
     dr = env.get("DRY_RUN", "true").lower()
     if dr == "true":
         record(INFO, "config_drift", "DRY_RUN=true (no real trades)")
 
-    # Subsystems that should be explicitly disabled on momentum-only instances
+    # Strategy toggles must be explicit and mutually consistent.
+    toggle_values = {}
     for key in ["ENABLE_ARB", "ENABLE_ACCUMULATOR", "ENABLE_PAIR_ARB"]:
         val = env.get(key, "").lower()
-        if val == "true":
-            issues.append(f"{key}=true (should be false on momentum-only instance)")
-        elif not val:
+        if val not in ("true", "false"):
             issues.append(f"{key} missing from .env (defaults may contaminate)")
+            continue
+        toggle_values[key] = (val == "true")
+
+    if toggle_values.get("ENABLE_ARB") and toggle_values.get("ENABLE_ACCUMULATOR"):
+        issues.append("ENABLE_ARB=true and ENABLE_ACCUMULATOR=true (mutually exclusive)")
+
+    if toggle_values.get("ENABLE_ACCUMULATOR"):
+        adr = env.get("ACCUM_DRY_RUN", "").lower()
+        if adr not in ("true", "false"):
+            issues.append("ACCUM_DRY_RUN missing while ENABLE_ACCUMULATOR=true")
+        elif adr != dr:
+            issues.append(
+                f"DRY_RUN={dr} but ACCUM_DRY_RUN={adr} while ENABLE_ACCUMULATOR=true"
+            )
+        if not env.get("ACCUM_MAX_PAIR_COST"):
+            issues.append("ACCUM_MAX_PAIR_COST missing while ENABLE_ACCUMULATOR=true")
+        if not env.get("DASHBOARD_PORT"):
+            issues.append("DASHBOARD_PORT missing while ENABLE_ACCUMULATOR=true")
 
     # Signature type must match wallet
     sig = env.get("SIGNATURE_TYPE", "")
@@ -403,6 +490,79 @@ def check_config_drift(instance):
         record(FAIL, "config_drift", " | ".join(issues))
     else:
         record(PASS, "config_drift", "Key config values within safe ranges")
+
+
+def check_dashboard_api(instance):
+    """Verify dashboard APIs are reachable on the configured port."""
+    env_out = ssh(f"cat {VPS_INSTANCES}/{instance}/.env 2>/dev/null")
+    if "SSH_ERROR" in env_out or not env_out:
+        record(WARN, "dashboard_api", "Could not read .env for dashboard port")
+        return
+
+    env = {}
+    for line in env_out.split("\n"):
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            key, _, val = line.partition("=")
+            env[key.strip().upper()] = val.strip().strip("'\"")
+
+    port = env.get("DASHBOARD_PORT", "8080")
+    accum_enabled = env.get("ENABLE_ACCUMULATOR", "").lower() == "true"
+    api = ssh(f"curl -fsS http://127.0.0.1:{port}/api/accumulator 2>/dev/null", timeout=15)
+    if "SSH_ERROR" in api or not api:
+        record(FAIL, "dashboard_api", f"/api/accumulator unreachable on 127.0.0.1:{port}")
+        return
+    if accum_enabled and '"enabled": true' not in api and '"enabled":true' not in api:
+        record(FAIL, "dashboard_api", f"Accumulator API reachable on {port} but not enabled")
+        return
+    record(PASS, "dashboard_api", f"/api/accumulator reachable on 127.0.0.1:{port}")
+
+
+def check_accumulator_state_storage(instance):
+    """Ensure accumulator state is instance-scoped, not using the legacy shared path."""
+    env_out = ssh(f"cat {VPS_INSTANCES}/{instance}/.env 2>/dev/null")
+    if "SSH_ERROR" in env_out or not env_out:
+        record(WARN, "accum_state_storage", "Could not read .env")
+        return
+    env = _parse_env_blob(env_out)
+    enabled = env.get("ENABLE_ACCUMULATOR", "").lower() == "true"
+    if not enabled:
+        record(INFO, "accum_state_storage", "Accumulator disabled for instance")
+        return
+
+    instance_path = f"{VPS_INSTANCES}/{instance}/data/circuit_breaker.json"
+    shared_path = "/opt/lagbot/data/circuit_breaker.json"
+    instance_exists = ssh(f"test -f {instance_path} && echo yes || echo no")
+    shared_exists = ssh(f"test -f {shared_path} && echo yes || echo no")
+    if instance_exists.strip() != "yes":
+        record(FAIL, "accum_state_storage", f"Missing instance circuit breaker state: {instance_path}")
+        return
+    if shared_exists.strip() == "yes":
+        start_epoch = _service_start_epoch(instance)
+        shared_mtime = ssh(f"stat -c %Y {shared_path} 2>/dev/null || echo 0")
+        instance_mtime = ssh(f"stat -c %Y {instance_path} 2>/dev/null || echo 0")
+        if shared_mtime.isdigit() and instance_mtime.isdigit():
+            if start_epoch is not None and int(shared_mtime) >= start_epoch:
+                record(
+                    FAIL,
+                    "accum_state_storage",
+                    f"Legacy shared circuit breaker state changed after service start: {shared_path}",
+                )
+                return
+            if int(shared_mtime) >= int(instance_mtime):
+                record(
+                    WARN,
+                    "accum_state_storage",
+                    f"Legacy shared circuit breaker state is as new/newer than instance state: {shared_path}",
+                )
+                return
+        record(
+            INFO,
+            "accum_state_storage",
+            f"Instance state active; legacy shared file is stale residue: {shared_path}",
+        )
+        return
+    record(PASS, "accum_state_storage", f"Instance-scoped circuit breaker state active: {instance_path}")
 
 
 def check_schema_on_vps(instance):
@@ -481,6 +641,7 @@ def run_pre(instance):
     check_schema_contract()
     check_changed_files()
     check_silent_exceptions()
+    check_config_drift(instance)
     capture_baseline(instance)
 
     print_verdict()
@@ -496,6 +657,8 @@ def run_post(instance):
     check_error_delta(instance)
     check_circuit_breaker(instance)
     check_orphan_trades(instance)
+    check_dashboard_api(instance)
+    check_accumulator_state_storage(instance)
     check_schema_on_vps(instance)
     check_checksum(instance)
 
@@ -521,6 +684,8 @@ def run_audit(instance):
     check_orphan_trades(instance)
     check_schema_on_vps(instance)
     check_config_drift(instance)
+    check_dashboard_api(instance)
+    check_accumulator_state_storage(instance)
     check_checksum(instance)
 
     print_verdict()

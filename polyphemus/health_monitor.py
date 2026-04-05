@@ -57,6 +57,19 @@ class HealthMonitor:
         self._momentum_feed = None
         self._signal_logger = None
         self._perf_db = None
+        self._accumulator_engine = None
+        self._last_accumulator_circuit_log = 0.0
+
+    def _get_accumulator_targets(self) -> tuple[list[str], list[str]]:
+        assets = [a.strip().upper() for a in getattr(self.config, "accum_assets", "").split(",") if a.strip()]
+        windows = [w.strip() for w in getattr(self.config, "accum_window_types", "").split(",") if w.strip()]
+        return assets, windows
+
+    def _accumulator_pipeline_focus(self) -> bool:
+        if not bool(getattr(self.config, "enable_accumulator", False)):
+            return False
+        assets, windows = self._get_accumulator_targets()
+        return bool(assets) and (assets != ["BTC"] or windows != ["5m"])
 
     def set_slack(self, slack_notifier):
         """Set Slack notifier for error rate alerts."""
@@ -71,6 +84,38 @@ class HealthMonitor:
         """Set DB-backed components used for pipeline watchdog checks."""
         self._signal_logger = signal_logger
         self._perf_db = perf_db
+
+    def set_accumulator_engine(self, accumulator_engine):
+        """Set accumulator engine for truthful watchdog diagnostics."""
+        self._accumulator_engine = accumulator_engine
+
+    def _get_accumulator_stats(self) -> dict:
+        """Best-effort accumulator stats snapshot for health decisions."""
+        if not self._accumulator_engine:
+            return {}
+        try:
+            stats = self._accumulator_engine.stats
+        except Exception:
+            return {}
+        return stats if isinstance(stats, dict) else {}
+
+    def _maybe_log_accumulator_circuit(self, now: float, prefix: str):
+        """Rate-limit repeated circuit-breaker watchdog messages."""
+        if now - self._last_accumulator_circuit_log < 900:
+            return
+        stats = self._get_accumulator_stats()
+        total_pnl = float(stats.get("total_pnl", 0.0))
+        loss_limit = float(stats.get("daily_loss_limit", 0.0))
+        entry_mode = stats.get("entry_mode", "unknown")
+        self._logger.warning(
+            "%s: accumulator circuit breaker active | entry_mode=%s | pnl=$%.2f vs limit=$%.2f. "
+            "No new entries are expected until operator reset/restart.",
+            prefix,
+            entry_mode,
+            total_pnl,
+            loss_limit,
+        )
+        self._last_accumulator_circuit_log = now
 
     def notify_ready(self):
         """Send systemd READY=1 notification."""
@@ -198,6 +243,15 @@ class HealthMonitor:
                         "signals_passed": gm.get("signals_passed", 0),
                         "rejection_reasons": gm.get("rejection_reasons", {}),
                     }
+                accum_stats = self._get_accumulator_stats()
+                if accum_stats:
+                    pipeline["accumulator"] = {
+                        "state": accum_stats.get("state", "unknown"),
+                        "entry_mode": accum_stats.get("entry_mode", "unknown"),
+                        "circuit_tripped": bool(accum_stats.get("circuit_tripped", False)),
+                        "total_pnl": accum_stats.get("total_pnl", 0.0),
+                        "daily_loss_limit": accum_stats.get("daily_loss_limit", 0.0),
+                    }
                 if pipeline:
                     health_record["pipeline"] = pipeline
 
@@ -281,6 +335,10 @@ class HealthMonitor:
         # silently broken (e.g., execute_buy crashing, balance check failing).
         # Born from: asyncio bug blocked all trades for hours while bot showed "active".
         if now and uptime_hours > 1.0 and guard_metrics.get('signals_passed', 0) > 5:
+            accum_stats = self._get_accumulator_stats()
+            if accum_stats.get("circuit_tripped", False):
+                self._maybe_log_accumulator_circuit(now, "ZERO TRADE ALERT suppressed")
+                return
             try:
                 perf_db_path = getattr(self._perf_db, "db_path", None)
                 if perf_db_path:
@@ -384,6 +442,21 @@ class HealthMonitor:
                 trade_conn.close()
         except Exception as exc:
             self._logger.warning(f"pipeline_watchdog query failed: {exc}")
+            return
+
+        accum_stats = self._get_accumulator_stats()
+        if accum_stats.get("circuit_tripped", False):
+            self._maybe_log_accumulator_circuit(now, "PIPELINE WATCHDOG")
+            return
+
+        if self._accumulator_pipeline_focus():
+            if int(accum_stats.get("scan_count", 0) or 0) == 0:
+                assets, windows = self._get_accumulator_targets()
+                self._logger.warning(
+                    "PIPELINE WATCHDOG: accumulator shadow has not scanned %s %s targets yet",
+                    "/".join(assets) or "configured",
+                    "/".join(windows) or "configured windows",
+                )
             return
 
         if not last_decision or now - float(last_decision) > 900:

@@ -75,6 +75,7 @@ export async function upsertLeadInAttio(data: AssessmentData) {
       parent_object: "people",
       parent_record_id: personId,
       title: `citability.dev scan: ${data.score}/${data.total}`,
+      format: "plaintext",
       content: noteContent,
     },
   })

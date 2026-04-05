@@ -53,6 +53,39 @@ Use `code-review-triage` (Haiku) before `code-reviewer` (Opus) for two-pass revi
 Use `test-runner` (Haiku) for test execution and result parsing.
 Use `status-checker` (Haiku) for VPS/service health checks.
 
+## Model Routing Cheat Sheet
+
+Default stack for this repo:
+- **Haiku finds**
+- **Sonnet builds**
+- **Opus decides**
+
+Use **Haiku** for:
+- file discovery and codebase exploration
+- quick reads and summaries
+- lightweight smoke checks
+- test execution and result triage
+- browser/UI verification
+
+Use **Sonnet** as the default for:
+- normal implementation work
+- multi-file bug fixes
+- API + frontend wiring
+- finishing partially completed work
+- crash recovery when a saved plan already exists
+- targeted verification-driven edits
+
+Use **Opus** for:
+- architecture decisions
+- deep root-cause analysis when the failure mode is unclear
+- live trading, money, or reliability-sensitive decisions
+- final review on risky changes
+
+Decision rule:
+- **Clear task, known files, known outcome** → Sonnet
+- **Mostly search, triage, or smoke-checking** → Haiku
+- **Unclear cause or expensive mistake if wrong** → Opus
+
 ## Compaction Resilience
 
 When working on complex multi-step tasks in this project:

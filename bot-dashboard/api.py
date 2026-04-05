@@ -1,4 +1,4 @@
-"""Bot Dashboard API — FastAPI backend for monitoring all Polymarket bots."""
+"""Polyphemus Dashboard API — FastAPI backend for monitoring trading bots."""
 
 import os
 import time
@@ -72,6 +72,28 @@ BOTS = {
         "health_dir": "/opt/lagbot/instances/pair_arb/data",
         "kill_switch": "/opt/lagbot/instances/pair_arb/KILL_SWITCH",
     },
+}
+
+# Futures trading bots (separate instrument class, different DB schema)
+FUTURES_BOTS = {
+    "bulenox": {
+        "db": "/opt/bulenox/bulenox-bot/data/trades.db",
+        "research_db": "/opt/bulenox/bulenox-bot/data/research.db",
+        "quant_dir": "/opt/bulenox/bulenox-bot/data/quant_factory",
+        "up_only_thesis": "/opt/bulenox/bulenox-bot/.omc/experiments/btc-up-only-fade-baseline-v1/current_status.json",
+        "env": "/opt/bulenox/bulenox-bot/.env",
+        "service": "bulenox",
+        "kill_switch": "/opt/bulenox/bulenox-bot/data/KILL_SWITCH",
+        "point_value": 0.10,  # USD per index point per MBT contract
+    },
+}
+
+FUTURES_SAFE_CONFIG_KEYS = {
+    "DRY_RUN", "SYMBOL", "EXCHANGE", "CONTRACTS", "MAX_OPEN_POSITIONS",
+    "TAKE_PROFIT_TICKS", "STOP_LOSS_TICKS", "MAX_HOLD_SECS", "TICK_SIZE",
+    "MOMENTUM_TRIGGER_PCT", "MOMENTUM_WINDOW_SECS", "ENTRY_COOLDOWN_SECS",
+    "MAX_DAILY_LOSS_USD", "MAX_TRAILING_DRAWDOWN", "PROFIT_TARGET",
+    "FORCE_CLOSE_CT", "POINT_VALUE", "BINANCE_SYMBOL",
 }
 
 # Config keys safe to expose (no secrets)
@@ -150,6 +172,29 @@ def read_env(path: str) -> dict:
     except FileNotFoundError:
         pass
     return result
+
+
+def normalize_up_only_thesis(payload: dict) -> dict:
+    """Normalize experiment status JSON into a dashboard-friendly thesis payload."""
+    if not isinstance(payload, dict):
+        return {}
+    thesis = payload.get("thesis")
+    if not isinstance(thesis, dict):
+        return payload
+    return {
+        "slug": payload.get("slug"),
+        "synced_at": payload.get("synced_at"),
+        "current_factory_stage": payload.get("current_factory_stage"),
+        "current_factory_verdict": payload.get("current_factory_verdict"),
+        "current_blockers": payload.get("current_blockers", []),
+        "up_only": payload.get("up_only", {}),
+        "direction_stats": payload.get("direction_stats", {}),
+        "current_verdict": thesis.get("current_verdict"),
+        "decision_table": thesis.get("decision_table", []),
+        "paper_live_gap": thesis.get("paper_live_gap", {}),
+        "consistency": thesis.get("consistency", {}),
+        "next_step": thesis.get("next_step"),
+    }
 
 
 def get_service_status(service: str) -> dict:
@@ -380,7 +425,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        # CSP: allow CDN for Chart.js + fonts, inline scripts/styles for dashboard HTML
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "frame-ancestors 'none'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "connect-src 'self'; "
+            "img-src 'self' data:; "
+            "base-uri 'none'; "
+            "form-action 'self'"
+        )
         return response
 
 
@@ -1911,6 +1968,593 @@ async def snipe_tracker(
         "by_exit_reason": sorted(by_exit.values(), key=lambda x: x["trades"], reverse=True),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent Findings Endpoint
+# ---------------------------------------------------------------------------
+
+AGENT_FINDINGS_DIR = "/opt/openclaw/agents/state/findings"
+AGENT_INTERVENTIONS_DIR = "/opt/openclaw/agents/state/interventions"
+
+
+@app.get("/api/agents/findings")
+async def agent_findings(
+    limit: int = Query(20, le=100),
+    agent: Optional[str] = Query(None),
+    token: str = Depends(verify_token),
+):
+    """Recent agent findings for dashboard display."""
+    findings_dir = Path(AGENT_FINDINGS_DIR)
+    if not findings_dir.exists():
+        return {"findings": [], "interventions": []}
+
+    findings = []
+    for f in sorted(findings_dir.glob("*.json"), reverse=True):
+        try:
+            data = json.loads(f.read_text())
+            if agent and data.get("agent") != agent:
+                continue
+            findings.append(data)
+            if len(findings) >= limit:
+                break
+        except Exception:
+            continue
+
+    interventions = []
+    int_dir = Path(AGENT_INTERVENTIONS_DIR)
+    if int_dir.exists():
+        for f in sorted(int_dir.glob("*.json"), reverse=True):
+            try:
+                data = json.loads(f.read_text())
+                if data.get("status") == "pending":
+                    interventions.append(data)
+            except Exception:
+                continue
+
+    return {"findings": findings, "interventions": interventions}
+
+
+# ---------------------------------------------------------------------------
+# Futures Trading Endpoints (CME MBT via Bulenox)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/futures/overview")
+async def futures_overview(token: str = Depends(verify_token)):
+    """Overview of all futures trading bots."""
+    bots_data = {}
+    total_pnl_pts = 0.0
+    total_trades = 0
+    total_wins = 0
+
+    for bot_name, bot_cfg in FUTURES_BOTS.items():
+        svc = get_service_status(bot_cfg["service"])
+        db_path = bot_cfg["db"]
+        pv = bot_cfg.get("point_value", 0.10)
+
+        stats = await query_db(db_path, """
+            SELECT
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl_pts > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_pts <= 0 THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(pnl_pts), 0) as total_pnl_pts,
+                ROUND(AVG(CASE WHEN pnl_pts > 0 THEN pnl_pts END), 2) as avg_win,
+                ROUND(AVG(CASE WHEN pnl_pts <= 0 THEN pnl_pts END), 2) as avg_loss
+            FROM trades
+        """)
+        s = stats[0] if stats else {}
+
+        dir_stats = await query_db(db_path, """
+            SELECT direction, COUNT(*) as n,
+                SUM(CASE WHEN pnl_pts > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(SUM(pnl_pts), 2) as pnl_pts
+            FROM trades GROUP BY direction
+        """)
+
+        shadow = await query_db(db_path, """
+            SELECT rejection_reason, COUNT(*) as n,
+                SUM(CASE WHEN pnl_pts > 0 THEN 1 ELSE 0 END) as would_win,
+                ROUND(SUM(pnl_pts), 2) as would_pnl
+            FROM shadow_trades WHERE outcome IS NOT NULL
+            GROUP BY rejection_reason
+        """)
+
+        last = await query_db(db_path, """
+            SELECT basket_id, direction, pnl_pts, entry_ts, exit_ts
+            FROM trades ORDER BY entry_ts DESC LIMIT 1
+        """)
+
+        n = s.get("total_trades", 0) or 0
+        wins = s.get("wins", 0) or 0
+        pnl_pts = s.get("total_pnl_pts", 0) or 0
+        total_pnl_pts += pnl_pts
+        total_trades += n
+        total_wins += wins
+
+        bots_data[bot_name] = {
+            "service": svc,
+            "total_pnl_pts": round(pnl_pts, 2),
+            "total_pnl_usd": round(pnl_pts * pv, 2),
+            "total_trades": n,
+            "win_rate": round((wins / n * 100) if n else 0, 1),
+            "avg_win": s.get("avg_win") or 0,
+            "avg_loss": s.get("avg_loss") or 0,
+            "directions": {r["direction"]: {"n": r["n"], "wins": r["wins"], "pnl_pts": r["pnl_pts"]} for r in dir_stats},
+            "shadow_stats": {r["rejection_reason"]: {"n": r["n"], "would_win": r["would_win"], "would_pnl": r["would_pnl"]} for r in shadow},
+            "last_trade": dict(last[0]) if last else None,
+            "point_value": pv,
+            "kill_switch": Path(bot_cfg["kill_switch"]).exists() if bot_cfg.get("kill_switch") else False,
+        }
+
+    pv = 0.10
+    return {
+        "total_pnl_pts": round(total_pnl_pts, 2),
+        "total_pnl_usd": round(total_pnl_pts * pv, 2),
+        "total_trades": total_trades,
+        "overall_win_rate": round((total_wins / total_trades * 100) if total_trades else 0, 1),
+        "bots": bots_data,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/futures/trades")
+async def futures_trades(
+    bot: Optional[str] = Query(None),
+    limit: int = Query(50, le=500),
+    token: str = Depends(verify_token),
+):
+    """Recent futures trades."""
+    all_trades = []
+    targets = {bot: FUTURES_BOTS[bot]} if bot and bot in FUTURES_BOTS else FUTURES_BOTS
+
+    for bot_name, bot_cfg in targets.items():
+        rows = await query_db(bot_cfg["db"], """
+            SELECT id, basket_id, symbol, direction, side, signal_pct,
+                   entry_price, exit_price, pnl_pts, entry_ts, exit_ts,
+                   exit_reason, mfe_ticks, mae_ticks
+            FROM trades ORDER BY entry_ts DESC LIMIT ?
+        """, (limit,))
+        for row in rows:
+            row["bot"] = bot_name
+            row["pnl_usd"] = round((row.get("pnl_pts") or 0) * bot_cfg.get("point_value", 0.10), 2)
+        all_trades.extend(rows)
+
+    all_trades.sort(key=lambda x: x.get("entry_ts") or 0, reverse=True)
+    return {"trades": all_trades[:limit]}
+
+
+@app.get("/api/futures/pnl")
+async def futures_pnl(
+    bot: Optional[str] = Query(None),
+    days: int = Query(30, le=90),
+    token: str = Depends(verify_token),
+):
+    """Daily P&L for futures bots."""
+    cutoff = time.time() - (days * 86400)
+    targets = {bot: FUTURES_BOTS[bot]} if bot and bot in FUTURES_BOTS else FUTURES_BOTS
+
+    daily = {}
+    for bot_name, bot_cfg in targets.items():
+        pv = bot_cfg.get("point_value", 0.10)
+        rows = await query_db(bot_cfg["db"], """
+            SELECT exit_ts, pnl_pts FROM trades
+            WHERE exit_ts IS NOT NULL AND exit_ts > ?
+            ORDER BY exit_ts ASC
+        """, (cutoff,))
+
+        for row in rows:
+            dt = datetime.fromtimestamp(row["exit_ts"], tz=timezone.utc)
+            ds = dt.strftime("%Y-%m-%d")
+            if ds not in daily:
+                daily[ds] = {"date": ds, "pnl": 0, "trades": 0, "wins": 0}
+            daily[ds]["pnl"] += (row["pnl_pts"] or 0) * pv
+            daily[ds]["trades"] += 1
+            if (row["pnl_pts"] or 0) > 0:
+                daily[ds]["wins"] += 1
+
+    result = []
+    if daily:
+        start = min(daily.keys())
+        end = max(daily.keys())
+        current = datetime.strptime(start, "%Y-%m-%d")
+        end_dt = datetime.strptime(end, "%Y-%m-%d")
+        cumulative = 0
+        while current <= end_dt:
+            ds = current.strftime("%Y-%m-%d")
+            d = daily.get(ds, {"date": ds, "pnl": 0, "trades": 0, "wins": 0})
+            d["pnl"] = round(d["pnl"], 2)
+            cumulative += d["pnl"]
+            d["cumulative"] = round(cumulative, 2)
+            result.append(d)
+            current += timedelta(days=1)
+
+    return {"daily": result}
+
+
+@app.get("/api/futures/config")
+async def futures_config(
+    bot: str = Query(...),
+    token: str = Depends(verify_token),
+):
+    """Futures bot config (safe keys only)."""
+    if bot not in FUTURES_BOTS:
+        raise HTTPException(404, "Unknown futures bot")
+    env_path = FUTURES_BOTS[bot]["env"]
+    result = {}
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key in FUTURES_SAFE_CONFIG_KEYS:
+                    result[key] = value.strip()
+    except FileNotFoundError:
+        pass
+    return {"config": result}
+
+
+@app.get("/api/futures/health")
+async def futures_health(token: str = Depends(verify_token)):
+    """Health status for futures bots."""
+    result = {}
+    for bot_name, bot_cfg in FUTURES_BOTS.items():
+        svc = get_service_status(bot_cfg["service"])
+        kill = Path(bot_cfg["kill_switch"]).exists() if bot_cfg.get("kill_switch") else False
+        result[bot_name] = {"service": svc, "kill_switch": kill}
+    return result
+
+
+@app.get("/api/futures/shadow")
+async def futures_shadow(
+    bot: str = Query(...),
+    limit: int = Query(20, le=100),
+    token: str = Depends(verify_token),
+):
+    """Shadow (counterfactual) trades for a futures bot."""
+    if bot not in FUTURES_BOTS:
+        raise HTTPException(404, "Unknown futures bot")
+    rows = await query_db(FUTURES_BOTS[bot]["db"], """
+        SELECT id, signal_ts, direction, entry_price, rejection_reason,
+               outcome, pnl_pts, resolved_ts
+        FROM shadow_trades WHERE outcome IS NOT NULL
+        ORDER BY signal_ts DESC LIMIT ?
+    """, (limit,))
+    return {"shadow_trades": rows}
+
+
+@app.get("/api/futures/quant-factory")
+async def futures_quant_factory(
+    bot: str = Query(...),
+    token: str = Depends(verify_token),
+):
+    """Quant Factory status for a futures bot."""
+    if bot not in FUTURES_BOTS:
+        raise HTTPException(404, "Unknown futures bot")
+
+    bot_cfg = FUTURES_BOTS[bot]
+    quant_dir = Path(bot_cfg.get("quant_dir", ""))
+    research_db = bot_cfg.get("research_db")
+    status_path = quant_dir / "status.json"
+    gates_path = quant_dir / "gates.json"
+    experiments_path = quant_dir / "experiments.jsonl"
+    agent_runs_path = quant_dir / "agent_runs.jsonl"
+
+    status_payload = {}
+    gates_payload = {}
+    experiments_payload = []
+    agent_runs_payload = []
+    up_only_thesis_payload = {}
+
+    if status_path.exists():
+        try:
+            status_payload = json.loads(status_path.read_text())
+        except Exception:
+            status_payload = {}
+    if gates_path.exists():
+        try:
+            gates_payload = json.loads(gates_path.read_text())
+        except Exception:
+            gates_payload = {}
+    if experiments_path.exists():
+        try:
+            experiments_payload = [
+                json.loads(line) for line in experiments_path.read_text().splitlines() if line.strip()
+            ]
+        except Exception:
+            experiments_payload = []
+    if agent_runs_path.exists():
+        try:
+            agent_runs_payload = [
+                json.loads(line) for line in agent_runs_path.read_text().splitlines() if line.strip()
+            ]
+        except Exception:
+            agent_runs_payload = []
+
+    thesis_path = Path(bot_cfg.get("up_only_thesis", ""))
+    if thesis_path.exists():
+        try:
+            up_only_thesis_payload = normalize_up_only_thesis(json.loads(thesis_path.read_text()))
+        except Exception:
+            up_only_thesis_payload = {}
+
+    if research_db and Path(research_db).exists():
+        signal_count = await query_db(bot_cfg["db"], "SELECT COUNT(*) AS n FROM signals")
+        snapshot_count = await query_db(research_db, "SELECT COUNT(*) AS n FROM feature_snapshots")
+        exec_count = await query_db(research_db, "SELECT COUNT(*) AS n FROM execution_events")
+        run_rows = await query_db(research_db, "SELECT run_id, hypothesis_id, status, owner_agent, started_at FROM experiment_runs ORDER BY started_at DESC LIMIT 20")
+        gate_rows = await query_db(research_db, "SELECT gate_id, subject_type, subject_id, verdict, decided_at, notes FROM gate_verdicts ORDER BY decided_at DESC LIMIT 10")
+        agent_rows = await query_db(research_db, "SELECT agent_run_id, agent_name, role, started_at, finished_at, status, blocking_issue FROM agent_runs ORDER BY started_at DESC LIMIT 10")
+
+        signal_n = int(signal_count[0]["n"]) if signal_count else 0
+        snapshot_n = int(snapshot_count[0]["n"]) if snapshot_count else 0
+        exec_n = int(exec_count[0]["n"]) if exec_count else 0
+        stage0_pass = signal_n > 0 and snapshot_n >= signal_n
+
+        live_status = {
+            "stage": "stage_1_baseline_freeze" if stage0_pass else "stage_0_instrumentation",
+            "verdict": "collecting" if stage0_pass else "blocked",
+            "current_blocker": None if stage0_pass else "stage_0_instrumentation",
+            "current_blockers": [] if stage0_pass else ["stage_0_instrumentation"],
+            "baseline_run_id": next((row["run_id"] for row in run_rows if row["run_id"] == "B0"), None),
+            "active_experiments": len([row for row in run_rows if row["status"] == "running"]),
+            "queued_experiments": len([row for row in run_rows if row["status"] == "queued"]),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "counts": {
+                "signals": signal_n,
+                "feature_snapshots": snapshot_n,
+                "execution_events": exec_n,
+            },
+        }
+        status_payload = {**live_status, **status_payload}
+        status_payload["counts"] = live_status["counts"]
+        status_payload["stage"] = status_payload.get("stage") or live_status["stage"]
+        status_payload["verdict"] = status_payload.get("verdict") or live_status["verdict"]
+        status_payload["current_blocker"] = status_payload.get("current_blocker", live_status["current_blocker"])
+        status_payload["current_blockers"] = status_payload.get("current_blockers", live_status["current_blockers"])
+        status_payload["baseline_run_id"] = status_payload.get("baseline_run_id", live_status["baseline_run_id"])
+        status_payload["active_experiments"] = len([row for row in run_rows if row["status"] == "running"])
+        status_payload["queued_experiments"] = len([row for row in run_rows if row["status"] == "queued"])
+        status_payload["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        if not gates_payload:
+            gates_payload = {"gates": gate_rows}
+        else:
+            gates_payload["gates"] = gate_rows
+            gates_payload["counts"] = live_status["counts"]
+        if not experiments_payload:
+            experiments_payload = run_rows
+        if not agent_runs_payload:
+            agent_runs_payload = agent_rows
+
+    return {
+        "status": status_payload,
+        "gates": gates_payload.get("gates", []),
+        "counts": gates_payload.get("counts", status_payload.get("counts", {})),
+        "metrics": gates_payload.get("metrics", {}),
+        "experiments": experiments_payload,
+        "agent_runs": agent_runs_payload,
+        "up_only_thesis": up_only_thesis_payload,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Adverse Selection Monitor
+# ---------------------------------------------------------------------------
+
+@app.get("/api/adverse-selection")
+async def adverse_selection(
+    bot: str = Query("emmanuel"),
+    days: int = Query(7, ge=1, le=90),
+    token: str = Depends(verify_token),
+):
+    """Adverse selection rate and bps distribution for post-fill Binance checks.
+
+    Returns COLLECTING status below n=50 (decision-contract constraint #5).
+    """
+    if bot not in BOTS:
+        raise HTTPException(404, f"Unknown bot: {bot}")
+    db_path = BOTS[bot]["db"]
+
+    cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    rows = await query_db(db_path, """
+        SELECT
+            COUNT(*) as n,
+            SUM(CASE WHEN adverse_fill_bps < 0 THEN 1 ELSE 0 END) as adverse_n,
+            ROUND(AVG(adverse_fill_bps), 4) as mean_bps,
+            ROUND(AVG(CASE WHEN adverse_fill_bps < 0 THEN adverse_fill_bps END), 4) as mean_adverse_bps,
+            ROUND(AVG(CASE WHEN adverse_fill_bps >= 0 THEN adverse_fill_bps END), 4) as mean_favorable_bps,
+            ROUND(AVG(check_window_secs), 1) as avg_window_secs,
+            MIN(adverse_fill_bps) as worst_bps,
+            MAX(adverse_fill_bps) as best_bps
+        FROM trades
+        WHERE adverse_fill_bps IS NOT NULL
+          AND is_error = 0
+          AND entry_time > ?
+    """, (cutoff,))
+
+    row = rows[0] if rows else {}
+    n = row.get("n") or 0
+
+    # n>=50 gate: show COLLECTING below threshold (decision-contract constraint #5)
+    if n < 50:
+        return {
+            "bot": bot,
+            "status": "COLLECTING",
+            "n": n,
+            "n_required": 50,
+            "message": f"COLLECTING ({n}/50) — adverse rate not yet actionable",
+            "days": days,
+        }
+
+    adverse_n = row.get("adverse_n") or 0
+    adverse_rate_pct = round(100.0 * adverse_n / n, 1) if n > 0 else None
+
+    return {
+        "bot": bot,
+        "status": "READY",
+        "n": n,
+        "days": days,
+        "confidence": confidence_label(n),
+        "adverse_rate_pct": adverse_rate_pct,
+        "mean_bps": row.get("mean_bps"),
+        "mean_adverse_bps": row.get("mean_adverse_bps"),
+        "mean_favorable_bps": row.get("mean_favorable_bps"),
+        "avg_window_secs": row.get("avg_window_secs"),
+        "worst_bps": row.get("worst_bps"),
+        "best_bps": row.get("best_bps"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pair Arb Dashboard
+# ---------------------------------------------------------------------------
+
+@app.get("/api/pair-arb")
+async def pair_arb_dashboard(
+    bot: Optional[str] = Query(None),
+    days: int = Query(7, ge=1, le=90),
+    token: str = Depends(verify_token),
+):
+    """Pair arb performance: pair_cost, fill rates, P&L, per-asset, orphan rate."""
+    cutoff = time.time() - (days * 86400)
+    targets = {bot: BOTS[bot]} if bot and bot in BOTS else BOTS
+
+    all_trades = []
+    for bot_name, bot_cfg in targets.items():
+        db_path = bot_cfg["db"]
+        if not os.path.exists(db_path):
+            continue
+        pnl_col = "pnl" if has_column(db_path, "trades", "pnl") else "profit_loss"
+        rows = await query_db(db_path, f"""
+            SELECT trade_id, slug, entry_time, entry_price, entry_size,
+                   exit_time, exit_reason, {pnl_col} as pnl, metadata, outcome
+            FROM trades
+            WHERE strategy = 'pair_arb' AND entry_time > ?
+            ORDER BY entry_time DESC
+        """, (cutoff,))
+        for r in rows:
+            r["bot"] = bot_name
+            if r.get("metadata"):
+                try:
+                    r["meta"] = json.loads(r["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    r["meta"] = {}
+            else:
+                r["meta"] = {}
+            all_trades.append(r)
+
+    # Summary stats
+    closed = [t for t in all_trades if t.get("exit_time")]
+    hedged = [t for t in closed if t.get("exit_reason") == "hedged_settlement"]
+    orphaned = [t for t in closed if t.get("exit_reason") == "orphaned_settlement"]
+    unwound = [t for t in closed if t.get("exit_reason") == "unwound"]
+    open_trades = [t for t in all_trades if not t.get("exit_time")]
+
+    total_pnl = sum(t.get("pnl") or 0 for t in closed)
+    hedged_pnl = sum(t.get("pnl") or 0 for t in hedged)
+
+    # Per-asset breakdown (extract asset from slug like "btc-updown-5m-...")
+    asset_stats = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0, "pair_costs": []})
+    for t in closed:
+        asset = (t.get("slug") or "").split("-")[0].upper()
+        pnl_val = t.get("pnl") or 0
+        meta_pc = (t.get("meta") or {}).get("pair_cost", 0)
+        pair_cost = meta_pc if meta_pc > 0 else (t.get("entry_price") or 0)
+        asset_stats[asset]["trades"] += 1
+        asset_stats[asset]["pnl"] += pnl_val
+        if pnl_val > 0:
+            asset_stats[asset]["wins"] += 1
+        if pair_cost > 0:
+            asset_stats[asset]["pair_costs"].append(pair_cost)
+
+    assets = []
+    for asset, s in sorted(asset_stats.items()):
+        n = s["trades"]
+        avg_pc = sum(s["pair_costs"]) / len(s["pair_costs"]) if s["pair_costs"] else 0
+        assets.append({
+            "asset": asset,
+            "trades": n,
+            "wins": s["wins"],
+            "wr": round(100 * s["wins"] / n, 1) if n else 0,
+            "pnl": round(s["pnl"], 2),
+            "avg_pair_cost": round(avg_pc, 4),
+        })
+
+    # Daily P&L series for Chart.js
+    daily = defaultdict(lambda: {"pnl": 0.0, "trades": 0, "hedged": 0, "unwound": 0})
+    for t in closed:
+        dt = datetime.fromtimestamp(_safe_ts(t["exit_time"]), tz=timezone.utc)
+        d = dt.strftime("%Y-%m-%d")
+        daily[d]["pnl"] += t.get("pnl") or 0
+        daily[d]["trades"] += 1
+        if t.get("exit_reason") == "hedged_settlement":
+            daily[d]["hedged"] += 1
+        elif t.get("exit_reason") == "unwound":
+            daily[d]["unwound"] += 1
+    daily_series = [{"date": k, **{kk: round(vv, 2) if isinstance(vv, float) else vv for kk, vv in v.items()}}
+                    for k, v in sorted(daily.items())]
+
+    # Pair cost time series (for scatter/line chart)
+    pair_cost_series = []
+    for t in sorted(all_trades, key=lambda x: x.get("entry_time") or 0):
+        meta_pc = (t.get("meta") or {}).get("pair_cost", 0)
+        pc = meta_pc if meta_pc > 0 else (t.get("entry_price") or 0)
+        if pc > 0:
+            pair_cost_series.append({
+                "time": t.get("entry_time"),
+                "pair_cost": round(pc, 4),
+                "asset": (t.get("slug") or "").split("-")[0].upper(),
+                "pnl": round(t.get("pnl") or 0, 4) if t.get("exit_time") else None,
+            })
+
+    n_closed = len(closed)
+    return {
+        "summary": {
+            "total": len(all_trades),
+            "open": len(open_trades),
+            "closed": n_closed,
+            "hedged": len(hedged),
+            "orphaned": len(orphaned),
+            "unwound": len(unwound),
+            "hedge_rate": round(100 * len(hedged) / n_closed, 1) if n_closed else 0,
+            "orphan_rate": round(100 * len(orphaned) / n_closed, 1) if n_closed else 0,
+            "unwind_rate": round(100 * len(unwound) / n_closed, 1) if n_closed else 0,
+            "total_pnl": round(total_pnl, 2),
+            "hedged_pnl": round(hedged_pnl, 2),
+            "avg_pnl": round(total_pnl / n_closed, 4) if n_closed else 0,
+            "confidence": confidence_label(n_closed),
+        },
+        "assets": assets,
+        "daily": daily_series,
+        "pair_costs": pair_cost_series,
+        "trades": [{
+            "trade_id": t.get("trade_id"),
+            "slug": t.get("slug"),
+            "bot": t.get("bot"),
+            "entry_time": t.get("entry_time"),
+            "pair_cost": (t.get("meta") or {}).get("pair_cost") or t.get("entry_price") or 0,
+            "up_price": (t.get("meta") or {}).get("up_price"),
+            "down_price": (t.get("meta") or {}).get("down_price"),
+            "size": t.get("entry_size"),
+            "exit_reason": t.get("exit_reason"),
+            "pnl": round(t.get("pnl") or 0, 4) if t.get("exit_time") else None,
+        } for t in all_trades[:100]],
+        "days": days,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Static File Serving (dashboard HTML/CSS/JS)
+# ---------------------------------------------------------------------------
+
+STATIC_DIR = os.environ.get("DASHBOARD_STATIC_DIR", "/opt/dashboard/static")
+if os.path.isdir(STATIC_DIR):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    logger.info(f"Static files served from {STATIC_DIR}")
 
 
 # ---------------------------------------------------------------------------

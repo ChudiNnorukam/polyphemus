@@ -14,6 +14,8 @@ import subprocess
 import os
 import sys
 from datetime import datetime, timezone
+from urllib.error import URLError
+from urllib.request import urlopen
 
 # NOTE: no imports from /opt/lagbot/lagbot/ (Bug #39 - types.py shadows stdlib)
 
@@ -33,11 +35,15 @@ INSTANCES = {
 }
 
 CONFIG_KEYS = [
-    "DRY_RUN", "ASSET_FILTER",
+    "DRY_RUN", "ENABLE_ACCUMULATOR", "ACCUM_DRY_RUN", "ACCUM_MAX_PAIR_COST",
+    "ENABLE_PAIR_ARB", "PAIR_ARB_DRY_RUN", "PAIR_ARB_MAX_PAIR_COST",
+    "ACCUM_MODE_ENABLED",
+    "DASHBOARD_HOST", "DASHBOARD_PORT",
+    "ASSET_FILTER",
     "CHEAP_SIDE_MIN_PRICE", "CHEAP_SIDE_MAX_PRICE", "MAX_ENTRY_PRICE",
     "CHEAP_SIDE_ACTIVE_HOURS",
     "POST_LOSS_COOLDOWN_MINS",
-    "ACCUM_MODE_ENABLED", "ACCUM_MAX_ROUNDS", "ACCUM_BET_PER_ROUND",
+    "ACCUM_MAX_ROUNDS", "ACCUM_BET_PER_ROUND",
     "PROFIT_TARGET_EARLY_ENABLED",
     "MOMENTUM_TRIGGER_PCT",
 ]
@@ -78,6 +84,25 @@ def service_status(service_name):
         return result.stdout.strip()
     except Exception:
         return "unknown"
+
+
+def get_dashboard_base(config):
+    host = config.get("DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1"
+    port = config.get("DASHBOARD_PORT", "8080") or "8080"
+    return f"http://{host}:{port}"
+
+
+def fetch_json(url, timeout=5):
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            return json_load_bytes(resp.read())
+    except (URLError, TimeoutError, ValueError, OSError) as e:
+        return {"_error": str(e)}
+
+
+def json_load_bytes(raw):
+    import json
+    return json.loads(raw.decode("utf-8"))
 
 
 def recent_errors(service_name, since_mins=5):
@@ -133,6 +158,11 @@ def run(days=7):
 
     for name, inst in INSTANCES.items():
         print(f"\n{'─'*30} {name.upper()} {'─'*30}")
+        config = read_env(inst["env"])
+        dashboard_base = get_dashboard_base(config)
+        accum = fetch_json(f"{dashboard_base}/api/accumulator")
+        status_api = fetch_json(f"{dashboard_base}/api/status")
+        balance_api = fetch_json(f"{dashboard_base}/api/balance")
 
         # Service health
         status = service_status(inst["service"])
@@ -146,6 +176,7 @@ def run(days=7):
             for e in errors:
                 print(f"    {e[-120:]}")
             investigate_flags.append(f"{name}: {len(errors)} recent errors")
+        print(f"  Dashboard: {dashboard_base}")
 
         # Open positions
         open_pos = db_query(
@@ -167,6 +198,48 @@ def run(days=7):
                 print(f"  Open positions: 0")
         else:
             print(f"  Open positions: DB error - {open_pos}")
+
+        # Accumulator truth surface
+        accum_enabled = config.get("ENABLE_ACCUMULATOR", "").lower() == "true"
+        if accum.get("_error"):
+            print(f"  Accumulator API: ERROR - {accum['_error']}")
+            if accum_enabled and status == "active":
+                investigate_flags.append(f"{name}: accumulator API unreachable on {dashboard_base}")
+        else:
+            effective_dry = status_api.get("effective_accumulator_dry_run")
+            if effective_dry is None:
+                effective_dry = accum.get("effective_accumulator_dry_run")
+            active_pairs = accum.get("active_positions", 0)
+            print("  Accumulator:")
+            print(f"    enabled={accum.get('enabled', False)} state={accum.get('state', 'unknown')} active_pairs={active_pairs}")
+            print(
+                f"    dry_run(config)={config.get('ACCUM_DRY_RUN', 'NOT SET')} "
+                f"effective_dry_run={effective_dry}"
+            )
+            print(
+                f"    best_bid_pair={accum.get('best_bid_pair', 'n/a')} "
+                f"orders={accum.get('orders_placed', 0)} placed/{accum.get('orders_filled', 0)} filled"
+            )
+            print(
+                f"    cycles=H{accum.get('hedged_count', 0)}/U{accum.get('unwound_count', 0)}/O{accum.get('orphaned_count', 0)} "
+                f"candidates={accum.get('candidates_seen', 0)} seen/{accum.get('candidates_rejected', 0)} rejected"
+            )
+            block_reason = accum.get("last_eval_block_reason") or "n/a"
+            print(f"    last_block={block_reason}")
+            if accum_enabled and config.get("DRY_RUN", "").lower() != config.get("ACCUM_DRY_RUN", "").lower():
+                halt_flags.append(
+                    f"{name}: DRY_RUN={config.get('DRY_RUN')} but ACCUM_DRY_RUN={config.get('ACCUM_DRY_RUN')}"
+                )
+            if accum_enabled and accum.get("candidates_seen", 0) > 0 and accum.get("orders_placed", 0) == 0:
+                investigate_flags.append(
+                    f"{name}: accumulator sees candidates but has placed 0 orders"
+                )
+
+        if not balance_api.get("_error"):
+            print(
+                f"  Balance API: ${balance_api.get('balance', 0)} "
+                f"(available=${balance_api.get('available', 0)} deployed=${balance_api.get('deployed', 0)})"
+            )
 
         # Performance (last N days, cheap_side, live, 0.01-0.50)
         perf = db_query(
@@ -233,7 +306,6 @@ def run(days=7):
                 print(f"    {b['bucket']}: n={b['n']} WR={b['wr']}% P&L=${b['pnl']}{flag}")
 
         # Config
-        config = read_env(inst["env"])
         if config:
             print(f"  Config:")
             for k in CONFIG_KEYS:

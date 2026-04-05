@@ -271,6 +271,8 @@ class AccumulatorPosition:
     down_qty: float = 0.0
     up_avg_price: float = 0.0
     down_avg_price: float = 0.0
+    up_fee_paid: float = 0.0
+    down_fee_paid: float = 0.0
     pair_cost: float = 0.0
     is_fully_hedged: bool = False
     pnl: Optional[float] = None

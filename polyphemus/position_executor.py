@@ -562,25 +562,43 @@ class PositionExecutor:
             fill_result = await self._poll_for_fill(order_id, token_id, price, size, max_polls=poll_max)
             fill_result.fill_time_ms = int((time.time() - _fill_start) * 1000)
 
-        # Adverse selection detection: did Binance move FOR or AGAINST us after fill?
-        if fill_result.success and self._momentum_feed:
+        # Adverse selection: schedule DB-queued check after epoch-bounded window.
+        # Crash-safe: trade_id persisted in DB at fill time; entry_binance captured here.
+        if fill_result.success and self._momentum_feed and self._performance_db:
             try:
-                fill_asset = signal.get("asset", slug.split("-")[0]).upper()
-                fill_dir = signal.get("outcome", "").lower()
-                entry_binance = getattr(self, '_pending_entry_binance_price', 0)
-                post_fill_binance = self._momentum_feed.get_latest_price(fill_asset) or 0
-                if entry_binance > 0 and post_fill_binance > 0:
-                    move = (post_fill_binance - entry_binance) / entry_binance
-                    favorable = (fill_dir == "up" and move > 0) or (fill_dir == "down" and move < 0)
-                    self._logger.info(
-                        f"ADVERSE_SELECTION_CHECK | {fill_asset} {fill_dir} | "
-                        f"binance_at_entry={entry_binance:.2f} | "
-                        f"binance_at_fill={post_fill_binance:.2f} | "
-                        f"move={move:+.4%} | "
-                        f"{'FAVORABLE' if favorable else 'ADVERSE'}"
+                _adv_asset = signal.get("asset", slug.split("-")[0]).upper()
+                _adv_dir = signal.get("outcome", "").lower()
+                _adv_entry_binance = getattr(self, '_pending_entry_binance_price', 0)
+                if _adv_entry_binance > 0 and order_id:
+                    # Compute epoch_end_time at fill time so it's available in the async task
+                    _adv_epoch_end = datetime.now(timezone.utc)
+                    if signal and signal.get("market_end_time_iso"):
+                        try:
+                            _s = str(signal["market_end_time_iso"]).replace("Z", "+00:00")
+                            _adv_epoch_end = datetime.fromisoformat(_s)
+                            if _adv_epoch_end.tzinfo is None:
+                                _adv_epoch_end = _adv_epoch_end.replace(tzinfo=timezone.utc)
+                        except (ValueError, OSError):
+                            pass
+                    else:
+                        _parts = slug.rsplit('-', 1)
+                        if len(_parts) == 2 and _parts[1].isdigit():
+                            from .types import parse_window_from_slug
+                            _epoch = int(_parts[1])
+                            _adv_epoch_end = datetime.fromtimestamp(
+                                _epoch + parse_window_from_slug(slug), tz=timezone.utc
+                            )
+                    asyncio.create_task(
+                        self._run_adverse_check(
+                            trade_id=order_id,
+                            entry_binance=_adv_entry_binance,
+                            fill_dir=_adv_dir,
+                            fill_asset=_adv_asset,
+                            epoch_end_time=_adv_epoch_end,
+                        )
                     )
-            except Exception:
-                pass
+            except Exception as _adv_err:
+                self._logger.debug(f"Adverse check schedule error: {_adv_err}")
 
         # Record maker fill outcome to optimizer (before fallback)
         if self._fill_optimizer and maker_offset_used is not None:
@@ -775,6 +793,53 @@ class PositionExecutor:
             fill_price=price,
             fill_size=size,
         )
+
+    async def _run_adverse_check(
+        self,
+        trade_id: str,
+        entry_binance: float,
+        fill_dir: str,
+        fill_asset: str,
+        epoch_end_time: datetime,
+    ) -> None:
+        """Check Binance price after fill to measure adverse selection.
+
+        Window capped at min(30s, epoch_time_remaining - 5s) — no post-resolution reads.
+        NULL written on Binance timeout to distinguish from missing record.
+        Fire-and-forget via asyncio.create_task(); zero execution path impact.
+        """
+        try:
+            secs_to_end = (epoch_end_time - datetime.now(timezone.utc)).total_seconds()
+            check_window = max(1, min(30, int(secs_to_end) - 5))
+            await asyncio.sleep(check_window)
+
+            check_price: Optional[float] = None
+            try:
+                loop = asyncio.get_event_loop()
+                check_price = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, self._momentum_feed.get_latest_price, fill_asset
+                    ),
+                    timeout=5.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                check_price = None
+
+            if self._performance_db:
+                self._performance_db.update_adverse_selection(
+                    trade_id=trade_id,
+                    binance_at_fill=entry_binance,
+                    binance_at_check=check_price,
+                    direction=fill_dir,
+                    check_window_secs=check_window,
+                )
+                self._logger.debug(
+                    f"ADVERSE_SELECTION | {fill_asset} {fill_dir} | "
+                    f"entry={entry_binance:.2f} check={check_price} "
+                    f"window={check_window}s | trade={trade_id}"
+                )
+        except Exception as e:
+            self._logger.debug(f"_run_adverse_check error: {e}")
 
     def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0, spread: Optional[float] = None, fear_greed: Optional[float] = None, signal: Optional[dict] = None) -> float:
         """Calculate position size using 3-layer sizing model + asset multiplier.

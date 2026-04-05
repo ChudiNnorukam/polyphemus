@@ -84,11 +84,12 @@ class SignalGuard:
         is_tugao9_copy = signal.get('source') == 'tugao9_copy'
         is_phase_gate_hedge = signal.get('source') == 'phase_gate_hedge'
         is_cheap_side = signal.get('source') == 'cheap_side'
+        is_lottery = signal.get('source') == 'lottery'
 
         # ====================================================================
         # FILTER 1: Direction Check (only BUY signals from DB)
         # ====================================================================
-        if not is_momentum and not is_window_delta and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds and not is_tugao9_copy and not is_phase_gate_hedge and not is_cheap_side:
+        if not is_momentum and not is_window_delta and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds and not is_tugao9_copy and not is_phase_gate_hedge and not is_cheap_side and not is_lottery:
             direction = signal.get('direction', '').upper()
             if direction != 'BUY':
                 reasons.append('not_buy_signal')
@@ -546,7 +547,7 @@ class SignalGuard:
         # VALIDATOR 4: Minimum Conviction Check
         # ====================================================================
         usdc_size = signal.get('usdc_size', 0)
-        if not is_momentum and not is_window_delta and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds and not is_tugao9_copy and not is_phase_gate_hedge and not is_cheap_side:
+        if not is_momentum and not is_window_delta and not is_weather and not is_snipe and not is_oracle_flip and not is_streak_contrarian and not is_flat_regime_rtds and not is_tugao9_copy and not is_phase_gate_hedge and not is_cheap_side and not is_lottery:
             if usdc_size < self._config.min_db_signal_size:
                 reasons.append('low_conviction')
 

@@ -1405,11 +1405,11 @@
     "window_start": 1773304800
   },
   "latest_reports": [
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/shadow_eval_polyphemus_latest.md",
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/shadow_eval_polyphemus_20260402_180026.md",
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/shadow_eval_polyphemus_20260402_175432.md",
     "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050337.md",
-    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050247.md",
-    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050246.md",
-    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050225.md",
-    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050321.md"
+    "/Users/chudinnorukam/Projects/business/polyphemus/dario_output/btc5m_ensemble_go_live_gate_20260313_050247.md"
   ],
   "research_brief": {
     "best_next_improvement": "Need 31.3 more hours of aligned shadow data.",

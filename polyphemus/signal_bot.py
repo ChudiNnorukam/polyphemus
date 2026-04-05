@@ -377,6 +377,7 @@ class SignalBot:
                 store=self._store,
                 config=config,
             )
+            self._health.set_accumulator_engine(self._accumulator)
             self._logger.info("Accumulator engine ENABLED")
 
         # 13a-ii. Auto-redeemer (for accumulator settlement + post-exit CTF redemption)
@@ -495,6 +496,8 @@ class SignalBot:
         if self._fill_optimizer:
             self._executor._fill_optimizer = self._fill_optimizer
         self._executor._performance_db = self._tracker.db  # Kelly sizing (no-op if disabled)
+        if self._accumulator:
+            self._accumulator._perf_db = self._tracker.db
         self._health.set_pipeline_dbs(
             signal_logger=self._signal_logger,
             perf_db=self._tracker.db,
@@ -1460,7 +1463,9 @@ class SignalBot:
                 metadata=signal.get("metadata"),
             )
 
-            # 7b. Slack notification (non-fatal)
+            # 7b. Adverse selection handled by position_executor._run_adverse_check (epoch-aware)
+
+            # 7c. Slack notification (non-fatal)
             try:
                 _bal = await self._balance.get_balance()
             except Exception:

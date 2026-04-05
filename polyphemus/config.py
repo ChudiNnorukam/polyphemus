@@ -121,8 +121,9 @@ class Settings(BaseSettings):
     accum_assets: str = "BTC"             # comma-separated assets
     accum_window_types: str = "5m"        # comma-separated: "5m", "15m", "5m,15m"
     accum_dry_run: bool = True
-    accum_max_pair_cost: float = 0.975    # max pair cost for entry (pure arbitrage)
-    accum_min_profit_per_share: float = 0.02  # min $0.02 profit per share
+    accum_entry_mode: str = "maker"       # explicit rollout: default stays legacy maker unless .env opts into fak
+    accum_max_pair_cost: float = 0.995    # max pair cost for entry (pure arbitrage)
+    accum_min_profit_per_share: float = 0.005  # min $0.005 profit per share
     accum_min_shares: float = 5.0         # minimum order size
     accum_max_shares: float = 500.0       # maximum order size per side
     accum_max_deployed_pct: float = 0.80  # max % of accum capital deployed
@@ -658,6 +659,14 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator('accum_entry_mode', mode='before')
+    @classmethod
+    def validate_accum_entry_mode(cls, v):
+        mode = str(v).strip().lower()
+        if mode not in {"maker", "fak"}:
+            raise ValueError(f"accum_entry_mode must be 'maker' or 'fak', got {v}")
+        return mode
+
     def get_asset_filter(self) -> List[str]:
         """Return allow-list of assets. Empty list means all assets allowed."""
         if not self.asset_filter.strip():
@@ -770,6 +779,7 @@ class Settings(BaseSettings):
             "momentum_max_epoch_elapsed_secs": self.momentum_max_epoch_elapsed_secs,
             "whipsaw_max_ratio": self.whipsaw_max_ratio,
             "entry_mode": self.entry_mode,
+            "accum_entry_mode": self.accum_entry_mode,
             "base_bet_pct": self.base_bet_pct,
             "max_bet": self.max_bet,
             "max_trade_amount": self.max_trade_amount,

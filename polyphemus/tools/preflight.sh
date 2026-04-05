@@ -18,7 +18,7 @@
 #   - SELL smoke test required before any live capital increase
 #   - Orphaned position count must be 0 before scale-up
 #   - Balance > threshold verified AFTER every restart
-#   - All transitions logged to /opt/polyphemus/data/preflight.log
+#   - All transitions logged to the instance data dir
 #   - .env edits use Python (not sed) - RTK hook safe
 #   - Idempotent: safe to re-run at any point
 
@@ -27,17 +27,18 @@ set -euo pipefail
 # ============================================================
 # CONFIG
 # ============================================================
-VPS="root@142.93.143.178"
-VPS_IP="142.93.143.178"
-ENV_PATH="/opt/polyphemus/polyphemus/.env"
-DATA_DIR="/opt/polyphemus/data"
-PKG_DIR="/opt/polyphemus/polyphemus"
-VENV="/opt/polyphemus/venv/bin/python3"
-API="http://localhost:8080"
+VPS="root@82.24.19.114"
+VPS_IP="82.24.19.114"
+INSTANCE="polyphemus"
+SERVICE="lagbot@$INSTANCE"
+ENV_PATH="/opt/lagbot/instances/$INSTANCE/.env"
+DATA_DIR="/opt/lagbot/instances/$INSTANCE/data"
+PKG_DIR="/opt/lagbot/lagbot"
+VENV="/opt/lagbot/venv/bin/python3"
 LOG_FILE="$DATA_DIR/preflight.log"
 
 # Expected VPS identity (hostname substring to match)
-EXPECTED_VPS_HOSTNAME_SUBSTR="polymarket-bot"
+EXPECTED_VPS_HOSTNAME_SUBSTR="example.com"
 
 # Stage gate thresholds
 STAGE2_MIN_NEW_CYCLES=5    # minimum new cycles (not historical) to pass Stage 1->2
@@ -118,6 +119,21 @@ preview_or_run() {
     fi
 }
 
+get_dashboard_port() {
+    local port
+    port=$(ssh "$VPS" "grep '^DASHBOARD_PORT=' $ENV_PATH 2>/dev/null | tail -1 | cut -d= -f2") || true
+    if [ -z "${port:-}" ]; then
+        port="8080"
+    fi
+    echo "$port"
+}
+
+get_api_base() {
+    local port
+    port=$(get_dashboard_port)
+    echo "http://127.0.0.1:$port"
+}
+
 # ============================================================
 # CHECK 1: VPS IDENTITY
 # verify we are operating on the right machine before any mutation
@@ -139,9 +155,9 @@ verify_vps_identity() {
 
     # Verify service exists on this VPS
     local svc_status
-    svc_status=$(ssh "$VPS" 'systemctl is-enabled polyphemus 2>/dev/null || echo not-found')
+    svc_status=$(ssh "$VPS" "systemctl is-enabled $SERVICE 2>/dev/null || echo not-found")
     if [ "$svc_status" = "not-found" ]; then
-        die "polyphemus service not found on $VPS. Wrong machine or service not installed."
+        die "$SERVICE not found on $VPS. Wrong machine or service not installed."
     fi
 
     log "VPS identity CONFIRMED: $actual_hostname ($actual_ip)"
@@ -152,16 +168,20 @@ verify_vps_identity() {
 # No live capital increase while orphaned positions exist
 # ============================================================
 check_no_orphans() {
+    local api
+    api=$(get_api_base)
     local orphan_count
-    orphan_count=$(ssh "$VPS" "curl -s $API/api/accumulator 2>/dev/null | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('orphaned_count',0))\"" 2>/dev/null || echo "ERROR")
+    local accum_json
+    accum_json=$(ssh "$VPS" "curl -fsS $api/api/accumulator 2>/dev/null" 2>/dev/null || echo "ERROR")
+    orphan_count=$(parse_int "$accum_json" "orphaned_count")
 
-    if [ "$orphan_count" = "ERROR" ]; then
+    if [ "$accum_json" = "ERROR" ]; then
         log "WARNING: Could not fetch orphan count. Assuming 0 and continuing."
         return 0
     fi
 
     if [ "$orphan_count" -gt 0 ]; then
-        die "Orphaned positions detected: $orphan_count. Wait for redeemer to settle or manually redeem before scaling capital. Check: ssh $VPS journalctl -u polyphemus -n 50 | grep redeemer"
+        die "Orphaned positions detected: $orphan_count. Wait for redeemer to settle or manually redeem before scaling capital. Check: ssh $VPS journalctl -u $SERVICE -n 50 | grep redeemer"
     fi
 
     log "Orphan check PASSED: 0 orphaned positions"
@@ -173,11 +193,15 @@ check_no_orphans() {
 # ============================================================
 check_balance_after_restart() {
     local min_bal="${1:-$MIN_LIVE_BALANCE}"
+    local api
+    api=$(get_api_base)
     log "Waiting 15s for service startup before balance check..."
     sleep 15
 
+    local balance_json
+    balance_json=$(ssh "$VPS" "curl -fsS $api/api/balance 2>/dev/null" 2>/dev/null || echo "{}")
     local balance
-    balance=$(ssh "$VPS" "curl -s $API/api/balance 2>/dev/null | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('balance', d.get('usdc_balance', 0)))\"" 2>/dev/null || echo "0")
+    balance=$(parse_float "$balance_json" "balance")
 
     log "Post-restart balance: \$$balance"
 
@@ -185,10 +209,35 @@ check_balance_after_restart() {
     is_sufficient=$(python3 -c "print('yes' if float('${balance:-0}') >= $min_bal else 'no')" 2>/dev/null || echo "no")
 
     if [ "$is_sufficient" != "yes" ]; then
-        die "Balance \$$balance is below minimum \$$min_bal after restart. Possible auth failure or wrong .env. Check: ssh $VPS journalctl -u polyphemus -n 30 --no-pager"
+        die "Balance \$$balance is below minimum \$$min_bal after restart. Possible auth failure or wrong .env. Check: ssh $VPS journalctl -u $SERVICE -n 30 --no-pager"
     fi
 
     log "Balance gate PASSED: \$$balance >= \$$min_bal"
+}
+
+check_dry_run_contract() {
+    local dr adr
+    dr=$(ssh "$VPS" "grep '^DRY_RUN=' $ENV_PATH 2>/dev/null | tail -1 | cut -d= -f2")
+    adr=$(ssh "$VPS" "grep '^ACCUM_DRY_RUN=' $ENV_PATH 2>/dev/null | tail -1 | cut -d= -f2")
+    if [ -z "${dr:-}" ] || [ -z "${adr:-}" ]; then
+        die "Missing DRY_RUN or ACCUM_DRY_RUN in $ENV_PATH"
+    fi
+    if [ "$dr" != "$adr" ]; then
+        die "Accumulator dry-run mismatch: DRY_RUN=$dr ACCUM_DRY_RUN=$adr"
+    fi
+    log "Dry-run contract PASSED: DRY_RUN=$dr ACCUM_DRY_RUN=$adr"
+}
+
+check_circuit_breaker_storage() {
+    local shared_path="/opt/lagbot/data/circuit_breaker.json"
+    local instance_path="$DATA_DIR/circuit_breaker.json"
+    local shared_exists instance_exists
+    shared_exists=$(ssh "$VPS" "test -f $shared_path && echo yes || echo no")
+    instance_exists=$(ssh "$VPS" "test -f $instance_path && echo yes || echo no")
+    if [ "$instance_exists" != "yes" ] && [ "$shared_exists" = "yes" ]; then
+        die "Accumulator still using legacy shared circuit breaker state at $shared_path"
+    fi
+    log "Circuit breaker storage check PASSED: instance_path=$instance_exists shared_path=$shared_exists"
 }
 
 # ============================================================
@@ -210,11 +259,11 @@ import os
 import time
 
 # Must run from outside the package dir to avoid types.py shadow
-os.chdir("/opt/polyphemus")
-sys.path.insert(0, "/opt/polyphemus")
+os.chdir("/opt/lagbot")
+sys.path.insert(0, "/opt/lagbot")
 
 from dotenv import load_dotenv
-load_dotenv("/opt/polyphemus/polyphemus/.env")
+load_dotenv("/opt/lagbot/instances/polyphemus/.env")
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
@@ -410,7 +459,7 @@ stop_service() {
         return 0
     fi
     log "Stopping polyphemus service..."
-    ssh "$VPS" "systemctl stop polyphemus" || die "Failed to stop service"
+    ssh "$VPS" "systemctl stop $SERVICE" || die "Failed to stop service"
     log "Service stopped."
 }
 
@@ -422,7 +471,7 @@ start_service() {
     log "Clearing pycache..."
     ssh "$VPS" "find $PKG_DIR -name __pycache__ -exec rm -rf {} + 2>/dev/null; echo cleared"
     log "Starting polyphemus service..."
-    ssh "$VPS" "systemctl start polyphemus" || die "Failed to start service"
+    ssh "$VPS" "systemctl start $SERVICE" || die "Failed to start service"
     log "Service started."
 }
 
@@ -435,7 +484,9 @@ verify_env_written() {
 # ACCUMULATOR STATE READER
 # ============================================================
 get_accum_state() {
-    ssh "$VPS" "curl -s $API/api/accumulator 2>/dev/null" || echo "{}"
+    local api
+    api=$(get_api_base)
+    ssh "$VPS" "curl -fsS $api/api/accumulator 2>/dev/null" || echo "{}"
 }
 
 parse_int() {
@@ -494,7 +545,7 @@ wait_for_gate() {
 
         # Starvation check (last 100 log lines)
         local starved
-        starved=$(ssh "$VPS" "journalctl -u polyphemus -n 100 --no-pager 2>/dev/null | grep -c 'insufficient_capital'" || echo "0")
+        starved=$(ssh "$VPS" "journalctl -u $SERVICE -n 100 --no-pager 2>/dev/null | grep -c 'insufficient_capital'" || echo "0")
 
         log "$stage_label | new: hedged=$new_hedged unwound=$new_unwound total=$new_total | consec=$cur_consec orphans=$cur_orphaned starved=$starved"
 
@@ -536,7 +587,7 @@ wait_for_gate() {
         # PnL gate (optional)
         if [ -n "$min_pnl" ]; then
             local session_pnl
-            session_pnl=$(parse_float "$data" "session_pnl")
+            session_pnl=$(parse_float "$data" "total_pnl")
             local pnl_ok
             pnl_ok=$(python3 -c "print('yes' if float('${session_pnl:-0}') >= float('$min_pnl') else 'no')" 2>/dev/null || echo "yes")
             if [ "$pnl_ok" != "yes" ]; then
@@ -557,6 +608,8 @@ wait_for_gate() {
 # ============================================================
 if $STATUS_ONLY; then
     verify_vps_identity
+    check_dry_run_contract
+    check_circuit_breaker_storage
     data=$(get_accum_state)
     echo "--- Accumulator State ---"
     echo "$data" | python3 -m json.tool 2>/dev/null || echo "$data"
@@ -574,6 +627,8 @@ fi
 # ============================================================
 if $SMOKE_ONLY; then
     verify_vps_identity
+    check_dry_run_contract
+    check_circuit_breaker_storage
     run_sell_smoke_test
     exit 0
 fi
@@ -600,6 +655,8 @@ $PREVIEW && log "[DRY-RUN MODE: no changes will be applied]"
 
 # Step 0: Always verify VPS identity first
 verify_vps_identity
+check_dry_run_contract
+check_circuit_breaker_storage
 
 case "$STAGE" in
 
@@ -673,7 +730,7 @@ case "$STAGE" in
 
     # Verify Stage 3 was profitable enough
     data=$(get_accum_state)
-    session_pnl=$(parse_float "$data" "session_pnl")
+    session_pnl=$(parse_float "$data" "total_pnl")
     consec=$(parse_int "$data" "consecutive_unwinds")
     log "Pre-Stage-4 check: session_pnl=\$$session_pnl consecutive_unwinds=$consec"
 

@@ -235,9 +235,9 @@ class CheapSideSignal:
                 if not outcome:
                     continue
 
-                # Book imbalance confirmation (skip if book doesn't confirm direction)
-                min_imbalance = getattr(self._config, 'cheap_side_min_imbalance', 0.0)
-                if min_imbalance > 0 and self._clob:
+                # Book imbalance: always compute for logging; filter only if min_imbalance > 0
+                book_imbalance = None
+                if self._clob:
                     try:
                         book = await asyncio.wait_for(
                             self._clob.get_order_book(token_id),
@@ -249,16 +249,17 @@ class CheapSideSignal:
                             bid_depth = sum(float(b.get("size", 0)) for b in bids[:5])
                             ask_depth = sum(float(a.get("size", 0)) for a in asks[:5])
                             total = bid_depth + ask_depth
-                            imbalance = bid_depth / total if total > 0 else 0.5
-                            if imbalance < min_imbalance:
-                                self._logger.debug(
-                                    f"CHEAP SIDE SKIP | {slug} {outcome} | "
-                                    f"imbalance={imbalance:.2f} < {min_imbalance} | "
-                                    f"bid={bid_depth:.0f} ask={ask_depth:.0f}"
-                                )
-                                continue
+                            book_imbalance = bid_depth / total if total > 0 else 0.5
                     except Exception:
-                        pass  # proceed without imbalance check on error
+                        pass  # proceed without imbalance data on error
+
+                min_imbalance = getattr(self._config, 'cheap_side_min_imbalance', 0.0)
+                if min_imbalance > 0 and book_imbalance is not None and book_imbalance < min_imbalance:
+                    self._logger.debug(
+                        f"CHEAP SIDE SKIP | {slug} {outcome} | "
+                        f"imbalance={book_imbalance:.2f} < {min_imbalance}"
+                    )
+                    continue
 
                 self._signaled_slugs.add(slug)
 
@@ -289,6 +290,8 @@ class CheapSideSignal:
                         "market_window_secs": window,
                         "momentum_pct": 0,
                         "entry_mode_override": "fak",
+                        "book_imbalance": book_imbalance,
+                        "other_mid": other_mid,
                     }
                     await self._on_signal(signal)
 

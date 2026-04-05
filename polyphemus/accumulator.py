@@ -13,9 +13,12 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import aiohttp
+
+if TYPE_CHECKING:
+    from .performance_db import PerformanceDB
 
 from .config import Settings, setup_logger
 from .types import (
@@ -49,8 +52,15 @@ class AccumulatorEngine:
         self._balance = balance
         self._store = store
         self._config = config
-        self._dry_run = config.accum_dry_run
+        self._effective_dry_run = bool(config.dry_run or config.accum_dry_run)
+        if bool(config.dry_run) != bool(config.accum_dry_run):
+            raise ValueError(
+                "Accumulator requires DRY_RUN and ACCUM_DRY_RUN to match. "
+                f"Got DRY_RUN={config.dry_run} ACCUM_DRY_RUN={config.accum_dry_run}."
+            )
+        self._dry_run = self._effective_dry_run
         self._logger = setup_logger("polyphemus.accumulator")
+        self._perf_db: "Optional[PerformanceDB]" = None
 
         # State — concurrent positions keyed by slug
         self._positions: dict[str, AccumulatorPosition] = {}
@@ -67,6 +77,11 @@ class AccumulatorEngine:
         self._last_log_ts: float = 0.0
         self._last_eval_log_ts: float = 0.0
         self._eval_block_reason: str = ""
+        self._last_eval_block_reason: str = ""
+        self._last_candidate_slug: str = ""
+        self._last_candidate_bid_pair: float = 0.0
+        self._candidates_seen: int = 0
+        self._candidates_rejected: int = 0
 
         # Abandoned slug cooldown: slug → market_end_time (don't re-enter)
         self._abandoned_slugs: dict[str, datetime] = {}
@@ -93,36 +108,52 @@ class AccumulatorEngine:
 
         # Circuit breaker: stop trading on sustained losses
         self._consecutive_unwinds = 0
-        self._max_consecutive_unwinds = 3
+        self._max_consecutive_unwinds = 5
         self._daily_loss_limit = -abs(self._config.max_daily_loss)
         self._circuit_tripped = False
-        self._cb_state_path = os.path.join(
+        self._cb_state_path = os.path.join(self._config.lagbot_data_dir, "circuit_breaker.json")
+        self._legacy_cb_state_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "data", "circuit_breaker.json"
         )
         self._load_circuit_breaker_state()
 
     def _load_circuit_breaker_state(self):
         """Load persisted circuit breaker PnL from disk."""
-        try:
-            with open(self._cb_state_path, "r") as f:
-                state = json.load(f)
-            self._accum_total_pnl = state.get("total_pnl", 0.0)
-            self._accum_hedged_count = state.get("hedged_count", 0)
-            self._accum_unwound_count = state.get("unwound_count", 0)
-            self._consecutive_unwinds = state.get("consecutive_unwinds", 0)
-            if self._accum_total_pnl < self._daily_loss_limit:
-                self._circuit_tripped = True
-                self._logger.warning(
-                    f"Circuit breaker TRIPPED on load: PnL ${self._accum_total_pnl:.2f}"
-                )
-            self._logger.info(
-                f"Loaded circuit breaker state: pnl=${self._accum_total_pnl:.2f} "
-                f"hedged={self._accum_hedged_count} unwound={self._accum_unwound_count}"
+        loaded_from = None
+        state = None
+        for candidate in (self._cb_state_path, self._legacy_cb_state_path):
+            try:
+                with open(candidate, "r") as f:
+                    state = json.load(f)
+                loaded_from = candidate
+                break
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                self._logger.warning(f"Failed to load circuit breaker state from {candidate}: {e}")
+
+        if not state:
+            return
+
+        self._accum_total_pnl = state.get("total_pnl", 0.0)
+        self._accum_hedged_count = state.get("hedged_count", 0)
+        self._accum_unwound_count = state.get("unwound_count", 0)
+        self._consecutive_unwinds = state.get("consecutive_unwinds", 0)
+        self._accum_orphaned_count = state.get("orphaned_count", 0)
+        if self._accum_total_pnl < self._daily_loss_limit:
+            self._circuit_tripped = True
+            self._logger.warning(
+                f"Circuit breaker TRIPPED on load: PnL ${self._accum_total_pnl:.2f}"
             )
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            self._logger.warning(f"Failed to load circuit breaker state: {e}")
+        self._logger.info(
+            f"Loaded circuit breaker state: pnl=${self._accum_total_pnl:.2f} "
+            f"hedged={self._accum_hedged_count} unwound={self._accum_unwound_count}"
+        )
+        if loaded_from == self._legacy_cb_state_path and self._legacy_cb_state_path != self._cb_state_path:
+            self._logger.warning(
+                f"Migrating legacy circuit breaker state into instance data dir: {self._cb_state_path}"
+            )
+            self._save_circuit_breaker_state()
 
     def _save_circuit_breaker_state(self):
         """Persist circuit breaker PnL to disk after each settle/unwind."""
@@ -152,6 +183,8 @@ class AccumulatorEngine:
     @property
     def stats(self) -> dict:
         """Stats for dashboard API."""
+        assets = [a.strip().upper() for a in self._config.accum_assets.split(",") if a.strip()]
+        window_types = [w.strip() for w in self._config.accum_window_types.split(",") if w.strip()]
         positions = []
         for pos in self._positions.values():
             positions.append({
@@ -160,13 +193,19 @@ class AccumulatorEngine:
                 "up_qty": pos.up_qty,
                 "down_qty": pos.down_qty,
                 "pair_cost": round(pos.pair_cost, 4),
+                "up_fee_paid": round(pos.up_fee_paid, 4),
+                "down_fee_paid": round(pos.down_fee_paid, 4),
                 "reprice_count": pos.reprice_count,
                 "is_hedged": pos.is_fully_hedged,
             })
         return {
             "state": self._get_aggregate_state(),
+            "entry_mode": self._accum_entry_mode(),
+            "assets": assets,
+            "window_types": window_types,
             "active_positions": len(self._positions),
             "max_concurrent": self._config.accum_max_concurrent,
+            "daily_loss_limit": round(self._daily_loss_limit, 2),
             "positions": positions,
             "scan_count": self._scan_count,
             "best_bid_pair": round(self._best_bid_pair, 4),
@@ -177,6 +216,15 @@ class AccumulatorEngine:
             "hedged_count": self._accum_hedged_count,
             "orphaned_count": self._accum_orphaned_count,
             "unwound_count": self._accum_unwound_count,
+            "consecutive_unwinds": self._consecutive_unwinds,
+            "circuit_tripped": self._circuit_tripped,
+            "last_candidate_slug": self._last_candidate_slug,
+            "last_candidate_bid_pair": round(self._last_candidate_bid_pair, 4),
+            "last_eval_block_reason": self._last_eval_block_reason,
+            "candidates_seen": self._candidates_seen,
+            "candidates_rejected": self._candidates_rejected,
+            "accum_dry_run": bool(self._config.accum_dry_run),
+            "effective_accumulator_dry_run": bool(self._dry_run),
             "settlements": self._settlements[-20:],  # Last 20 for dashboard
         }
 
@@ -310,25 +358,27 @@ class AccumulatorEngine:
                 best_pair = bid_pair_cost
                 best_slug = market["slug"]
 
+            max_side = self._get_param('accum_max_side_price')
+            if best_bid_up > max_side or best_bid_down > max_side:
+                continue
+
             if self._evaluate_opportunity(best_bid_up, best_bid_down):
-                pos = AccumulatorPosition(
-                    slug=market["slug"],
-                    window_secs=market["window_secs"],
-                    state=AccumulatorState.SCANNING,
-                    up_token_id=market["up_token_id"],
-                    down_token_id=market["down_token_id"],
-                    market_end_time=market["expires_at"],
-                    entry_time=datetime.now(tz=timezone.utc),
-                    condition_id=market.get("condition_id", ""),
-                )
-                self._positions[market["slug"]] = pos
+                self._candidates_seen += 1
+                self._last_candidate_slug = market["slug"]
+                self._last_candidate_bid_pair = bid_pair_cost
                 self._logger.info(
-                    f"Opportunity found: {market['slug']} | "
+                    f"Candidate found: {market['slug']} | "
                     f"up_bid={best_bid_up:.3f} down_bid={best_bid_down:.3f} "
-                    f"bid_pair={bid_pair_cost:.4f} | "
-                    f"active={len(self._positions)}/{self._config.accum_max_concurrent}"
+                    f"bid_pair={bid_pair_cost:.4f}"
                 )
-                return  # One new opportunity per scan cycle
+                entered = await self._start_candidate_position(market)
+                if entered:
+                    return  # One new active opportunity per scan cycle
+                self._candidates_rejected += 1
+                self._logger.info(
+                    f"Candidate rejected before activation: {market['slug']} | "
+                    f"reason={self._last_eval_block_reason or 'unknown'}"
+                )
 
         # Update stats for dashboard
         if best_pair is not None:
@@ -348,21 +398,227 @@ class AccumulatorEngine:
                 self._logger.info(f"Scan #{self._scan_count}: {len(markets)} markets, no valid books")
             self._last_log_ts = now
 
-    async def _evaluate_and_enter(self, pos: AccumulatorPosition):
-        """SCANNING: Place both maker BUY orders simultaneously, transition to ACCUMULATING.
+    async def _start_candidate_position(self, market: dict) -> bool:
+        """Attempt to activate a discovered candidate into a live tracked position."""
+        pos = AccumulatorPosition(
+            slug=market["slug"],
+            window_secs=market["window_secs"],
+            state=AccumulatorState.SCANNING,
+            up_token_id=market["up_token_id"],
+            down_token_id=market["down_token_id"],
+            market_end_time=market["expires_at"],
+            entry_time=datetime.now(tz=timezone.utc),
+            condition_id=market.get("condition_id", ""),
+        )
+        entered = await self._evaluate_and_enter(pos)
+        if entered:
+            self._positions[market["slug"]] = pos
+        return entered
 
-        Uses BID prices for pair_cost check (maker economics — we post at bid, earn the spread).
-        Both orders placed at once via asyncio.gather to eliminate sequential fill race condition.
-        If first leg fills but second doesn't within accum_hedge_deadline_secs, _accumulate_both_sides
-        cancels the unfilled leg and unwinds the filled leg via _unwind_orphan().
+    def _accum_entry_mode(self) -> str:
+        """Return the configured accumulator entry mode."""
+        return str(getattr(self._config, "accum_entry_mode", "maker")).strip().lower()
+
+    @staticmethod
+    def _estimate_taker_fee_per_share(price: float) -> float:
+        """Estimate Polymarket taker fee per share at a given fill price."""
+        return price * (1.0 - price) * 0.0624
+
+    async def _fetch_fill_details(
+        self,
+        order_id: str,
+        fallback_price: float,
+        fallback_qty: float,
+    ) -> tuple[float, float]:
+        """Return actual fill price and matched size for a completed order."""
+        if not order_id:
+            return fallback_price, fallback_qty
+        try:
+            details = await self._clob.get_order_details(order_id)
+        except Exception:
+            return fallback_price, fallback_qty
+        if not details:
+            return fallback_price, fallback_qty
+        fill_price = float(details.get("price") or details.get("average_price") or fallback_price)
+        fill_qty = float(details.get("size_matched") or fallback_qty)
+        return fill_price, fill_qty
+
+    def _register_filled_side(
+        self,
+        pos: AccumulatorPosition,
+        side: str,
+        price: float,
+        qty: float,
+        order_id: str,
+    ):
+        """Persist a filled accumulator leg into the in-memory position."""
+        if qty <= 0:
+            return
+        fee_paid = self._estimate_taker_fee_per_share(price) * qty
+        self._apply_fill(pos, side, price, qty, order_id)
+        if side == "UP":
+            pos.up_fee_paid += fee_paid
+        else:
+            pos.down_fee_paid += fee_paid
+
+    async def _evaluate_and_enter_fak(
+        self,
+        pos: AccumulatorPosition,
+        secs_left: float,
+        up_book: dict,
+        down_book: dict,
+    ) -> bool:
+        """Enter the pair with immediate taker fills when fee-adjusted edge remains positive."""
+        up_asks = up_book.get("asks", [])
+        down_asks = down_book.get("asks", [])
+        if not up_asks or not down_asks:
+            self._eval_block_reason = f"empty_asks: up_asks={len(up_asks)} down_asks={len(down_asks)}"
+            self._last_eval_block_reason = self._eval_block_reason
+            self._log_eval_heartbeat(pos, secs_left)
+            return False
+
+        up_ask = float(up_asks[0]["price"])
+        down_ask = float(down_asks[0]["price"])
+
+        max_side = self._get_param('accum_max_side_price')
+        if up_ask > max_side or down_ask > max_side:
+            self._eval_block_reason = (
+                f"directional: up_ask={up_ask:.3f} down_ask={down_ask:.3f} "
+                f"max_side=${max_side:.2f}"
+            )
+            self._last_eval_block_reason = self._eval_block_reason
+            self._log_eval_heartbeat(pos, secs_left)
+            return False
+
+        up_fee = self._estimate_taker_fee_per_share(up_ask)
+        down_fee = self._estimate_taker_fee_per_share(down_ask)
+        total_pair_cost = up_ask + down_ask + up_fee + down_fee
+        max_pair = self._get_param('accum_max_pair_cost')
+        if total_pair_cost >= max_pair:
+            self._eval_block_reason = (
+                f"ask_pair_expensive: ${total_pair_cost:.4f} >= ${max_pair} "
+                f"(up_ask={up_ask:.3f} down_ask={down_ask:.3f} fees=${up_fee + down_fee:.4f})"
+            )
+            self._last_eval_block_reason = self._eval_block_reason
+            self._log_eval_heartbeat(pos, secs_left)
+            return False
+
+        profit_per_share = 1.00 - total_pair_cost
+        min_profit = self._get_param('accum_min_profit_per_share')
+        if profit_per_share < min_profit:
+            self._eval_block_reason = (
+                f"profit_too_low: ${profit_per_share:.4f} < ${min_profit:.4f} "
+                f"(ask_pair=${total_pair_cost:.4f})"
+            )
+            self._last_eval_block_reason = self._eval_block_reason
+            self._log_eval_heartbeat(pos, secs_left)
+            return False
+
+        available = await self._balance.get_available_for_accumulator()
+        gross_pair_cost = up_ask + down_ask
+        if available < self._config.accum_min_shares * gross_pair_cost:
+            self._eval_block_reason = f"insufficient_capital: ${available:.2f}"
+            self._last_eval_block_reason = self._eval_block_reason
+            self._log_eval_heartbeat(pos, secs_left)
+            return False
+
+        target_shares = min(available / gross_pair_cost, self._config.accum_max_shares)
+        target_shares = max(target_shares, self._config.accum_min_shares)
+        pos.target_shares = target_shares
+
+        up_amount = round(target_shares * up_ask, 2)
+        down_amount = round(target_shares * down_ask, 2)
+        self._logger.info(
+            f"FAK entry attempt: {pos.slug} | "
+            f"up_ask={up_ask:.3f} down_ask={down_ask:.3f} "
+            f"fee_pair=${up_fee + down_fee:.4f} total_pair=${total_pair_cost:.4f} | "
+            f"{target_shares:.0f}sh | ${up_amount + down_amount:.2f} gross"
+        )
+
+        if self._dry_run:
+            self._register_filled_side(pos, "UP", up_ask, target_shares, f"dry_up_{int(time.time())}")
+            self._register_filled_side(pos, "DOWN", down_ask, target_shares, f"dry_down_{int(time.time())}")
+            pos.pair_cost = pos.up_avg_price + pos.down_avg_price + (
+                (pos.up_fee_paid + pos.down_fee_paid) / max(target_shares, 1.0)
+            )
+            self._orders_placed += 2
+            self._orders_filled += 2
+            self._transition(AccumulatorState.ACCUMULATING, pos)
+            self._last_eval_block_reason = ""
+            return True
+
+        up_result, down_result = await asyncio.gather(
+            self._clob.place_fak_order(pos.up_token_id, up_amount, "BUY", price_hint=up_ask),
+            self._clob.place_fak_order(pos.down_token_id, down_amount, "BUY", price_hint=down_ask),
+        )
+        self._orders_placed += (1 if up_result.success else 0) + (1 if down_result.success else 0)
+
+        up_price = up_ask
+        up_qty = 0.0
+        if up_result.success:
+            up_price, up_qty = await self._fetch_fill_details(up_result.order_id, up_ask, target_shares)
+            if up_qty > 0:
+                self._register_filled_side(pos, "UP", up_price, up_qty, up_result.order_id)
+                self._orders_filled += 1
+
+        down_price = down_ask
+        down_qty = 0.0
+        if down_result.success:
+            down_price, down_qty = await self._fetch_fill_details(down_result.order_id, down_ask, target_shares)
+            if down_qty > 0:
+                self._register_filled_side(pos, "DOWN", down_price, down_qty, down_result.order_id)
+                self._orders_filled += 1
+
+        if up_qty <= 0 and down_qty <= 0:
+            self._eval_block_reason = "both_fak_placements_failed"
+            self._last_eval_block_reason = self._eval_block_reason
+            self._log_eval_heartbeat(pos, secs_left)
+            return False
+
+        if pos.up_qty > 0 and pos.down_qty > 0:
+            pos.pair_cost = (
+                pos.up_avg_price
+                + pos.down_avg_price
+                + ((pos.up_fee_paid + pos.down_fee_paid) / max(min(pos.up_qty, pos.down_qty), 1.0))
+            )
+            self._logger.info(
+                f"FAK entry filled both legs: {pos.slug} | "
+                f"up={pos.up_qty:.2f}@${pos.up_avg_price:.3f} "
+                f"down={pos.down_qty:.2f}@${pos.down_avg_price:.3f} | "
+                f"fee_pair=${pos.up_fee_paid + pos.down_fee_paid:.4f}"
+            )
+            self._transition(AccumulatorState.ACCUMULATING, pos)
+            self._last_eval_block_reason = ""
+            return True
+
+        filled_side = "UP" if pos.up_qty > 0 else "DOWN"
+        self._logger.warning(
+            f"FAK entry orphaned immediately: {pos.slug} | "
+            f"{filled_side} filled, other leg empty — trying taker hedge fallback now"
+        )
+        pos.first_fill_time = datetime.now(tz=timezone.utc)
+        if await self._try_fok_fallback(pos):
+            self._last_eval_block_reason = ""
+            return True
+
+        await self._unwind_orphan(pos, filled_side)
+        self._last_eval_block_reason = "fak_orphan_unwound"
+        return False
+
+    async def _evaluate_and_enter(self, pos: AccumulatorPosition) -> bool:
+        """SCANNING: Enter a pair opportunity using the configured accumulator mode.
+
+        `maker`: rest both sides at the bid, then manage repricing/hedging asynchronously.
+        `fak`: cross both sides immediately at the ask and only admit trades that remain
+        profitable after taker fees.
         """
         secs_left = (pos.market_end_time - datetime.now(tz=timezone.utc)).total_seconds()
 
         if secs_left < self._config.accum_min_secs_remaining:
             self._logger.info(f"Window expired during scan: {pos.slug} ({secs_left:.0f}s left)")
-            self._positions.pop(pos.slug, None)
-            self._abandoned_slugs[pos.slug] = pos.market_end_time  # prevent re-scan spam
-            return
+            self._abandoned_slugs[pos.slug] = pos.market_end_time
+            self._last_eval_block_reason = "window_expired_during_scan"
+            return False
 
         # Fetch fresh books for both sides
         try:
@@ -370,32 +626,36 @@ class AccumulatorEngine:
             down_book = await self._clob.get_order_book(pos.down_token_id)
         except Exception as e:
             self._eval_block_reason = f"book_fetch_error: {e}"
+            self._last_eval_block_reason = self._eval_block_reason
             self._log_eval_heartbeat(pos, secs_left)
-            return
+            return False
 
         up_bids = up_book.get("bids", [])
         down_bids = down_book.get("bids", [])
         if not up_bids or not down_bids:
             self._eval_block_reason = f"empty_books: up_bids={len(up_bids)} down_bids={len(down_bids)}"
+            self._last_eval_block_reason = self._eval_block_reason
             self._log_eval_heartbeat(pos, secs_left)
-            return
+            return False
 
         # Maker entry uses BID prices (we post at bid, wait for fill at that price)
         up_bid = float(up_bids[0]["price"])
         down_bid = float(down_bids[0]["price"])
         bid_pair = up_bid + down_bid
 
-        # Directional guard: reject imbalanced markets where one side is too expensive.
-        # Sequential maker fills on directional markets (e.g., $0.20/$0.79) create
-        # orphan risk when the expensive side moves further before our order fills.
+        if self._accum_entry_mode() == "fak":
+            return await self._evaluate_and_enter_fak(pos, secs_left, up_book, down_book)
+
+        # Directional guard
         max_side = self._get_param('accum_max_side_price')
         if up_bid > max_side or down_bid > max_side:
             self._eval_block_reason = (
                 f"directional: up_bid={up_bid:.3f} down_bid={down_bid:.3f} "
                 f"max_side=${max_side:.2f}"
             )
+            self._last_eval_block_reason = self._eval_block_reason
             self._log_eval_heartbeat(pos, secs_left)
-            return
+            return False
 
         max_pair = self._get_param('accum_max_pair_cost')
         if bid_pair >= max_pair:
@@ -403,21 +663,24 @@ class AccumulatorEngine:
                 f"bid_pair_expensive: ${bid_pair:.4f} >= ${max_pair} "
                 f"(up_bid={up_bid:.3f} down_bid={down_bid:.3f})"
             )
+            self._last_eval_block_reason = self._eval_block_reason
             self._log_eval_heartbeat(pos, secs_left)
-            return
+            return False
 
         # Circuit breaker check
         if not self._evaluate_opportunity(up_bid, down_bid):
             self._eval_block_reason = f"circuit_breaker or profit_too_low: bid_pair={bid_pair:.4f}"
+            self._last_eval_block_reason = self._eval_block_reason
             self._log_eval_heartbeat(pos, secs_left)
-            return
+            return False
 
-        # Capital check — use bid_pair as cost per share pair
+        # Capital check
         available = await self._balance.get_available_for_accumulator()
         if available < self._config.accum_min_shares * bid_pair:
             self._eval_block_reason = f"insufficient_capital: ${available:.2f}"
+            self._last_eval_block_reason = self._eval_block_reason
             self._log_eval_heartbeat(pos, secs_left)
-            return
+            return False
 
         target_shares = min(available / bid_pair, self._config.accum_max_shares)
         target_shares = max(target_shares, self._config.accum_min_shares)
@@ -429,8 +692,7 @@ class AccumulatorEngine:
             f"{target_shares:.0f}sh | ${target_shares * bid_pair:.2f} total"
         )
 
-        # Place BOTH maker orders simultaneously — eliminates sequential fill race condition.
-        # Both orders rest in the book; fills happen independently as sellers arrive.
+        # Place BOTH maker orders simultaneously
         up_id, down_id = await asyncio.gather(
             self._place_maker_order(pos.up_token_id, up_bid, target_shares),
             self._place_maker_order(pos.down_token_id, down_bid, target_shares),
@@ -438,8 +700,9 @@ class AccumulatorEngine:
 
         if not up_id and not down_id:
             self._eval_block_reason = "both_maker_placements_failed"
+            self._last_eval_block_reason = self._eval_block_reason
             self._log_eval_heartbeat(pos, secs_left)
-            return
+            return False
 
         now = datetime.now(tz=timezone.utc)
         pos.up_order_id = up_id
@@ -457,6 +720,8 @@ class AccumulatorEngine:
             f"waiting for fills (hedge deadline={self._config.accum_hedge_deadline_secs}s)"
         )
         self._transition(AccumulatorState.ACCUMULATING, pos)
+        self._last_eval_block_reason = ""
+        return True
 
     async def _accumulate_both_sides(self, pos: AccumulatorPosition):
         """ACCUMULATING: Monitor both maker orders; enforce hedge deadline; handle fills."""
@@ -497,7 +762,7 @@ class AccumulatorEngine:
                 filled = "UP" if pos.up_qty > 0 else "DOWN"
                 self._logger.info(
                     f"First fill: {filled} leg filled | {pos.slug} | "
-                    f"hedge deadline in {self._config.accum_hedge_deadline_secs}s"
+                    f"waiting for second maker fill (deadline={self._config.accum_hedge_deadline_secs}s)"
                 )
             return
 
@@ -793,10 +1058,14 @@ class AccumulatorEngine:
             if missing_side == "UP":
                 pos.up_qty = target_qty
                 pos.up_avg_price = best_ask
+                pos.up_fee_paid += taker_fee * target_qty
             else:
                 pos.down_qty = target_qty
                 pos.down_avg_price = best_ask
-            pos.pair_cost = pos.up_avg_price + pos.down_avg_price
+                pos.down_fee_paid += taker_fee * target_qty
+            pos.pair_cost = pos.up_avg_price + pos.down_avg_price + (
+                (pos.up_fee_paid + pos.down_fee_paid) / max(target_qty, 1.0)
+            )
             pos.is_fully_hedged = True
             self._store.add(Position(
                 token_id=other_token,
@@ -830,10 +1099,14 @@ class AccumulatorEngine:
         if missing_side == "UP":
             pos.up_qty = est_shares
             pos.up_avg_price = best_ask
+            pos.up_fee_paid += taker_fee * est_shares
         else:
             pos.down_qty = est_shares
             pos.down_avg_price = best_ask
-        pos.pair_cost = pos.up_avg_price + pos.down_avg_price
+            pos.down_fee_paid += taker_fee * est_shares
+        pos.pair_cost = pos.up_avg_price + pos.down_avg_price + (
+            (pos.up_fee_paid + pos.down_fee_paid) / max(min(pos.up_qty, pos.down_qty), 1.0)
+        )
         pos.is_fully_hedged = True
         self._orders_filled += 1
         self._store.add(Position(
@@ -856,188 +1129,181 @@ class AccumulatorEngine:
         return True
 
     async def _unwind_orphan(self, pos: AccumulatorPosition, filled_side: str):
-        """Sell the filled leg at market to recover capital instead of holding to expiry."""
+        """Aggressive sellback of orphaned leg. NEVER hold to resolution.
+
+        Escalation ladder:
+        1. FAK SELL at market (instant, best price)
+        2. FAK SELL retry x2 with 3s gaps
+        3. Fire sale: FAK SELL at $0.01 (recover pennies, avoid coin flip)
+        4. Only if market expired AND can't sell: forced hold (logged CRITICAL)
+        """
         token_id = pos.up_token_id if filled_side == "UP" else pos.down_token_id
         qty = pos.up_qty if filled_side == "UP" else pos.down_qty
+        avg_price = pos.up_avg_price if filled_side == "UP" else pos.down_avg_price
+        entry_fee_paid = pos.up_fee_paid if filled_side == "UP" else pos.down_fee_paid
 
         if qty < 5:
-            self._logger.warning(f"Unwind skip: {filled_side} qty={qty:.0f} below minimum")
+            self._logger.warning(f"Sellback skip: {filled_side} qty={qty:.0f} below minimum")
             self._store.remove(token_id)
-            self._positions.pop(pos.slug, None)
+            self._drop_position(pos, "sellback_skipped_below_min")
             return
 
-        # If the market has already expired, we cannot sell on the secondary market.
-        # Leave the tokens for the redeemer — expected value is ~$0.50/share (coin flip),
-        # which is near our entry price. Do NOT count this as a circuit-breaker loss.
+        # If market expired, can't sell on secondary. This is the ONE hold case.
         secs_left = (pos.market_end_time - datetime.now(tz=timezone.utc)).total_seconds()
         if secs_left <= 0:
-            avg_price = pos.up_avg_price if filled_side == "UP" else pos.down_avg_price
-            self._logger.warning(
-                f"Unwind skipped: {pos.slug} market already expired ({secs_left:.0f}s). "
-                f"{filled_side} {qty:.0f} shares @ ${avg_price:.3f} left for redeemer."
+            forced_loss = avg_price * qty + entry_fee_paid
+            self._logger.critical(
+                f"FORCED HOLD (market expired): {pos.slug} | {filled_side} {qty:.0f}@${avg_price:.3f} | "
+                f"CANNOT SELL — market closed. Worst-case loss=${forced_loss:.2f} "
+                f"(includes entry fees ${entry_fee_paid:.2f})"
             )
-            self._store.remove(token_id)
-            self._positions.pop(pos.slug, None)
+            self._accum_total_pnl -= forced_loss
+            self._consecutive_unwinds += 1
+            self._accum_orphaned_count += 1
+            self._save_circuit_breaker_state()
+            self._drop_position(pos, "forced_hold_market_expired")
+            self._record_db_trade(pos, -forced_loss, "forced_hold_expired")
             return
 
-        # Get best bid to sell into
-        try:
-            book = await self._clob.get_order_book(token_id)
-            bids = book.get("bids", [])
-            if not bids:
-                self._logger.error(f"Unwind failed: no bids for {filled_side} leg")
-                self._store.remove(token_id)
-                self._positions.pop(pos.slug, None)
-                return
-            sell_price = float(bids[0]["price"])
-        except Exception as e:
-            self._logger.error(f"Unwind book fetch failed: {e}")
-            self._store.remove(token_id)
-            self._positions.pop(pos.slug, None)
-            return
+        self._logger.info(
+            f"SELLBACK: {pos.slug} | {filled_side} {qty:.0f}@${avg_price:.3f} | "
+            f"{secs_left:.0f}s remaining | attempting aggressive sell"
+        )
 
-        avg_price = pos.up_avg_price if filled_side == "UP" else pos.down_avg_price
         sell_success = False
+        sell_price = 0.0
         unwind_loss = 0.0
 
         if self._dry_run:
-            # Simulate the unwind — spread cost only
-            unwind_loss = (avg_price - sell_price) * qty
+            sell_price = max(avg_price - 0.02, 0.01)
+            sell_fee_paid = self._estimate_taker_fee_per_share(sell_price) * qty
+            unwind_loss = (avg_price - sell_price) * qty + entry_fee_paid + sell_fee_paid
             sell_success = True
-            # Credit back the sell proceeds
+            self._consecutive_unwinds += 1
             self._balance.sim_credit(sell_price * qty)
             self._logger.info(
-                f"[DRY RUN] UNWOUND: {pos.slug} | SOLD {filled_side} {qty:.0f} shares @ ${sell_price:.3f} | "
-                f"entry=${avg_price:.3f} | loss=${unwind_loss:.2f} (spread cost)"
+                f"[DRY RUN] SELLBACK: {pos.slug} | {filled_side} {qty:.0f}sh | "
+                f"entry=${avg_price:.3f} sold@${sell_price:.3f} | "
+                f"fees=${entry_fee_paid + sell_fee_paid:.2f} | cost=${unwind_loss:.2f}"
             )
         else:
-            # Step 1: Wait for CLOB to index freshly-filled conditional tokens.
-            # CLOB can take 5-30s to reflect a new fill in its balance view.
-            # Poll get_share_balance() until the tokens appear, then sell that amount.
-            await asyncio.sleep(5)
+            # Wait for CLOB to index tokens (5-30s after fill)
+            await asyncio.sleep(3)
             sell_qty = 0.0
-            for check in range(1, 7):
+            for check in range(1, 5):
                 clob_qty = await self._clob.get_share_balance(token_id)
                 if clob_qty >= 1.0:
                     sell_qty = clob_qty
-                    self._logger.info(
-                        f"Unwind: CLOB confirmed {clob_qty:.0f} shares for {filled_side} (check {check}/6)"
-                    )
+                    self._logger.info(f"Sellback: CLOB confirmed {clob_qty:.0f}sh (check {check}/4)")
                     break
-                self._logger.warning(
-                    f"Unwind: CLOB shows 0 shares for {filled_side} (check {check}/6), retrying in 5s"
-                )
-                if check < 6:
-                    await asyncio.sleep(5)
+                if check < 4:
+                    await asyncio.sleep(3)
 
             if sell_qty < 1.0:
-                self._logger.error(
-                    f"Unwind: CLOB never indexed {filled_side} tokens after 6 checks (~35s) "
-                    f"for {pos.slug} — tokens left for redeemer"
+                forced_loss = avg_price * qty + entry_fee_paid
+                self._logger.critical(
+                    f"SELLBACK FAILED: CLOB never indexed tokens for {pos.slug} {filled_side}. "
+                    f"Forced hold — worst-case loss=${forced_loss:.2f} "
+                    f"(includes entry fees ${entry_fee_paid:.2f})"
                 )
-                unwind_loss = avg_price * qty
-            else:
-                # Step 2: FOK SELL with the CLOB-confirmed quantity
-                for attempt in range(1, 4):
-                    try:
-                        result = await self._clob.place_fok_order(
-                            token_id=token_id,
-                            amount=sell_qty,
-                            side="SELL",
-                        )
-                        if result.success:
-                            unwind_loss = (avg_price - sell_price) * sell_qty
-                            sell_success = True
-                            self._logger.info(
-                                f"UNWOUND (FOK): {pos.slug} | SOLD {filled_side} {sell_qty:.0f} shares | "
-                                f"entry=${avg_price:.3f} est_sell=${sell_price:.3f} | loss=${unwind_loss:.2f}"
-                            )
-                            break
-                        else:
-                            self._logger.warning(
-                                f"Unwind FOK SELL attempt {attempt}/3 failed: {result.error}"
-                            )
-                    except Exception as e:
-                        self._logger.warning(f"Unwind SELL attempt {attempt}/3 exception: {e}")
+                self._accum_total_pnl -= forced_loss
+                self._consecutive_unwinds += 1
+                self._accum_orphaned_count += 1
+                self._save_circuit_breaker_state()
+                self._drop_position(pos, "forced_hold_clob_unindexed")
+                self._record_db_trade(pos, -forced_loss, "forced_hold_clob_unindexed")
+                return
 
-                    if attempt < 3:
-                        await asyncio.sleep(3)
-                        # Re-check expiry: market may have closed during the sleep
-                        secs_left = (pos.market_end_time - datetime.now(tz=timezone.utc)).total_seconds()
-                        if secs_left <= 0:
-                            self._logger.warning(
-                                f"Unwind retry abort: {pos.slug} expired during retry sleep. "
-                                "Tokens left for redeemer."
-                            )
-                            break
-
-                if not sell_success:
-                    self._logger.error(
-                        f"Unwind SELL failed after 3 attempts for {pos.slug} {filled_side} "
-                        f"{sell_qty:.0f} shares — tokens left for redeemer"
+            # Escalation ladder: FAK SELL x3, then fire sale
+            for attempt in range(1, 5):
+                secs_left = (pos.market_end_time - datetime.now(tz=timezone.utc)).total_seconds()
+                if secs_left <= 0:
+                    self._logger.critical(
+                        f"SELLBACK ABORTED: {pos.slug} expired during sell attempts. Forced hold."
                     )
-                    # Do NOT record loss here: the redeemer will settle these tokens.
-                    # Expected value is ~entry_price (coin flip). Recording avg_price*qty
-                    # as loss would overcount and false-trip the circuit breaker.
-                    unwind_loss = 0.0
+                    break
 
+                try:
+                    result = await self._clob.place_fak_order(
+                        token_id=token_id, amount=sell_qty, side="SELL", price_hint=0
+                    )
+                    if result.success:
+                        # Get actual fill price from order details if available
+                        actual_price = None
+                        if result.order_id:
+                            try:
+                                details = await self._clob.get_order_details(result.order_id)
+                                if details and details.get("average_price"):
+                                    actual_price = float(details["average_price"])
+                            except Exception as e:
+                                self._logger.warning(f"Sellback fill details fetch failed: {e}")
+                        if not actual_price:
+                            # Fallback: conservative estimate from remaining book
+                            try:
+                                book = await self._clob.get_order_book(token_id)
+                                bids = book.get("bids", [])
+                                if len(bids) >= 2:
+                                    actual_price = (float(bids[0]["price"]) + float(bids[1]["price"])) / 2
+                                elif bids:
+                                    actual_price = float(bids[0]["price"])
+                                else:
+                                    actual_price = max(avg_price - 0.05, 0.01)
+                            except Exception as e:
+                                self._logger.warning(f"Sellback book fetch failed, using estimate: {e}")
+                                actual_price = max(avg_price - 0.03, 0.01)
+                        sell_price = actual_price
+                        sell_fee_paid = self._estimate_taker_fee_per_share(sell_price) * sell_qty
+                        unwind_loss = (avg_price - sell_price) * sell_qty + entry_fee_paid + sell_fee_paid
+                        sell_success = True
+                        self._logger.info(
+                            f"SELLBACK OK (attempt {attempt}): {pos.slug} | "
+                            f"{filled_side} {sell_qty:.0f}sh | entry=${avg_price:.3f} "
+                            f"sold@~${sell_price:.3f} | "
+                            f"fees=${entry_fee_paid + sell_fee_paid:.2f} | cost=${unwind_loss:.2f}"
+                        )
+                        break
+                    else:
+                        self._logger.warning(
+                            f"Sellback attempt {attempt}/4 failed: {result.error}"
+                        )
+                except Exception as e:
+                    self._logger.warning(f"Sellback attempt {attempt}/4 exception: {e}")
+
+                if attempt < 4:
+                    await asyncio.sleep(2)
+
+        # Record result
         if sell_success:
-            # True strategy unwind: real spread cost. Count against circuit breaker.
             self._settlements.append({
-                "slug": pos.slug,
-                "exit_reason": "unwound",
-                "matched": 0,
-                "up_qty": pos.up_qty,
-                "down_qty": pos.down_qty,
-                "up_avg": pos.up_avg_price,
-                "down_avg": pos.down_avg_price,
-                "pair_cost": 0,
-                "pnl": round(-unwind_loss, 2),
-                "timestamp": time.time(),
+                "slug": pos.slug, "exit_reason": "sellback",
+                "matched": 0, "up_qty": pos.up_qty, "down_qty": pos.down_qty,
+                "up_avg": pos.up_avg_price, "down_avg": pos.down_avg_price,
+                "pair_cost": 0, "pnl": round(-unwind_loss, 2), "timestamp": time.time(),
             })
             if len(self._settlements) > 100:
                 self._settlements = self._settlements[-100:]
             self._accum_total_pnl -= unwind_loss
             self._accum_unwound_count += 1
-            self._consecutive_unwinds += 1
             self._save_circuit_breaker_state()
+            self._record_db_trade(pos, -unwind_loss, "sellback")
         else:
-            # Infra unwind: SELL failed, tokens left for redeemer. NOT a strategy loss.
-            # Do not increment consecutive_unwinds — this is not the strategy failing.
-            self._accum_orphaned_count += 1
-            self._logger.warning(
-                f"Infra unwind (sell failed): {pos.slug} orphaned for redeemer. "
-                "NOT counting against circuit breaker."
+            # All sell attempts failed — forced hold (CRITICAL, should be rare)
+            forced_hold_loss = avg_price * qty + entry_fee_paid
+            self._logger.critical(
+                f"ALL SELLBACK ATTEMPTS FAILED: {pos.slug} | {filled_side} {qty:.0f}@${avg_price:.3f} | "
+                f"FORCED HOLD — redeemer must resolve. Worst-case loss=${forced_hold_loss:.2f} "
+                f"(includes entry fees ${entry_fee_paid:.2f})"
             )
+            self._accum_total_pnl -= forced_hold_loss
+            self._consecutive_unwinds += 1
+            self._record_db_trade(pos, -forced_hold_loss, "forced_hold_sell_failed")
+            self._accum_orphaned_count += 1
             self._save_circuit_breaker_state()
 
-        # Record cycle to metrics DB for adaptive tuner
-        if self._metrics:
-            from .accumulator_metrics import CycleRecord
-            entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 60
-            self._metrics.record_cycle(CycleRecord(
-                slug=pos.slug,
-                started_at=entry_ts,
-                ended_at=time.time(),
-                up_qty=pos.up_qty,
-                down_qty=pos.down_qty,
-                up_avg_price=pos.up_avg_price,
-                down_avg_price=pos.down_avg_price,
-                pair_cost=0.0,
-                pnl=-unwind_loss,
-                exit_reason="unwound",
-                reprices_used=pos.reprice_count,
-                fill_time_secs=time.time() - entry_ts,
-                hedge_time_secs=0.0,
-                spread_at_entry=self._best_bid_pair,
-            ))
-
-        # Clean up and remove position. Force balance cache expiry so the next
-        # scan sees freed capital immediately (D1: 60s TTL would otherwise delay recovery).
         self._balance._cache_time = 0
         self._store.remove(token_id)
         self._abandoned_slugs[pos.slug] = pos.market_end_time
-        self._positions.pop(pos.slug, None)
+        self._drop_position(pos, f"sellback_complete:{filled_side}")
 
     async def _monitor_hedged_position(self, pos: AccumulatorPosition):
         """HEDGED: Position locked, wait for window expiry."""
@@ -1070,23 +1336,29 @@ class AccumulatorEngine:
         # Step 3: Calculate P&L
         if is_hedged:
             matched = min(pos.up_qty, pos.down_qty)
-            total_spent = (pos.up_qty * pos.up_avg_price) + (pos.down_qty * pos.down_avg_price)
+            total_spent = (
+                (pos.up_qty * pos.up_avg_price)
+                + (pos.down_qty * pos.down_avg_price)
+                + pos.up_fee_paid
+                + pos.down_fee_paid
+            )
             pnl = matched * 1.00 - total_spent
             pos.exit_reason = "hedged_settlement"
             self._logger.info(
                 f"HEDGED settlement: {pos.slug} | matched={matched:.0f} | "
-                f"spent=${total_spent:.2f} | pnl=${pnl:.2f}"
+                f"spent=${total_spent:.2f} (fees=${pos.up_fee_paid + pos.down_fee_paid:.2f}) | pnl=${pnl:.2f}"
             )
 
         elif is_orphaned:
             side = "UP" if pos.up_qty > 0 else "DOWN"
             qty = pos.up_qty if pos.up_qty > 0 else pos.down_qty
             avg = pos.up_avg_price if pos.up_qty > 0 else pos.down_avg_price
+            fee_paid = pos.up_fee_paid if pos.up_qty > 0 else pos.down_fee_paid
 
             if result == f"resolved_{side.lower()}":
-                pnl = qty * 1.00 - qty * avg  # Won
+                pnl = qty * 1.00 - qty * avg - fee_paid  # Won
             elif result.startswith("resolved_"):
-                pnl = 0 - qty * avg  # Lost
+                pnl = 0 - qty * avg - fee_paid  # Lost
             else:
                 pnl = None  # Unknown
 
@@ -1094,7 +1366,7 @@ class AccumulatorEngine:
             pnl_str = f"${pnl:.2f}" if pnl is not None else "UNKNOWN"
             self._logger.info(
                 f"ORPHANED {side} settlement: {pos.slug} | result={result} | "
-                f"qty={qty:.0f}@${avg:.3f} | pnl={pnl_str}"
+                f"qty={qty:.0f}@${avg:.3f} | fees=${fee_paid:.2f} | pnl={pnl_str}"
             )
 
         else:
@@ -1182,8 +1454,12 @@ class AccumulatorEngine:
             except Exception as e:
                 self._logger.debug(f"Store cleanup for {token_id[:8]}: {e}")
 
-        # Step 5: Remove position
-        self._positions.pop(pos.slug, None)
+        # Step 5: Record to performance DB
+        if pnl is not None:
+            self._record_db_trade(pos, pnl, pos.exit_reason or "unknown")
+
+        # Step 6: Remove position
+        self._drop_position(pos, f"settlement_complete:{pos.exit_reason or 'unknown'}")
 
     async def _emergency_cleanup(self, pos: AccumulatorPosition):
         """On error: cancel all orders for this position, remove it."""
@@ -1196,13 +1472,67 @@ class AccumulatorEngine:
         for token_id in [pos.up_token_id, pos.down_token_id]:
             if token_id:
                 self._store.remove(token_id)
-        self._positions.pop(pos.slug, None)
+        self._drop_position(pos, "emergency_cleanup")
 
     def _transition(self, new_state: AccumulatorState, pos: AccumulatorPosition):
         """Log state transition for a specific position."""
         old = pos.state
         pos.state = new_state
         self._logger.info(f"State: {old.value} → {new_state.value} ({pos.slug})")
+
+    def _drop_position(self, pos: AccumulatorPosition, reason: str):
+        """Remove a tracked position with an explicit terminal reason."""
+        if pos.slug in self._positions:
+            self._logger.info(f"Position removed: {pos.slug} | reason={reason}")
+        self._positions.pop(pos.slug, None)
+
+    def _record_db_trade(self, pos: AccumulatorPosition, pnl: float, exit_reason: str):
+        """Record a completed pair arb cycle (entry+exit) to performance.db."""
+        if not self._perf_db or pnl is None:
+            return
+        try:
+            trade_id = f"pair_{pos.slug}"
+            matched = min(pos.up_qty, pos.down_qty) if (pos.up_qty > 0 and pos.down_qty > 0) else 0
+            entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 300
+            entry_cost = pos.pair_cost if pos.pair_cost > 0 else (pos.up_avg_price or pos.down_avg_price or 0)
+
+            self._perf_db.record_entry(
+                trade_id=trade_id,
+                token_id=pos.up_token_id or pos.down_token_id,
+                slug=pos.slug,
+                entry_time=entry_ts,
+                entry_price=entry_cost,
+                entry_size=matched,
+                entry_tx_hash="pair_arb",
+                outcome="PAIR" if pos.is_fully_hedged else "ORPHAN",
+                market_title=pos.slug,
+                strategy="pair_arb",
+                metadata={
+                    "up_price": round(pos.up_avg_price, 4),
+                    "down_price": round(pos.down_avg_price, 4),
+                    "up_fee_paid": round(pos.up_fee_paid, 4),
+                    "down_fee_paid": round(pos.down_fee_paid, 4),
+                    "up_qty": round(pos.up_qty, 2),
+                    "down_qty": round(pos.down_qty, 2),
+                    "pair_cost": round(entry_cost, 4),
+                    "is_hedged": pos.is_fully_hedged,
+                },
+            )
+
+            cost_basis = entry_cost * matched if matched > 0 else 1.0
+            self._perf_db.record_exit(
+                trade_id=trade_id,
+                exit_time=time.time(),
+                exit_price=1.0 if exit_reason == "hedged_settlement" else 0.0,
+                exit_size=matched,
+                exit_reason=exit_reason,
+                exit_tx_hash="settlement",
+                pnl=round(pnl, 6),
+                pnl_pct=round(pnl / cost_basis, 4) if cost_basis > 0 else 0.0,
+            )
+            self._logger.info(f"DB: pair trade {trade_id} | pnl=${pnl:.2f} | {exit_reason}")
+        except Exception as e:
+            self._logger.warning(f"DB pair trade write failed: {e}")
 
     # ========================================================================
     # Market Discovery
@@ -1402,6 +1732,7 @@ class AccumulatorEngine:
     def _log_eval_heartbeat(self, pos: AccumulatorPosition, secs_left: float):
         """Log a throttled INFO heartbeat when stuck in SCANNING (every 30s)."""
         now = time.time()
+        self._last_eval_block_reason = self._eval_block_reason
         if now - self._last_eval_log_ts >= 30:
             self._logger.info(
                 f"Eval blocked: {pos.slug} | {secs_left:.0f}s left | {self._eval_block_reason}"
@@ -1701,6 +2032,7 @@ class AccumulatorEngine:
                 "is_accumulator": True,
                 "accum_pair_id": f"accum_{pos.slug}",
                 "accum_side": side,
+                "entry_mode": self._accum_entry_mode(),
             },
         ))
 
