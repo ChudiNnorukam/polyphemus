@@ -31,6 +31,8 @@ export interface AssessmentData {
   goal?: string
   solution?: string
   freeText?: string
+  meetingLink?: string
+  reportPrompt?: string
 }
 
 export async function upsertLeadInAttio(data: AssessmentData) {
@@ -55,22 +57,24 @@ export async function upsertLeadInAttio(data: AssessmentData) {
   // 2. Add a note with full assessment summary
   const tierEmoji = data.tier === "high" ? "🔥" : data.tier === "medium" ? "⚡" : "📋"
   const noteContent = [
-    `${tierEmoji} citability.dev Assessment — Score: ${data.score}/${data.total} (${data.tier.toUpperCase()})`,
+    `${tierEmoji} citability.dev Assessment: Score ${data.score}/${data.total} (${data.tier.toUpperCase()})`,
     "",
     `Website: ${data.website || "not provided"}`,
-    `Goal: ${data.goal || "—"}`,
-    `Role: ${data.role || "—"}`,
-    `Frustration: ${data.frustration || "—"}`,
-    `Tried: ${data.tried || "—"}`,
-    `Preferred solution: ${data.solution || "—"}`,
+    `Goal: ${data.goal || "-"}`,
+    `Role: ${data.role || "-"}`,
+    `Frustration: ${data.frustration || "-"}`,
+    `Tried: ${data.tried || "-"}`,
+    `Preferred solution: ${data.solution || "-"}`,
     ...(data.freeText ? ["", `Notes: ${data.freeText}`] : []),
+    ...(data.meetingLink ? ["", `Meeting: ${data.meetingLink}`] : []),
+    ...(data.reportPrompt ? ["", "---", "REPORT BRIEF:", data.reportPrompt] : []),
   ].join("\n")
 
   await attioFetch("/notes", "POST", {
     data: {
       parent_object: "people",
       parent_record_id: personId,
-      title: `citability.dev scan — ${data.score}/${data.total}`,
+      title: `citability.dev scan: ${data.score}/${data.total}`,
       content: noteContent,
     },
   })
