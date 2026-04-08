@@ -597,8 +597,17 @@ class PositionExecutor:
                             epoch_end_time=_adv_epoch_end,
                         )
                     )
+                    self._logger.info(
+                        f"ADVERSE_CHECK_SCHEDULED | {_adv_asset} {_adv_dir} | "
+                        f"entry_binance={_adv_entry_binance:.2f} | trade={order_id}"
+                    )
+                else:
+                    self._logger.warning(
+                        f"ADVERSE_CHECK_SKIPPED | entry_binance={_adv_entry_binance} "
+                        f"order_id={order_id} | momentum_feed data missing at fill time"
+                    )
             except Exception as _adv_err:
-                self._logger.debug(f"Adverse check schedule error: {_adv_err}")
+                self._logger.warning(f"Adverse check schedule error: {_adv_err}")
 
         # Record maker fill outcome to optimizer (before fallback)
         if self._fill_optimizer and maker_offset_used is not None:
@@ -833,13 +842,13 @@ class PositionExecutor:
                     direction=fill_dir,
                     check_window_secs=check_window,
                 )
-                self._logger.debug(
+                self._logger.info(
                     f"ADVERSE_SELECTION | {fill_asset} {fill_dir} | "
                     f"entry={entry_binance:.2f} check={check_price} "
                     f"window={check_window}s | trade={trade_id}"
                 )
         except Exception as e:
-            self._logger.debug(f"_run_adverse_check error: {e}")
+            self._logger.warning(f"ADVERSE_CHECK_ERROR | trade={trade_id} | {e}")
 
     def _calculate_size(self, price: float, available_capital: float, asset: str = "", liq_conviction: float = 0.0, spread: Optional[float] = None, fear_greed: Optional[float] = None, signal: Optional[dict] = None) -> float:
         """Calculate position size using 3-layer sizing model + asset multiplier.

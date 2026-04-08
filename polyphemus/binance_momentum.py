@@ -2388,6 +2388,34 @@ class BinanceMomentumFeed:
             return None
         return buffer[-1][1]
 
+    def get_recent_velocity(self, asset: str, lookback_secs: int = 5) -> Optional[float]:
+        """Return Binance price change over the last N seconds as a fraction.
+
+        Used for pre-entry adverse selection detection.
+        Reads from _price_buffers (1s granularity, ~10 min depth).
+
+        Returns:
+            Price change as fraction (e.g. +0.0003 = +0.03%), or None if insufficient data.
+        """
+        symbol = ASSET_TO_BINANCE.get(asset.upper())
+        if not symbol:
+            return None
+        buffer = self._price_buffers.get(symbol)
+        if not buffer or len(buffer) < 2:
+            return None
+        now = time.time()
+        cutoff = now - lookback_secs
+        current_price = buffer[-1][1]
+        # Walk backwards to find the price at cutoff
+        baseline_price = None
+        for ts, price in buffer:
+            if ts >= cutoff:
+                baseline_price = price
+                break
+        if baseline_price is None or baseline_price <= 0:
+            return None
+        return (current_price - baseline_price) / baseline_price
+
     def get_epoch_price_context(self, asset: str, window: int) -> Optional[dict]:
         """Return current Binance price, epoch open, and pct change for stale quote detection.
 

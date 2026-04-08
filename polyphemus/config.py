@@ -464,8 +464,16 @@ class Settings(BaseSettings):
     cheap_side_max_price: float = 0.45   # only buy if cheaper side <= this
     cheap_side_min_price: float = 0.15   # skip extremely cheap (likely resolved)
     cheap_side_scan_interval: float = 30   # seconds between scans (supports sub-second)
-    cheap_side_min_secs: int = 60        # min secs remaining to enter
+    cheap_side_min_secs: int = 60        # min secs remaining to enter (signal generation)
     cheap_side_max_secs: int = 240       # max secs remaining (wait for some price discovery)
+
+    # Pre-entry adverse selection filter: reject entries when Binance is moving against trade
+    adverse_precheck_enabled: bool = True   # enable/disable the pre-entry check
+    adverse_precheck_secs: int = 5          # lookback window in seconds
+    adverse_precheck_threshold: float = 0.0001  # min adverse move to reject (0.01%)
+
+    # Epoch time gate: minimum time remaining at execution (accounts for order lifecycle ~30s)
+    min_execution_secs_remaining: int = 120  # reject signals with < this many secs remaining
     cheap_side_windows: str = "300"      # comma-separated window sizes in seconds (300=5m, 900=15m)
     cheap_side_active_hours: str = ""    # comma-separated UTC hours when cheap side is active (empty=always)
     maker_exit_enabled: bool = True    # Feature flag: maker SELL for profit_target (zero fee)

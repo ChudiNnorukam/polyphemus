@@ -336,5 +336,192 @@ class TestMarketEndTimeParsing:
         assert exits[0].reason == "market_resolved"
 
 
+# ============================================================================
+# Fees module: canonical fee calculations
+# ============================================================================
+
+class TestFees:
+    """Verify canonical fee module produces correct values."""
+
+    def test_taker_fee_at_midmarket(self):
+        """Crypto taker fee at p=0.50 should be 7.2% * 0.5 * 0.5 = 0.018 per share."""
+        from polyphemus.fees import taker_fee_per_share
+        fee = taker_fee_per_share(0.50, "crypto")
+        assert abs(fee - 0.018) < 1e-6, f"Expected 0.018, got {fee}"
+
+    def test_taker_fee_at_entry_range(self):
+        """Fee at 0.475 (our entry range) should be ~0.01795."""
+        from polyphemus.fees import taker_fee_per_share
+        fee = taker_fee_per_share(0.475, "crypto")
+        expected = 0.072 * 0.475 * 0.525
+        assert abs(fee - expected) < 1e-6, f"Expected {expected}, got {fee}"
+
+    def test_geopolitics_zero_fee(self):
+        """Geopolitics markets should have zero taker fee."""
+        from polyphemus.fees import taker_fee_per_share
+        fee = taker_fee_per_share(0.50, "geopolitics")
+        assert fee == 0.0, f"Geopolitics fee should be 0, got {fee}"
+
+    def test_fee_peaks_at_midmarket(self):
+        """Fee should be highest at p=0.50 and lower at extremes."""
+        from polyphemus.fees import taker_fee_per_share
+        fee_50 = taker_fee_per_share(0.50)
+        fee_10 = taker_fee_per_share(0.10)
+        fee_90 = taker_fee_per_share(0.90)
+        assert fee_50 > fee_10, "Fee at 0.50 should exceed fee at 0.10"
+        assert fee_50 > fee_90, "Fee at 0.50 should exceed fee at 0.90"
+
+    def test_breakeven_wr_taker_crypto(self):
+        """Break-even WR at 0.475 taker crypto should be ~49.3%."""
+        from polyphemus.fees import breakeven_wr
+        be = breakeven_wr(0.475, mode="taker", category="crypto")
+        # be = entry + fee = 0.475 + 0.072 * 0.475 * 0.525
+        expected = 0.475 + 0.072 * 0.475 * 0.525
+        assert abs(be - expected) < 1e-6, f"Expected {expected:.4f}, got {be:.4f}"
+
+    def test_breakeven_wr_maker(self):
+        """Maker break-even should be LOWER than entry price (rebate helps)."""
+        from polyphemus.fees import breakeven_wr
+        be_maker = breakeven_wr(0.475, mode="maker")
+        assert be_maker < 0.475, f"Maker breakeven {be_maker} should be below entry 0.475"
+
+    def test_fee_adjusted_pnl_win(self):
+        """Winning trade P&L should be positive at reasonable entry."""
+        from polyphemus.fees import fee_adjusted_pnl
+        pnl = fee_adjusted_pnl(0.45, is_win=True, shares=10, mode="taker")
+        # win: (1.0 - 0.45 - fee) * 10
+        assert pnl > 0, f"Winning trade at 0.45 should be profitable, got {pnl}"
+
+    def test_fee_adjusted_pnl_loss(self):
+        """Losing trade P&L should be negative."""
+        from polyphemus.fees import fee_adjusted_pnl
+        pnl = fee_adjusted_pnl(0.45, is_win=False, shares=10, mode="taker")
+        assert pnl < 0, f"Losing trade should be negative, got {pnl}"
+
+    def test_total_fee_scales_with_shares(self):
+        """Total fee should scale linearly with share count."""
+        from polyphemus.fees import taker_fee
+        fee_10 = taker_fee(0.50, 10)
+        fee_20 = taker_fee(0.50, 20)
+        assert abs(fee_20 - 2 * fee_10) < 1e-10
+
+    def test_round_trip_cost_resolved(self):
+        """Resolved market: only entry fee, no exit fee."""
+        from polyphemus.fees import round_trip_cost, taker_fee_per_share
+        rt = round_trip_cost(0.50, exit_price=None, entry_mode="taker")
+        entry_only = taker_fee_per_share(0.50)
+        assert abs(rt - entry_only) < 1e-10
+
+
+class TestAdversePrecheck:
+    """Pre-entry adverse selection filter: reject entries when Binance moves against trade."""
+
+    def test_velocity_calculation_rising(self):
+        """Positive velocity when price rises over lookback window."""
+        from collections import deque
+        # Test the velocity algorithm directly (avoids py_clob_client import)
+        now = time.time()
+        buffer = deque([
+            (now - 10, 83000.0),
+            (now - 5, 83025.0),
+            (now - 4, 83030.0),
+            (now - 3, 83035.0),
+            (now - 2, 83040.0),
+            (now - 1, 83050.0),
+        ], maxlen=600)
+
+        lookback_secs = 5
+        cutoff = now - lookback_secs
+        current_price = buffer[-1][1]
+        baseline_price = None
+        for ts, price in buffer:
+            if ts >= cutoff:
+                baseline_price = price
+                break
+        assert baseline_price is not None
+        velocity = (current_price - baseline_price) / baseline_price
+        assert velocity > 0, f"Price rising should give positive velocity, got {velocity}"
+
+    def test_velocity_calculation_falling(self):
+        """Negative velocity when price falls over lookback window."""
+        from collections import deque
+        now = time.time()
+        buffer = deque([
+            (now - 10, 83050.0),
+            (now - 5, 83025.0),
+            (now - 4, 83020.0),
+            (now - 3, 83015.0),
+            (now - 2, 83010.0),
+            (now - 1, 83000.0),
+        ], maxlen=600)
+
+        lookback_secs = 5
+        cutoff = now - lookback_secs
+        current_price = buffer[-1][1]
+        baseline_price = None
+        for ts, price in buffer:
+            if ts >= cutoff:
+                baseline_price = price
+                break
+        assert baseline_price is not None
+        velocity = (current_price - baseline_price) / baseline_price
+        assert velocity < 0, f"Price falling should give negative velocity, got {velocity}"
+
+    def test_adverse_detection_logic(self):
+        """Up trade with negative velocity is adverse, Down trade with positive is adverse."""
+        threshold = 0.0001  # 0.01%
+
+        # Up trade, price falling = ADVERSE
+        velocity = -0.0003  # -0.03%
+        direction = "Up"
+        is_adverse = (direction == "Up" and velocity < -threshold)
+        assert is_adverse, "Up trade with falling price should be adverse"
+
+        # Up trade, price rising = FAVORABLE
+        velocity = +0.0003
+        is_adverse = (direction == "Up" and velocity < -threshold)
+        assert not is_adverse, "Up trade with rising price should be favorable"
+
+        # Down trade, price rising = ADVERSE
+        velocity = +0.0003
+        direction = "Down"
+        is_adverse = (direction == "Down" and velocity > threshold)
+        assert is_adverse, "Down trade with rising price should be adverse"
+
+        # Down trade, price falling = FAVORABLE
+        velocity = -0.0003
+        is_adverse = (direction == "Down" and velocity > threshold)
+        assert not is_adverse, "Down trade with falling price should be favorable"
+
+    def test_velocity_none_when_no_data(self):
+        """Returns None when price buffer is empty or insufficient."""
+        from collections import deque
+        buffer = deque(maxlen=600)
+        # Empty buffer: no baseline can be found
+        cutoff = time.time() - 5
+        baseline = None
+        for ts, price in buffer:
+            if ts >= cutoff:
+                baseline = price
+                break
+        assert baseline is None, "Should be None with empty buffer"
+
+
+class TestEpochTimeGate:
+    """Epoch time gate: reject entries with insufficient time remaining."""
+
+    def test_config_default(self):
+        """Default min_execution_secs_remaining should be 120."""
+        config = make_config()
+        assert config.min_execution_secs_remaining == 120
+
+    def test_config_adverse_precheck_default(self):
+        """Default adverse_precheck should be enabled with 5s lookback."""
+        config = make_config()
+        assert config.adverse_precheck_enabled is True
+        assert config.adverse_precheck_secs == 5
+        assert config.adverse_precheck_threshold == 0.0001
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

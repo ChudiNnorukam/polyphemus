@@ -897,7 +897,7 @@ class SignalBot:
             if updated:
                 from datetime import datetime as dt
                 ctx_time = dt.strptime(updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                if (datetime.now(timezone.utc) - ctx_time).total_seconds() > 1800:
+                if (datetime.now(timezone.utc) - ctx_time).total_seconds() > 7200:
                     return {}
             return ctx
         except Exception:
@@ -1222,6 +1222,53 @@ class SignalBot:
                     )
                     self._mark_signal_stage(signal_id, "momentum_confirmation", "passed", detail)
 
+            # 2b-ii. Epoch time gate: reject if insufficient time for order lifecycle
+            # Order fill + settlement takes ~30s. Entries with <120s remaining
+            # resolve in <90s hold time, which has 4.1% WR (flash trades).
+            time_remaining = signal.get('time_remaining_secs', 999)
+            min_exec_secs = self._config.min_execution_secs_remaining
+            if signal.get('source') in ('cheap_side',) and time_remaining < min_exec_secs:
+                detail = f"time_remaining={time_remaining:.0f}s < min={min_exec_secs}s"
+                if self._signal_logger and signal_id > 0:
+                    self._signal_logger.update_signal(signal_id, {"outcome": "epoch_time_filtered"})
+                self._mark_signal_stage(signal_id, "epoch_time_gate", "filtered", detail)
+                self._logger.info(
+                    f"Epoch time gate: {signal.get('slug', '?')} | {detail}"
+                )
+                return
+
+            # 2b-iii. Pre-entry adverse selection filter
+            # Check if Binance price is moving AGAINST trade direction in last N seconds.
+            # Favorable fills (Binance moving WITH trade) have 47.1% WR (break-even).
+            # Adverse fills (Binance moving AGAINST) have 19.0% WR (disaster).
+            if (self._config.adverse_precheck_enabled
+                    and signal.get('source') in ('cheap_side',)
+                    and self._momentum_feed
+                    and asset in ASSET_TO_BINANCE):
+                lookback = self._config.adverse_precheck_secs
+                threshold = self._config.adverse_precheck_threshold
+                velocity = self._momentum_feed.get_recent_velocity(asset, lookback_secs=lookback)
+                if velocity is not None:
+                    direction = signal.get('outcome', '')
+                    is_adverse = (
+                        (direction == 'Up' and velocity < -threshold) or
+                        (direction == 'Down' and velocity > threshold)
+                    )
+                    detail = (
+                        f"{direction} vs velocity={velocity:+.4%} "
+                        f"(lookback={lookback}s, threshold={threshold:.4%})"
+                    )
+                    if is_adverse:
+                        if self._signal_logger and signal_id > 0:
+                            self._signal_logger.update_signal(signal_id, {"outcome": "adverse_precheck_filtered"})
+                        self._mark_signal_stage(signal_id, "adverse_precheck", "filtered", detail)
+                        self._logger.info(
+                            f"ADVERSE PRECHECK SKIP | {signal.get('slug', '?')} | {detail}"
+                        )
+                        return
+                    self._mark_signal_stage(signal_id, "adverse_precheck", "passed", detail)
+                    self._logger.debug(f"Adverse precheck passed: {signal.get('slug', '?')} | {detail}")
+
             # 2c. Regime check (skip flat markets — not applicable to price arb or weather)
             if self._regime_detector and signal.get('source') not in ('pair_arb', 'noaa_weather', 'resolution_snipe', 'flat_regime_rtds', 'tugao9_copy'):
                 if not self._regime_detector.should_trade(signal.get("asset", "BTC")):
@@ -1367,6 +1414,7 @@ class SignalBot:
                     entry_time=time.time(),
                     filter_score=signal_score,
                     metadata=phantom_pos.metadata,
+                    fg_at_entry=signal.get("fear_greed"),
                 )
 
                 # Update signal logger
@@ -1461,6 +1509,7 @@ class SignalBot:
                 entry_time=time.time(),
                 filter_score=signal_score,
                 metadata=signal.get("metadata"),
+                fg_at_entry=signal.get("fear_greed"),
             )
 
             # 7b. Adverse selection handled by position_executor._run_adverse_check (epoch-aware)

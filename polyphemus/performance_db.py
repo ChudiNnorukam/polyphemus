@@ -158,6 +158,7 @@ class PerformanceDB:
         filter_score: float = None,
         metadata: Optional[dict] = None,
         strategy: str = "signal_bot",
+        fg_at_entry: float = None,
     ) -> None:
         """
         Record a new trade entry.
@@ -173,6 +174,7 @@ class PerformanceDB:
             outcome: Outcome name (e.g., 'YES', 'NO').
             market_title: Human-readable market title.
             filter_score: Signal quality score from XGBoost model (0-100).
+            fg_at_entry: Fear & Greed index value at time of entry (0-100).
         """
         conn = self._get_conn()
         try:
@@ -182,15 +184,17 @@ class PerformanceDB:
                 INSERT INTO trades (
                     trade_id, token_id, slug, entry_time, entry_price, entry_size,
                     entry_tx_hash, outcome, market_title, is_resolved, is_redeemed,
-                    side, entry_amount, strategy, filter_score, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    side, entry_amount, strategy, filter_score, metadata, fg_at_entry
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 trade_id, token_id, slug, entry_time, entry_price, entry_size,
                 entry_tx_hash, outcome, market_title, 0, 0,
-                'BUY', entry_price * entry_size, strategy, filter_score, metadata_json
+                'BUY', entry_price * entry_size, strategy, filter_score, metadata_json,
+                fg_at_entry
             ))
             conn.commit()
-            self.logger.info(f'Recorded entry: {trade_id} @ {entry_price:.4f} x {entry_size} score={filter_score}')
+            fg_str = f' fg={fg_at_entry}' if fg_at_entry is not None else ''
+            self.logger.info(f'Recorded entry: {trade_id} @ {entry_price:.4f} x {entry_size} score={filter_score}{fg_str}')
         finally:
             conn.close()
 

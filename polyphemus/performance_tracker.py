@@ -40,6 +40,7 @@ class PerformanceTracker:
         entry_time: Optional[float] = None,
         filter_score: Optional[float] = None,
         metadata: Optional[dict] = None,
+        fg_at_entry: Optional[float] = None,
     ) -> None:
         """
         Record a trade entry asynchronously.
@@ -55,6 +56,7 @@ class PerformanceTracker:
             market_title: Human-readable market title.
             entry_time: Entry timestamp (Unix epoch seconds). If None, uses current time.
             filter_score: Signal quality score from XGBoost model (0-100).
+            fg_at_entry: Fear & Greed index value at time of entry (0-100).
         """
         if entry_time is None:
             entry_time = asyncio.get_event_loop().time()
@@ -65,7 +67,8 @@ class PerformanceTracker:
             None,
             self.db.record_entry,
             trade_id, token_id, slug, entry_time, entry_price, entry_size,
-            entry_tx_hash, outcome, market_title, filter_score, metadata
+            entry_tx_hash, outcome, market_title, filter_score, metadata,
+            "signal_bot", fg_at_entry
         )
 
         self.logger.info(
