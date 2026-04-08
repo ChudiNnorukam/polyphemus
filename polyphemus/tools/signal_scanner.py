@@ -604,14 +604,17 @@ def cmd_resolve(db_path: Path):
         total_w = 0
         for strength, n, w in all_resolved:
             wr = w / n * 100 if n > 0 else 0
-            color = green if wr > 50 else (yellow if wr > 40 else red)
-            print(f"  {strength:8s}: {n:3d} resolved | {color}WR = {wr:.1f}%{reset} ({w}/{n})")
+            wr_color = green if wr > 50 else (YELLOW if wr > 40 else red)
+            print(f"  {strength:8s}: {n:3d} resolved | {wr_color}WR = {wr:.1f}%{reset} ({w}/{n})")
             total_n += n
             total_w += w
         if total_n > 0:
             total_wr = total_w / total_n * 100
-            color = green if total_wr > 50 else (yellow if total_wr > 40 else red)
-            print(f"  {'TOTAL':8s}: {total_n:3d} resolved | {color}WR = {total_wr:.1f}%{reset} ({total_w}/{total_n})")
+            wr_color = green if total_wr > 50 else (YELLOW if total_wr > 40 else red)
+            print(f"  {'TOTAL':8s}: {total_n:3d} resolved | {wr_color}WR = {total_wr:.1f}%{reset} ({total_w}/{total_n})")
+        if total_n < 50:
+            print(f"\n  {dim}CAUTION: n={total_n} is too small. Need n>=50 for reliable WR. "
+                  f"Low-price bets (e.g., $0.03) are +EV if mispriced but lose most individual bets.{reset}")
     elif resolved_count == 0:
         print(f"\n  {dim}No signals resolved yet (markets still active). Check back after games end.{reset}")
 
