@@ -69,176 +69,198 @@ SPORTSBOOK_PRIORITY = [
 ]
 
 # ---------------------------------------------------------------------------
-# Team name aliases: slug abbreviation -> list of full name variants
+# Team name aliases: sport -> (abbr -> list of full name variants)
+# Sport-scoped to avoid NBA "lac" (Clippers) being overwritten by NFL "lac" (Chargers)
 # ---------------------------------------------------------------------------
-TEAM_ALIASES: Dict[str, List[str]] = {
-    # NBA
-    "gsw": ["golden state warriors", "warriors", "golden state"],
-    "sac": ["sacramento kings", "kings", "sacramento"],
-    "mil": ["milwaukee bucks", "bucks", "milwaukee"],
-    "bkn": ["brooklyn nets", "nets", "brooklyn"],
-    "lal": ["los angeles lakers", "lakers", "la lakers"],
-    "bos": ["boston celtics", "celtics", "boston"],
-    "mia": ["miami heat", "heat", "miami"],
-    "phi": ["philadelphia 76ers", "76ers", "sixers", "philadelphia"],
-    "chi": ["chicago bulls", "bulls", "chicago"],
-    "atl": ["atlanta hawks", "hawks", "atlanta"],
-    "tor": ["toronto raptors", "raptors", "toronto"],
-    "nyk": ["new york knicks", "knicks", "new york"],
-    "cle": ["cleveland cavaliers", "cavaliers", "cleveland"],
-    "ind": ["indiana pacers", "pacers", "indiana"],
-    "det": ["detroit pistons", "pistons", "detroit"],
-    "cha": ["charlotte hornets", "hornets", "charlotte"],
-    "was": ["washington wizards", "wizards", "washington"],
-    "orl": ["orlando magic", "magic", "orlando"],
-    "den": ["denver nuggets", "nuggets", "denver"],
-    "min": ["minnesota timberwolves", "timberwolves", "minnesota"],
-    "okc": ["oklahoma city thunder", "thunder", "oklahoma city"],
-    "por": ["portland trail blazers", "trail blazers", "portland"],
-    "uta": ["utah jazz", "jazz", "utah"],
-    "phx": ["phoenix suns", "suns", "phoenix"],
-    "lac": ["los angeles clippers", "clippers", "la clippers"],
-    "nop": ["new orleans pelicans", "pelicans", "new orleans"],
-    "dal": ["dallas mavericks", "mavericks", "dallas"],
-    "hou": ["houston rockets", "rockets", "houston"],
-    "mem": ["memphis grizzlies", "grizzlies", "memphis"],
-    "sas": ["san antonio spurs", "spurs", "san antonio"],
-    # NFL
-    "ne": ["new england patriots", "patriots", "new england"],
-    "buf": ["buffalo bills", "bills", "buffalo"],
-    "mia": ["miami dolphins", "dolphins"],  # overrides NBA mia
-    "nyj": ["new york jets", "jets"],
-    "nyg": ["new york giants", "giants"],
-    "phi": ["philadelphia eagles", "eagles"],  # overrides NBA phi
-    "dal": ["dallas cowboys", "cowboys"],  # overrides NBA dal
-    "was": ["washington commanders", "commanders"],  # overrides NBA was
-    "chi": ["chicago bears", "bears"],  # overrides NBA chi
-    "det": ["detroit lions", "lions"],  # overrides NBA det
-    "gb": ["green bay packers", "packers", "green bay"],
-    "min": ["minnesota vikings", "vikings"],  # overrides NBA min
-    "sea": ["seattle seahawks", "seahawks", "seattle"],
-    "sf": ["san francisco 49ers", "49ers", "san francisco"],
-    "lar": ["los angeles rams", "rams", "la rams"],
-    "ari": ["arizona cardinals", "cardinals", "arizona"],
-    "atl": ["atlanta falcons", "falcons"],  # overrides NBA atl
-    "car": ["carolina panthers", "panthers", "carolina"],
-    "no": ["new orleans saints", "saints"],
-    "tb": ["tampa bay buccaneers", "buccaneers", "tampa bay"],
-    "bal": ["baltimore ravens", "ravens", "baltimore"],
-    "pit": ["pittsburgh steelers", "steelers", "pittsburgh"],
-    "cle": ["cleveland browns", "browns"],  # overrides NBA cle
-    "cin": ["cincinnati bengals", "bengals", "cincinnati"],
-    "ind": ["indianapolis colts", "colts"],  # overrides NBA ind
-    "jax": ["jacksonville jaguars", "jaguars", "jacksonville"],
-    "ten": ["tennessee titans", "titans", "tennessee"],
-    "hou": ["houston texans", "texans"],  # overrides NBA hou
-    "kc": ["kansas city chiefs", "chiefs", "kansas city"],
-    "lv": ["las vegas raiders", "raiders", "las vegas"],
-    "lac": ["los angeles chargers", "chargers", "la chargers"],  # overrides NBA lac
-    "den": ["denver broncos", "broncos"],  # overrides NBA den
-    # NHL
-    "bos": ["boston bruins", "bruins"],  # overrides NBA bos
-    "buf": ["buffalo sabres", "sabres"],  # overrides NFL buf
-    "det": ["detroit red wings", "red wings"],  # overrides
-    "fla": ["florida panthers", "florida"],
-    "mtl": ["montreal canadiens", "canadiens", "montreal"],
-    "ott": ["ottawa senators", "senators", "ottawa"],
-    "tb": ["tampa bay lightning", "lightning"],  # overrides NFL tb
-    "tor": ["toronto maple leafs", "maple leafs"],  # overrides NBA tor
-    "car": ["carolina hurricanes", "hurricanes"],  # overrides NFL car
-    "cbj": ["columbus blue jackets", "blue jackets", "columbus"],
-    "nyi": ["new york islanders", "islanders"],
-    "nyr": ["new york rangers", "rangers"],
-    "phi": ["philadelphia flyers", "flyers"],  # overrides
-    "pit": ["pittsburgh penguins", "penguins"],  # overrides NFL pit
-    "was": ["washington capitals", "capitals"],  # overrides
-    "chi": ["chicago blackhawks", "blackhawks"],  # overrides
-    "col": ["colorado avalanche", "avalanche", "colorado"],
-    "min": ["minnesota wild", "wild"],  # overrides
-    "nsh": ["nashville predators", "predators", "nashville"],
-    "stl": ["st. louis blues", "blues", "st louis"],
-    "wpg": ["winnipeg jets", "jets", "winnipeg"],
-    "ana": ["anaheim ducks", "ducks", "anaheim"],
-    "cgy": ["calgary flames", "flames", "calgary"],
-    "edm": ["edmonton oilers", "oilers", "edmonton"],
-    "lak": ["los angeles kings", "kings"],
-    "sjs": ["san jose sharks", "sharks", "san jose"],
-    "sea": ["seattle kraken", "kraken"],  # overrides NFL sea
-    "van": ["vancouver canucks", "canucks", "vancouver"],
-    "ari": ["arizona coyotes", "coyotes"],  # overrides NFL ari -> also utah hockey club
-    "nj": ["new jersey devils", "devils", "new jersey"],
-    "dal": ["dallas stars", "stars"],  # overrides
-    # MLB
-    "bos": ["boston red sox", "red sox"],
-    "nyy": ["new york yankees", "yankees"],
-    "tb": ["tampa bay rays", "rays"],
-    "tor": ["toronto blue jays", "blue jays"],
-    "bal": ["baltimore orioles", "orioles"],
-    "chi": ["chicago white sox", "white sox"],
-    "cle": ["cleveland guardians", "guardians"],
-    "kc": ["kansas city royals", "royals"],
-    "min": ["minnesota twins", "twins"],
-    "det": ["detroit tigers", "tigers"],
-    "hou": ["houston astros", "astros"],
-    "laa": ["los angeles angels", "angels", "la angels"],
-    "sea": ["seattle mariners", "mariners"],
-    "tex": ["texas rangers", "rangers"],
-    "oak": ["oakland athletics", "athletics", "oakland"],
-    "atl": ["atlanta braves", "braves"],
-    "mia": ["miami marlins", "marlins"],
-    "nym": ["new york mets", "mets"],
-    "phi": ["philadelphia phillies", "phillies"],
-    "was": ["washington nationals", "nationals"],
-    "chc": ["chicago cubs", "cubs"],
-    "cin": ["cincinnati reds", "reds"],
-    "mil": ["milwaukee brewers", "brewers"],
-    "pit": ["pittsburgh pirates", "pirates"],
-    "stl": ["st. louis cardinals", "cardinals", "st louis"],
-    "ari": ["arizona diamondbacks", "diamondbacks", "d-backs"],
-    "col": ["colorado rockies", "rockies"],
-    "lad": ["los angeles dodgers", "dodgers", "la dodgers"],
-    "sd": ["san diego padres", "padres", "san diego"],
-    "sf": ["san francisco giants", "giants"],
-    # EPL soccer
-    "ars": ["arsenal", "arsenal fc"],
-    "che": ["chelsea", "chelsea fc"],
-    "liv": ["liverpool", "liverpool fc"],
-    "mci": ["manchester city", "man city"],
-    "mun": ["manchester united", "man united", "man utd"],
-    "tot": ["tottenham hotspur", "tottenham", "spurs"],
-    "new": ["newcastle united", "newcastle"],
-    "avl": ["aston villa"],
-    "whu": ["west ham united", "west ham"],
-    "eve": ["everton"],
-    "bha": ["brighton", "brighton & hove albion"],
-    "bre": ["brentford"],
-    "cry": ["crystal palace"],
-    "wol": ["wolverhampton wanderers", "wolves"],
-    "ful": ["fulham"],
-    "bou": ["bournemouth", "afc bournemouth"],
-    "not": ["nottingham forest"],
-    "lei": ["leicester city"],
-    "sou": ["southampton"],
-    "ips": ["ipswich town", "ipswich"],
-    # Champions League
-    "rma": ["real madrid", "madrid"],
-    "bar": ["barcelona", "fc barcelona"],
-    "bay": ["bayern munich", "fc bayern"],
-    "psg": ["paris saint-germain", "psg"],
-    "juv": ["juventus"],
-    "int": ["inter milan", "internazionale", "inter"],
-    "acm": ["ac milan", "milan"],
-    "atm": ["atletico madrid"],
-    "bvb": ["borussia dortmund", "dortmund"],
-    "por": ["porto", "fc porto"],
-    "ben": ["benfica", "sl benfica"],
-    "ajx": ["ajax"],
-    "cel": ["celtic"],
-    "rng": ["rangers", "rangers fc"],
+SPORT_ALIASES: Dict[str, Dict[str, List[str]]] = {
+    "basketball_nba": {
+        "gsw": ["golden state warriors", "warriors", "golden state"],
+        "sac": ["sacramento kings", "kings", "sacramento"],
+        "mil": ["milwaukee bucks", "bucks", "milwaukee"],
+        "bkn": ["brooklyn nets", "nets", "brooklyn"],
+        "lal": ["los angeles lakers", "lakers", "la lakers"],
+        "bos": ["boston celtics", "celtics", "boston"],
+        "mia": ["miami heat", "heat", "miami"],
+        "phi": ["philadelphia 76ers", "76ers", "sixers", "philadelphia"],
+        "chi": ["chicago bulls", "bulls", "chicago"],
+        "atl": ["atlanta hawks", "hawks", "atlanta"],
+        "tor": ["toronto raptors", "raptors", "toronto"],
+        "nyk": ["new york knicks", "knicks", "new york"],
+        "cle": ["cleveland cavaliers", "cavaliers", "cleveland"],
+        "ind": ["indiana pacers", "pacers", "indiana"],
+        "det": ["detroit pistons", "pistons", "detroit"],
+        "cha": ["charlotte hornets", "hornets", "charlotte"],
+        "was": ["washington wizards", "wizards", "washington"],
+        "orl": ["orlando magic", "magic", "orlando"],
+        "den": ["denver nuggets", "nuggets", "denver"],
+        "min": ["minnesota timberwolves", "timberwolves", "minnesota"],
+        "okc": ["oklahoma city thunder", "thunder", "oklahoma city"],
+        "por": ["portland trail blazers", "trail blazers", "portland"],
+        "uta": ["utah jazz", "jazz", "utah"],
+        "phx": ["phoenix suns", "suns", "phoenix"],
+        "lac": ["los angeles clippers", "clippers", "la clippers"],
+        "nop": ["new orleans pelicans", "pelicans", "new orleans"],
+        "dal": ["dallas mavericks", "mavericks", "dallas"],
+        "hou": ["houston rockets", "rockets", "houston"],
+        "mem": ["memphis grizzlies", "grizzlies", "memphis"],
+        "sas": ["san antonio spurs", "spurs", "san antonio"],
+    },
+    "americanfootball_nfl": {
+        "ne": ["new england patriots", "patriots", "new england"],
+        "buf": ["buffalo bills", "bills", "buffalo"],
+        "mia": ["miami dolphins", "dolphins", "miami"],
+        "nyj": ["new york jets", "jets"],
+        "nyg": ["new york giants", "giants"],
+        "phi": ["philadelphia eagles", "eagles", "philadelphia"],
+        "dal": ["dallas cowboys", "cowboys", "dallas"],
+        "was": ["washington commanders", "commanders", "washington"],
+        "chi": ["chicago bears", "bears", "chicago"],
+        "det": ["detroit lions", "lions", "detroit"],
+        "gb": ["green bay packers", "packers", "green bay"],
+        "min": ["minnesota vikings", "vikings", "minnesota"],
+        "sea": ["seattle seahawks", "seahawks", "seattle"],
+        "sf": ["san francisco 49ers", "49ers", "san francisco"],
+        "lar": ["los angeles rams", "rams", "la rams"],
+        "ari": ["arizona cardinals", "cardinals", "arizona"],
+        "atl": ["atlanta falcons", "falcons", "atlanta"],
+        "car": ["carolina panthers", "panthers", "carolina"],
+        "no": ["new orleans saints", "saints", "new orleans"],
+        "tb": ["tampa bay buccaneers", "buccaneers", "tampa bay"],
+        "bal": ["baltimore ravens", "ravens", "baltimore"],
+        "pit": ["pittsburgh steelers", "steelers", "pittsburgh"],
+        "cle": ["cleveland browns", "browns", "cleveland"],
+        "cin": ["cincinnati bengals", "bengals", "cincinnati"],
+        "ind": ["indianapolis colts", "colts", "indianapolis"],
+        "jax": ["jacksonville jaguars", "jaguars", "jacksonville"],
+        "ten": ["tennessee titans", "titans", "tennessee"],
+        "hou": ["houston texans", "texans", "houston"],
+        "kc": ["kansas city chiefs", "chiefs", "kansas city"],
+        "lv": ["las vegas raiders", "raiders", "las vegas"],
+        "lac": ["los angeles chargers", "chargers", "la chargers"],
+        "den": ["denver broncos", "broncos", "denver"],
+    },
+    "icehockey_nhl": {
+        "bos": ["boston bruins", "bruins", "boston"],
+        "buf": ["buffalo sabres", "sabres", "buffalo"],
+        "det": ["detroit red wings", "red wings", "detroit"],
+        "fla": ["florida panthers", "florida"],
+        "mtl": ["montreal canadiens", "canadiens", "montreal"],
+        "ott": ["ottawa senators", "senators", "ottawa"],
+        "tb": ["tampa bay lightning", "lightning", "tampa bay"],
+        "tor": ["toronto maple leafs", "maple leafs", "toronto"],
+        "car": ["carolina hurricanes", "hurricanes", "carolina"],
+        "cbj": ["columbus blue jackets", "blue jackets", "columbus"],
+        "nyi": ["new york islanders", "islanders"],
+        "nyr": ["new york rangers", "rangers"],
+        "phi": ["philadelphia flyers", "flyers", "philadelphia"],
+        "pit": ["pittsburgh penguins", "penguins", "pittsburgh"],
+        "was": ["washington capitals", "capitals", "washington"],
+        "chi": ["chicago blackhawks", "blackhawks", "chicago"],
+        "col": ["colorado avalanche", "avalanche", "colorado"],
+        "min": ["minnesota wild", "wild", "minnesota"],
+        "nsh": ["nashville predators", "predators", "nashville"],
+        "stl": ["st. louis blues", "blues", "st louis"],
+        "wpg": ["winnipeg jets", "jets", "winnipeg"],
+        "ana": ["anaheim ducks", "ducks", "anaheim"],
+        "cgy": ["calgary flames", "flames", "calgary"],
+        "edm": ["edmonton oilers", "oilers", "edmonton"],
+        "lak": ["los angeles kings", "kings", "los angeles"],
+        "sjs": ["san jose sharks", "sharks", "san jose"],
+        "sea": ["seattle kraken", "kraken", "seattle"],
+        "van": ["vancouver canucks", "canucks", "vancouver"],
+        "ari": ["arizona coyotes", "coyotes", "utah hockey club"],
+        "nj": ["new jersey devils", "devils", "new jersey"],
+        "dal": ["dallas stars", "stars", "dallas"],
+    },
+    "baseball_mlb": {
+        "bos": ["boston red sox", "red sox", "boston"],
+        "nyy": ["new york yankees", "yankees"],
+        "tb": ["tampa bay rays", "rays", "tampa bay"],
+        "tor": ["toronto blue jays", "blue jays", "toronto"],
+        "bal": ["baltimore orioles", "orioles", "baltimore"],
+        "chi": ["chicago white sox", "white sox", "chicago"],
+        "chc": ["chicago cubs", "cubs"],
+        "cle": ["cleveland guardians", "guardians", "cleveland"],
+        "kc": ["kansas city royals", "royals", "kansas city"],
+        "min": ["minnesota twins", "twins", "minnesota"],
+        "det": ["detroit tigers", "tigers", "detroit"],
+        "hou": ["houston astros", "astros", "houston"],
+        "laa": ["los angeles angels", "angels", "la angels"],
+        "sea": ["seattle mariners", "mariners", "seattle"],
+        "tex": ["texas rangers", "rangers", "texas"],
+        "oak": ["oakland athletics", "athletics", "oakland"],
+        "atl": ["atlanta braves", "braves", "atlanta"],
+        "mia": ["miami marlins", "marlins", "miami"],
+        "nym": ["new york mets", "mets"],
+        "phi": ["philadelphia phillies", "phillies", "philadelphia"],
+        "was": ["washington nationals", "nationals", "washington"],
+        "cin": ["cincinnati reds", "reds", "cincinnati"],
+        "mil": ["milwaukee brewers", "brewers", "milwaukee"],
+        "pit": ["pittsburgh pirates", "pirates", "pittsburgh"],
+        "stl": ["st. louis cardinals", "cardinals", "st louis"],
+        "ari": ["arizona diamondbacks", "diamondbacks", "d-backs"],
+        "col": ["colorado rockies", "rockies", "colorado"],
+        "lad": ["los angeles dodgers", "dodgers", "la dodgers"],
+        "sd": ["san diego padres", "padres", "san diego"],
+        "sf": ["san francisco giants", "giants", "san francisco"],
+    },
+    "soccer_epl": {
+        "ars": ["arsenal", "arsenal fc"],
+        "che": ["chelsea", "chelsea fc"],
+        "liv": ["liverpool", "liverpool fc"],
+        "mci": ["manchester city", "man city"],
+        "mun": ["manchester united", "man united", "man utd"],
+        "tot": ["tottenham hotspur", "tottenham", "spurs"],
+        "new": ["newcastle united", "newcastle"],
+        "avl": ["aston villa"],
+        "whu": ["west ham united", "west ham"],
+        "eve": ["everton"],
+        "bha": ["brighton", "brighton & hove albion"],
+        "bre": ["brentford"],
+        "cry": ["crystal palace"],
+        "wol": ["wolverhampton wanderers", "wolves"],
+        "ful": ["fulham"],
+        "bou": ["bournemouth", "afc bournemouth"],
+        "not": ["nottingham forest"],
+        "lei": ["leicester city"],
+        "sou": ["southampton"],
+        "ips": ["ipswich town", "ipswich"],
+    },
+    "soccer_uefa_champions_league": {
+        "rma": ["real madrid", "madrid"],
+        "bar": ["barcelona", "fc barcelona"],
+        "bay": ["bayern munich", "fc bayern"],
+        "psg": ["paris saint-germain", "psg"],
+        "juv": ["juventus"],
+        "int": ["inter milan", "internazionale", "inter"],
+        "acm": ["ac milan", "milan"],
+        "atm": ["atletico madrid"],
+        "bvb": ["borussia dortmund", "dortmund"],
+        "por": ["porto", "fc porto"],
+        "ben": ["benfica", "sl benfica"],
+        "ajx": ["ajax"],
+        "cel": ["celtic"],
+        "rng": ["rangers", "rangers fc"],
+    },
 }
+
+# Flat lookup built from sport-scoped aliases (for general matching)
+# Key: abbreviation, Value: list of names. Sport-specific lookups preferred.
+TEAM_ALIASES: Dict[str, List[str]] = {}
+for _sport_aliases in SPORT_ALIASES.values():
+    for _abbr, _names in _sport_aliases.items():
+        if _abbr not in TEAM_ALIASES:
+            TEAM_ALIASES[_abbr] = _names
 
 # Reverse lookup: full name tokens -> abbreviation (built at startup)
 _NAME_TO_ABBR: Dict[str, str] = {}
+
+
+def _get_sport_aliases(sport_key: Optional[str]) -> Dict[str, List[str]]:
+    """Get team aliases for a specific sport, falling back to flat lookup."""
+    if sport_key and sport_key in SPORT_ALIASES:
+        return SPORT_ALIASES[sport_key]
+    return TEAM_ALIASES
 
 
 def _build_reverse_alias():
@@ -332,47 +354,96 @@ def fetch_odds(sport: str, api_key: str) -> List[dict]:
 
 
 def fetch_polymarket_sports(sport_filter: Optional[str] = None) -> List[dict]:
-    """Fetch active Polymarket sports markets via Gamma API with Data API fallback."""
+    """Fetch active Polymarket sports markets via Gamma API sorted by volume.
+
+    The tag=sports filter does not work reliably. Instead, we fetch top events
+    by 24h volume and filter by sports slug patterns (nba, nfl, nhl, etc.).
+    """
     markets = []
 
-    # Try Gamma API first - it has richer metadata
-    try:
-        url = f"{GAMMA_API}/events?active=true&closed=false&limit=200&tag=sports"
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-        # Gamma API returns events; flatten to markets
-        if isinstance(data, list):
-            for event in data:
-                for market in event.get("markets", []):
-                    market["event_slug"] = event.get("slug", "")
-                    market["event_title"] = event.get("title", "")
-                    markets.append(market)
-        elif isinstance(data, dict):
-            for market in data.get("markets", []):
-                markets.append(market)
-    except Exception:
-        pass
+    # Sports slug prefixes used by Polymarket
+    SPORTS_SLUGS = {
+        "nba", "nfl", "nhl", "mlb", "epl", "ucl", "ufc", "mma",
+        "ncaab", "ncaaf", "soccer", "tennis", "boxing",
+    }
+    # Title keywords that also indicate sports
+    SPORTS_TITLE_KW = {
+        "vs.", "spread:", "o/u ", "moneyline", "win on 2026", "win on 2025",
+        "totals:", "over/under",
+    }
 
-    # Fallback: Data API activity endpoint for sports slugs
-    if not markets:
+    # Fetch top events by volume across multiple pages
+    for offset in (0, 100):
         try:
-            url = f"{DATA_API}/markets?tag=sports&limit=200&active=true"
+            url = (
+                f"{GAMMA_API}/events?active=true&closed=false&limit=100"
+                f"&order=volume24hr&ascending=false&offset={offset}"
+            )
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
-            if isinstance(data, list):
-                markets = data
+            if not isinstance(data, list):
+                continue
+            for event in data:
+                slug = event.get("slug", "").lower()
+                title = event.get("title", "").lower()
+                combined = slug + " " + title
+
+                # Check if this is a sports event
+                is_sports = any(slug.startswith(p + "-") or ("-" + p + "-") in slug for p in SPORTS_SLUGS)
+                if not is_sports:
+                    is_sports = any(kw in combined for kw in SPORTS_TITLE_KW)
+                if not is_sports:
+                    continue
+
+                # Extract markets from the event
+                event_markets = event.get("markets", [])
+                if event_markets:
+                    for market in event_markets:
+                        market["event_slug"] = event.get("slug", "")
+                        market["event_title"] = event.get("title", "")
+                        markets.append(market)
+                else:
+                    # Event itself is the market (no sub-markets)
+                    event["event_slug"] = event.get("slug", "")
+                    event["event_title"] = event.get("title", "")
+                    markets.append(event)
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+    # Fallback: use CLOB API with known condition IDs from whale trades
+    if not markets:
+        try:
+            from pathlib import Path
+            whale_db = Path(__file__).parent.parent / "data" / "whale_monitor.db"
+            if whale_db.exists():
+                import sqlite3
+                conn = sqlite3.connect(str(whale_db))
+                rows = conn.execute(
+                    "SELECT DISTINCT condition_id, slug, title, outcome "
+                    "FROM whale_trades WHERE condition_id != '' "
+                    "ORDER BY timestamp DESC LIMIT 50"
+                ).fetchall()
+                conn.close()
+                for cid, slug, title, outcome in rows:
+                    clob_market = _http_get(f"{CLOB_API}/markets/{cid}")
+                    if clob_market:
+                        clob_market["event_slug"] = slug
+                        clob_market["event_title"] = title
+                        markets.append(clob_market)
+                    time.sleep(0.3)
         except Exception:
             pass
 
     # Filter to sport if requested
     if sport_filter and markets:
-        # Extract the league prefix (e.g. "basketball_nba" -> "nba")
-        sport_prefix = sport_filter.split("_")[-1]  # "nba", "nfl", etc.
+        sport_prefix = sport_filter.split("_")[-1].lower()  # "nba", "nfl", etc.
         markets = [
             m for m in markets
-            if sport_prefix in (m.get("slug", "") + " " + m.get("event_slug", "")).lower()
+            if sport_prefix in (
+                m.get("slug", "") + " " + m.get("event_slug", "") + " " + m.get("event_title", "")
+            ).lower()
         ]
 
     return markets
@@ -500,8 +571,17 @@ def _name_matches(sportsbook_name: str, query: str) -> bool:
 def _parse_slug_teams(slug: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Parse a Polymarket slug to extract sport, team1, team2.
-    Slug format: {sport}-{team1}-vs-{team2}-{date} or {sport}-{team1}-{team2}-{date}
-    Returns (sport_key, team1_abbr, team2_abbr).
+
+    Polymarket sports slugs follow the pattern:
+        {sport}-{team1}-{team2}-{YYYY}-{MM}-{DD}[-{variant}]
+    Examples:
+        nba-sac-gsw-2026-04-07              -> (basketball_nba, sac, gsw)
+        nba-cha-bos-2026-04-07-spread-home-4pt5 -> (basketball_nba, cha, bos)
+        nhl-chi-sj-2026-04-06              -> (icehockey_nhl, chi, sj)
+        epl-ars-che-2026-03-01-ars          -> (soccer_epl, ars, che)
+
+    The two team codes are always the tokens between the sport prefix and the
+    first 4-digit year. Everything after the date is a variant (spread, total, etc.).
     """
     slug_lower = slug.lower()
 
@@ -516,55 +596,67 @@ def _parse_slug_teams(slug: str) -> Tuple[Optional[str], Optional[str], Optional
     if not sport_key:
         return None, None, None
 
-    # Remove trailing date-like segments (YYYY-MM-DD or digits at end)
     parts = remaining.split("-")
-    # Strip trailing date parts (4-digit year, 2-digit month, 2-digit day)
-    while parts and (parts[-1].isdigit() and len(parts[-1]) in (2, 4)):
-        parts = parts[:-1]
 
-    if len(parts) < 2:
+    # Find the date boundary: first 4-digit numeric token is the year
+    date_idx = None
+    for i, p in enumerate(parts):
+        if len(p) == 4 and p.isdigit():
+            date_idx = i
+            break
+
+    # Extract team tokens: everything before the date
+    if date_idx is not None:
+        team_parts = parts[:date_idx]
+    else:
+        # No date found: strip trailing digits and use what remains
+        team_parts = []
+        for p in parts:
+            if p.isdigit() and len(p) in (2, 4):
+                break
+            team_parts.append(p)
+
+    if len(team_parts) < 2:
         return sport_key, None, None
 
-    # Try "at" or "vs" separator
-    if "vs" in parts:
-        idx = parts.index("vs")
-        team1_parts = parts[:idx]
-        team2_parts = parts[idx + 1:]
-    elif "at" in parts:
-        idx = parts.index("at")
-        team1_parts = parts[:idx]
-        team2_parts = parts[idx + 1:]
+    # Handle "vs" or "at" separator
+    if "vs" in team_parts:
+        idx = team_parts.index("vs")
+        t1 = "-".join(team_parts[:idx])
+        t2 = "-".join(team_parts[idx + 1:])
+    elif "at" in team_parts:
+        idx = team_parts.index("at")
+        t1 = "-".join(team_parts[:idx])
+        t2 = "-".join(team_parts[idx + 1:])
+    elif len(team_parts) == 2:
+        # Most common: exactly two team codes (e.g., sac, gsw)
+        t1, t2 = team_parts[0], team_parts[1]
+    elif len(team_parts) == 3:
+        # Could be multi-word team + single (e.g., "la-clippers" + "det")
+        # Try both splits, prefer the one where both match aliases
+        if TEAM_ALIASES.get(team_parts[0]):
+            t1, t2 = team_parts[0], "-".join(team_parts[1:])
+        elif TEAM_ALIASES.get("-".join(team_parts[:2])):
+            t1, t2 = "-".join(team_parts[:2]), team_parts[2]
+        else:
+            t1, t2 = team_parts[0], team_parts[1]
     else:
-        # Split in half
-        mid = len(parts) // 2
-        team1_parts = parts[:mid]
-        team2_parts = parts[mid:]
-
-    team1_str = "-".join(team1_parts)
-    team2_str = "-".join(team2_parts)
-
-    # Try direct alias lookup on joined string
-    t1 = TEAM_ALIASES.get(team1_str) and team1_str
-    t2 = TEAM_ALIASES.get(team2_str) and team2_str
-
-    # Fall back to first token as abbreviation
-    if not t1 and team1_parts:
-        t1 = team1_parts[0]
-    if not t2 and team2_parts:
-        t2 = team2_parts[0]
+        # 4+ tokens before date: take first two
+        t1, t2 = team_parts[0], team_parts[1]
 
     return sport_key, t1, t2
 
 
-def _team_full_names(abbr: str) -> List[str]:
-    """Get all known full names for a team abbreviation."""
-    return TEAM_ALIASES.get(abbr, [abbr])
+def _team_full_names(abbr: str, sport_key: Optional[str] = None) -> List[str]:
+    """Get all known full names for a team abbreviation, scoped by sport."""
+    aliases = _get_sport_aliases(sport_key)
+    return aliases.get(abbr, [abbr])
 
 
-def _odds_team_score(odds_team: str, poly_team: str) -> float:
+def _odds_team_score(odds_team: str, poly_team: str, sport_key: Optional[str] = None) -> float:
     """
     Score how well an Odds API team name matches a Polymarket team token.
-    Returns 0.0-1.0.
+    Returns 0.0-1.0. Uses sport-scoped aliases to avoid cross-sport confusion.
     """
     odds_norm = _normalize(odds_team)
     poly_norm = _normalize(poly_team)
@@ -573,8 +665,8 @@ def _odds_team_score(odds_team: str, poly_team: str) -> float:
     if poly_norm == odds_norm:
         return 1.0
 
-    # Check alias list
-    full_names = _team_full_names(poly_norm)
+    # Check alias list (sport-scoped)
+    full_names = _team_full_names(poly_norm, sport_key)
     for fn in full_names:
         if _normalize(fn) == odds_norm:
             return 1.0
@@ -614,11 +706,12 @@ def match_polymarket_to_odds(
         away = event.get("away_team", "")
 
         # Score both orderings (home/away can be in either order in slug)
+        # Pass sport_key so aliases are scoped correctly (e.g., NBA "lac" = Clippers)
         score_fwd = (
-            _odds_team_score(home, team1_abbr) + _odds_team_score(away, team2_abbr)
+            _odds_team_score(home, team1_abbr, sport_key) + _odds_team_score(away, team2_abbr, sport_key)
         ) / 2
         score_rev = (
-            _odds_team_score(home, team2_abbr) + _odds_team_score(away, team1_abbr)
+            _odds_team_score(home, team2_abbr, sport_key) + _odds_team_score(away, team1_abbr, sport_key)
         ) / 2
 
         score = max(score_fwd, score_rev)
@@ -715,16 +808,122 @@ def save_event_match(conn: sqlite3.Connection, poly_slug: str, odds_id: str, spo
 # ---------------------------------------------------------------------------
 # Core scan logic
 # ---------------------------------------------------------------------------
+def _resolve_outcome_to_team(
+    outcome_name: str,
+    market: dict,
+    odds_event: dict,
+    team1_abbr: Optional[str],
+    team2_abbr: Optional[str],
+    sport_key: Optional[str] = None,
+) -> Optional[str]:
+    """Map a Polymarket outcome name to a sportsbook team name.
+
+    Polymarket outcomes can be:
+      - Team names directly ("Sacramento Kings", "Warriors")
+      - "Yes"/"No" for will-X-win style markets
+
+    For Yes/No: "Yes" maps to the team the question is about. We figure
+    that out from the slug team order or the market question text.
+    Returns the sportsbook-style team name, or None if we can't resolve.
+    """
+    norm = outcome_name.strip().lower()
+    home = odds_event.get("home_team", "")
+    away = odds_event.get("away_team", "")
+
+    # Case 1: outcome IS a team name already (matches sportsbook team)
+    if _name_matches(home, outcome_name) or _name_matches(away, outcome_name):
+        return outcome_name
+
+    # Case 2: outcome matches a team abbreviation from the slug
+    if team1_abbr and norm in _team_full_names(team1_abbr, sport_key):
+        # Return the sportsbook team name that matches team1
+        if _odds_team_score(home, team1_abbr, sport_key) > _odds_team_score(away, team1_abbr, sport_key):
+            return home
+        return away
+    if team2_abbr and norm in _team_full_names(team2_abbr, sport_key):
+        if _odds_team_score(home, team2_abbr, sport_key) > _odds_team_score(away, team2_abbr, sport_key):
+            return home
+        return away
+
+    # Case 3: Yes/No outcomes - map using slug team order and market question
+    if norm == "yes":
+        # "Yes" = the subject team wins. In Polymarket sports markets,
+        # the question "Will X win?" makes X the subject.
+        # The first team in the slug is usually the subject.
+        if team1_abbr:
+            if _odds_team_score(home, team1_abbr, sport_key) > _odds_team_score(away, team1_abbr, sport_key):
+                return home
+            return away
+        # Fallback: try to extract team from question/title
+        title = market.get("question", market.get("title", market.get("event_title", ""))).lower()
+        if _name_matches(title, home):
+            return home
+        if _name_matches(title, away):
+            return away
+        return home  # Default: first team in slug = home
+
+    if norm == "no":
+        # "No" = the OTHER team
+        if team1_abbr:
+            if _odds_team_score(home, team1_abbr, sport_key) > _odds_team_score(away, team1_abbr, sport_key):
+                return away  # team1 is home, so "No" = away
+            return home
+        return away  # Default: second team
+
+    return None
+
+
+def _is_moneyline_market(market: dict) -> bool:
+    """Check if a market is a moneyline/winner market (not spread, total, etc.)."""
+    slug = market.get("slug", "").lower()
+    event_slug = market.get("event_slug", "").lower()
+    question = market.get("question", market.get("title", "")).lower()
+
+    # Skip spread, total, over/under, prop markets
+    skip_keywords = [
+        "spread", "o/u", "over/under", "totals", "total",
+        "1h-", "1q-", "2h-", "first-half", "first-quarter",
+        "pts", "pt5", "rebounds", "assists", "blocks", "steals",
+        "three-pointers", "strikeouts", "hits", "runs",
+    ]
+    for kw in skip_keywords:
+        if kw in slug or kw in event_slug:
+            return False
+
+    # Positive signals for moneyline
+    moneyline_kw = ["moneyline", "win", "winner", "to-win"]
+    for kw in moneyline_kw:
+        if kw in slug or kw in question:
+            return True
+
+    # If no explicit moneyline indicator, check if outcomes are two teams or Yes/No
+    outcomes = market.get("outcomes", "")
+    if isinstance(outcomes, str):
+        try:
+            outcomes = json.loads(outcomes)
+        except Exception:
+            outcomes = []
+    if outcomes and len(outcomes) == 2:
+        # Two outcomes and no skip keywords = likely moneyline
+        return True
+
+    return True  # Default: include if not explicitly excluded
+
+
 def scan_sport(
     sport: str,
     api_key: str,
     conn: sqlite3.Connection,
+    poly_markets_cache: Optional[List[dict]] = None,
     min_div: float = 3.0,
     min_confidence: float = 0.5,
     verbose: bool = False,
 ) -> List[dict]:
     """
     Scan one sport for divergences. Returns list of divergence dicts.
+
+    poly_markets_cache: pre-fetched Polymarket sports markets (avoids
+    re-fetching the same Gamma data for every sport).
     """
     sport_label = SPORTS.get(sport, sport)
 
@@ -740,38 +939,71 @@ def scan_sport(
     if verbose:
         print(f"  {len(odds_events)} {sport_label} events from sportsbooks")
 
-    # Fetch Polymarket sports markets
-    poly_markets = fetch_polymarket_sports(sport)
+    # Use cached markets or fetch fresh
+    if poly_markets_cache is not None:
+        poly_markets = poly_markets_cache
+    else:
+        poly_markets = fetch_polymarket_sports(sport)
+
+    # Filter to this sport
+    sport_prefix = sport.split("_")[-1].lower()
+    poly_markets = [
+        m for m in poly_markets
+        if sport_prefix in (
+            m.get("slug", "") + " " + m.get("event_slug", "") + " " + m.get("event_title", "")
+        ).lower()
+    ]
+
     if not poly_markets:
         if verbose:
             print(f"  No Polymarket {sport_label} markets found")
         return []
 
+    # Deduplicate: only process moneyline markets, skip spread/total/1H variants
+    # Group by event_slug and pick one representative market per game
+    seen_events: Dict[str, bool] = {}
+    moneyline_markets = []
+    for market in poly_markets:
+        if not _is_moneyline_market(market):
+            continue
+        event_key = market.get("event_slug", market.get("slug", ""))
+        # Deduplicate: one market per event
+        if event_key in seen_events:
+            continue
+        seen_events[event_key] = True
+        moneyline_markets.append(market)
+
     if verbose:
-        print(f"  {len(poly_markets)} Polymarket {sport_label} markets")
+        print(f"  {len(moneyline_markets)} Polymarket {sport_label} moneyline markets (deduplicated from {len(poly_markets)})")
 
     divergences = []
 
-    for market in poly_markets:
+    for market in moneyline_markets:
+        # Prefer event_slug for matching (has the sport-team-date format)
+        event_slug = market.get("event_slug", "")
         slug = market.get("slug", market.get("conditionId", ""))
+        match_slug = event_slug if event_slug else slug
         title = market.get("question", market.get("title", market.get("event_title", "")))
 
-        if not slug:
+        if not match_slug:
             continue
 
         # Match this Polymarket market to an Odds API event
-        odds_event, confidence = match_polymarket_to_odds(slug, title, odds_events)
+        odds_event, confidence = match_polymarket_to_odds(match_slug, title, odds_events)
 
         if confidence < min_confidence:
             if verbose:
-                print(f"  SKIP (low confidence {confidence:.2f}): {slug}")
+                print(f"  SKIP (low confidence {confidence:.2f}): {match_slug}")
             continue
 
         if verbose:
-            print(f"  MATCHED ({confidence:.2f}): {slug} -> {odds_event.get('home_team')} vs {odds_event.get('away_team')}")
+            print(f"  MATCHED ({confidence:.2f}): {match_slug} -> {odds_event.get('home_team')} vs {odds_event.get('away_team')}")
 
         # Save the match
-        save_event_match(conn, slug, odds_event.get("id", ""), sport, confidence)
+        save_event_match(conn, match_slug, odds_event.get("id", ""), sport, confidence)
+
+        # Parse teams from slug for outcome mapping
+        _, team1_abbr, team2_abbr = _parse_slug_teams(match_slug)
 
         # Get Polymarket outcomes and prices
         outcomes = market.get("outcomes", "")
@@ -800,7 +1032,7 @@ def scan_sport(
             # Try to fetch from CLOB if we have a condition_id
             condition_id = market.get("conditionId", market.get("condition_id", ""))
             if condition_id:
-                time.sleep(0.5)
+                time.sleep(0.3)
                 book = fetch_clob_book(condition_id)
                 if book:
                     mid = extract_mid_price(book)
@@ -819,13 +1051,26 @@ def scan_sport(
             except (ValueError, TypeError):
                 continue
 
-            if poly_price <= 0 or poly_price >= 1:
+            # Skip resolved or near-resolved markets
+            if poly_price <= 0.01 or poly_price >= 0.99:
                 continue
 
-            # Get sportsbook consensus for this outcome
-            consensus, best_book, best_prob = consensus_prob(odds_event, outcome_name)
+            # Map Polymarket outcome to sportsbook team name
+            sportsbook_team = _resolve_outcome_to_team(
+                outcome_name, market, odds_event, team1_abbr, team2_abbr, sport
+            )
+
+            if not sportsbook_team:
+                if verbose:
+                    print(f"    Could not map outcome '{outcome_name}' to sportsbook team")
+                continue
+
+            # Get sportsbook consensus for this team
+            consensus, best_book, best_prob = consensus_prob(odds_event, sportsbook_team)
 
             if consensus is None:
+                if verbose:
+                    print(f"    No sportsbook odds found for '{sportsbook_team}'")
                 continue
 
             # Divergence: positive = Poly is MORE expensive than consensus
@@ -834,11 +1079,14 @@ def scan_sport(
             if abs(div_pct) < min_div:
                 continue
 
+            # Use the readable team name for display
+            display_outcome = sportsbook_team if outcome_name.lower() in ("yes", "no") else outcome_name
+
             div = {
                 "sport": sport_label,
                 "event_name": f"{odds_event.get('away_team', '?')} vs {odds_event.get('home_team', '?')}",
                 "polymarket_slug": slug,
-                "polymarket_outcome": outcome_name,
+                "polymarket_outcome": display_outcome,
                 "polymarket_price": poly_price,
                 "polymarket_implied_prob": poly_price,
                 "sportsbook_consensus_prob": consensus,
@@ -853,8 +1101,8 @@ def scan_sport(
             divergences.append(div)
             save_divergence(conn, div)
 
-        # Polite rate limit
-        time.sleep(0.5)
+        # Brief rate limit (reduced from 0.5s)
+        time.sleep(0.1)
 
     return divergences
 
@@ -930,16 +1178,25 @@ def cmd_scan(
     conn = init_db(db_path)
     print_scan_header(sport_filter, min_div)
 
+    # Fetch all Polymarket sports markets ONCE (avoids 7x redundant Gamma calls)
+    print(f"  {DIM}Fetching Polymarket sports markets...{RESET}", flush=True)
+    all_poly_markets = fetch_polymarket_sports()
+    print(f"  {len(all_poly_markets)} Polymarket sports markets found", flush=True)
+
     sports_to_scan = [sport_filter] if sport_filter else list(SPORTS.keys())
     all_divergences = []
 
     for sport in sports_to_scan:
         print(f"  {DIM}Scanning {SPORTS.get(sport, sport)}...{RESET}", flush=True)
-        divs = scan_sport(sport, api_key, conn, min_div=min_div, verbose=verbose)
+        divs = scan_sport(
+            sport, api_key, conn,
+            poly_markets_cache=all_poly_markets,
+            min_div=min_div, verbose=verbose,
+        )
         all_divergences.extend(divs)
-        # Brief pause between sports to be polite to both APIs
+        # Brief pause between sports to be polite to The Odds API
         if len(sports_to_scan) > 1:
-            time.sleep(1)
+            time.sleep(0.5)
 
     conn.close()
 
