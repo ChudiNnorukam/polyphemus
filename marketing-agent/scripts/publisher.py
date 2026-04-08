@@ -164,9 +164,20 @@ def send_slack(msg: str):
         print(f"Slack alert failed: {e}")
 
 
-def build_utm_url(slug: str, platform: str = 'linkedin') -> str:
-    """Build a blog URL with UTM tracking parameters."""
-    # Extract the blog slug from the source_slug (e.g., 'w1-mon-i-deployed-4-000' -> use as campaign)
+# UTM Convention (enforced across all sites):
+# utm_source: linkedin | twitter | medium | email | pinterest
+# utm_medium: social | newsletter | referral
+# utm_campaign: [post-slug]  e.g. "ai-citation-rate"
+# utm_content: post | header-cta | body-link | footer | carousel
+def build_utm_url(slug: str, platform: str = 'linkedin', site: str = 'chudi.dev') -> str:
+    """Build a blog URL with UTM tracking parameters.
+
+    Args:
+        slug: The post slug used as utm_campaign.
+        platform: The traffic source (utm_source). Defaults to 'linkedin'.
+        site: The domain to build the URL for. Defaults to 'chudi.dev'.
+               Use 'citability.dev' for citability posts.
+    """
     params = {
         'utm_source': platform,
         'utm_medium': 'social',
@@ -174,7 +185,7 @@ def build_utm_url(slug: str, platform: str = 'linkedin') -> str:
         'utm_content': 'post',
     }
     query = '&'.join(f'{k}={v}' for k, v in params.items())
-    return f'https://chudi.dev/blog/{slug}?{query}'
+    return f'https://{site}/blog/{slug}?{query}'
 
 
 def comment_linkedin(post_urn: str, comment_text: str) -> str | None:

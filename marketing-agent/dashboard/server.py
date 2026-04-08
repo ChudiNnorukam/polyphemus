@@ -386,6 +386,71 @@ def api_decisions():
     return jsonify({'agent': agent, 'decisions': decisions})
 
 
+@app.route('/api/seo')
+def api_seo():
+    """SEO/AEO dashboard data."""
+    conn = get_db()
+    try:
+        # GSC snapshot (latest per site)
+        gsc_data = {}
+        if table_exists(conn, 'gsc_snapshots'):
+            for site in ('https://citability.dev/', 'https://chudi.dev/'):
+                row = conn.execute(
+                    "SELECT * FROM gsc_snapshots WHERE site=? ORDER BY pulled_at DESC LIMIT 1",
+                    (site,)
+                ).fetchone()
+                if row:
+                    key = 'citability' if 'citability' in site else 'chudi'
+                    gsc_data[key] = dict(row)
+
+        # Top queries (latest pull, both sites, sorted by impressions)
+        top_queries = []
+        if table_exists(conn, 'gsc_queries'):
+            rows = conn.execute("""
+                SELECT site, query, page, impressions, clicks, position, date_range
+                FROM gsc_queries
+                WHERE pulled_at = (SELECT MAX(pulled_at) FROM gsc_queries)
+                ORDER BY impressions DESC
+                LIMIT 25
+            """).fetchall()
+            top_queries = [dict(r) for r in rows]
+
+        # SERP actions (latest check)
+        serp_actions = []
+        if table_exists(conn, 'serp_snapshots'):
+            rows = conn.execute("""
+                SELECT query, our_position, has_featured_snippet, has_paa, action, checked_at
+                FROM serp_snapshots
+                WHERE checked_at = (SELECT MAX(checked_at) FROM serp_snapshots)
+                ORDER BY our_position ASC NULLS LAST
+                LIMIT 20
+            """).fetchall()
+            serp_actions = [dict(r) for r in rows]
+
+        # AEO opportunities
+        aeo_data = []
+        if table_exists(conn, 'aeo_snapshots'):
+            rows = conn.execute("""
+                SELECT query, has_answer_box, answer_box_type, answer_box_source_domain,
+                       we_own_answer_box, paa_count, our_organic_position, checked_at
+                FROM aeo_snapshots
+                WHERE checked_at = (SELECT MAX(checked_at) FROM aeo_snapshots)
+                ORDER BY has_answer_box DESC, our_organic_position ASC NULLS LAST
+                LIMIT 20
+            """).fetchall()
+            aeo_data = [dict(r) for r in rows]
+
+    finally:
+        conn.close()
+
+    return jsonify({
+        'gsc': gsc_data,
+        'top_queries': top_queries,
+        'serp_actions': serp_actions,
+        'aeo': aeo_data,
+    })
+
+
 def main():
     parser = argparse.ArgumentParser(description='OpenClaw Agent Dashboard')
     parser.add_argument('--port', type=int, default=8086)
