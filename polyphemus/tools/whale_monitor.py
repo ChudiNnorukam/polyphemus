@@ -10,6 +10,7 @@ Usage:
     python3 whale_monitor.py --categories crypto # Only crypto markets
     python3 whale_monitor.py --snapshot         # One-shot: show current positions, then exit
     python3 whale_monitor.py --history 0xABC    # Show stored trade history for a wallet
+    python3 whale_monitor.py --directionality   # Classify wallets: directional vs market maker
 
 No authentication required. Uses Polymarket's public Data API.
 """
@@ -561,6 +562,185 @@ def cmd_consensus(db_path: Path, hours: int = 24):
 
 
 # ---------------------------------------------------------------------------
+# Directionality analysis: directional bettors vs market makers
+# ---------------------------------------------------------------------------
+def _analyze_wallet_directionality(wallet: str, alias: str) -> dict:
+    """
+    Fetch all open positions for a wallet and classify by directionality.
+
+    Returns a dict with:
+      alias, wallet, total_positions, total_events,
+      one_sided_events, hedged_events, one_sided_pct,
+      classification (DIRECTIONAL / MIXED / MARKET MAKER),
+      biggest_position (dict or None),
+      hedged_examples (list of dicts)
+    """
+    positions = fetch_positions(wallet, size_threshold=0)
+
+    if not positions:
+        return {
+            "alias": alias,
+            "wallet": wallet,
+            "total_positions": 0,
+            "total_events": 0,
+            "one_sided_events": 0,
+            "hedged_events": 0,
+            "one_sided_pct": None,
+            "classification": "NO DATA",
+            "biggest_position": None,
+            "hedged_examples": [],
+        }
+
+    # Group by eventSlug (fall back to conditionId when eventSlug absent)
+    events: Dict[str, List[dict]] = {}
+    for pos in positions:
+        key = pos.get("eventSlug") or pos.get("conditionId", "unknown")
+        events.setdefault(key, []).append(pos)
+
+    one_sided_events = 0
+    hedged_events = 0
+    hedged_examples = []
+
+    for event_key, event_positions in events.items():
+        outcomes_held = {p.get("outcome", "").upper() for p in event_positions}
+        # Hedged = wallet holds both YES and NO (or any two distinct outcomes)
+        if len(outcomes_held) >= 2:
+            hedged_events += 1
+            # Build a human-readable example
+            parts = []
+            for p in event_positions:
+                outcome = p.get("outcome", "?")
+                value = p.get("currentValue", 0)
+                parts.append(f"{outcome} ${value:,.0f}")
+            hedged_examples.append({
+                "title": event_positions[0].get("title", event_key)[:60],
+                "legs": parts,
+            })
+        else:
+            one_sided_events += 1
+
+    total_events = one_sided_events + hedged_events
+    one_sided_pct = (one_sided_events / total_events * 100) if total_events > 0 else None
+
+    if one_sided_pct is None:
+        classification = "NO DATA"
+    elif one_sided_pct > 80:
+        classification = "DIRECTIONAL"
+    elif one_sided_pct >= 50:
+        classification = "MIXED"
+    else:
+        classification = "MARKET MAKER"
+
+    # Biggest position by currentValue
+    biggest = max(positions, key=lambda p: abs(p.get("currentValue", 0)), default=None)
+    biggest_info = None
+    if biggest:
+        biggest_info = {
+            "outcome": biggest.get("outcome", "?"),
+            "value": biggest.get("currentValue", 0),
+            "title": biggest.get("title", "?")[:60],
+        }
+
+    return {
+        "alias": alias,
+        "wallet": wallet,
+        "total_positions": len(positions),
+        "total_events": total_events,
+        "one_sided_events": one_sided_events,
+        "hedged_events": hedged_events,
+        "one_sided_pct": one_sided_pct,
+        "classification": classification,
+        "biggest_position": biggest_info,
+        "hedged_examples": hedged_examples[:3],  # cap at 3 examples
+    }
+
+
+def cmd_directionality(wallets: Dict[str, Tuple[str, int]]):
+    """Classify each tracked wallet as directional, mixed, or market maker."""
+    bold = "\033[1m"
+    dim = "\033[2m"
+    reset = "\033[0m"
+    green = "\033[92m"
+    yellow = "\033[93m"
+    red = "\033[91m"
+
+    CLASS_COLOR = {
+        "DIRECTIONAL": green,
+        "MIXED": yellow,
+        "MARKET MAKER": red,
+        "NO DATA": dim,
+    }
+
+    print(f"\n{bold}=== WHALE DIRECTIONALITY ANALYSIS ==={reset}")
+    print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"  Checking {len(wallets)} wallets for hedged vs one-sided positioning...\n")
+
+    results = []
+    for addr, (alias, _lb_pnl) in wallets.items():
+        print(f"  {dim}Fetching positions for {alias}...{reset}", end="\r")
+        info = _analyze_wallet_directionality(addr, alias)
+        results.append(info)
+        time.sleep(0.3)  # rate limit
+
+    print(" " * 60, end="\r")  # clear the progress line
+
+    for info in results:
+        cls = info["classification"]
+        color = CLASS_COLOR.get(cls, reset)
+        pct_str = f"{info['one_sided_pct']:.0f}% one-sided" if info["one_sided_pct"] is not None else "no data"
+        short_wallet = info["wallet"][:10] + "..."
+
+        print(f"{bold}{info['alias']}{reset} ({short_wallet})")
+        print(f"  Type: {color}{bold}{cls}{reset} ({pct_str})")
+
+        if info["total_positions"] > 0:
+            print(
+                f"  Positions: {info['total_positions']} total across "
+                f"{info['total_events']} events"
+            )
+            print(
+                f"  One-sided: {info['one_sided_events']} | "
+                f"Hedged: {info['hedged_events']}"
+            )
+
+        if info["biggest_position"]:
+            bp = info["biggest_position"]
+            # Flag whether a hedge was detected on the biggest event
+            hedge_note = ""
+            for ex in info["hedged_examples"]:
+                if ex["title"][:40] in bp["title"] or bp["title"][:40] in ex["title"]:
+                    hedge_note = " (hedge detected)"
+                    break
+            print(
+                f"  Biggest position: {bp['outcome']} ${bp['value']:,.0f}"
+                f"{hedge_note} - {dim}{bp['title']}{reset}"
+            )
+
+        for ex in info["hedged_examples"]:
+            legs_str = " + ".join(ex["legs"])
+            print(f"  {yellow}Hedged:{reset} {dim}{ex['title']}{reset} ({legs_str})")
+
+        print()
+
+    # Summary buckets
+    directional = [r["alias"] for r in results if r["classification"] == "DIRECTIONAL"]
+    mixed = [r["alias"] for r in results if r["classification"] == "MIXED"]
+    market_makers = [r["alias"] for r in results if r["classification"] == "MARKET MAKER"]
+    no_data = [r["alias"] for r in results if r["classification"] == "NO DATA"]
+
+    print(f"{bold}SUMMARY:{reset}")
+    if directional:
+        print(f"  {green}Directional (safe to follow):{reset} {', '.join(directional)}")
+    if mixed:
+        print(f"  {yellow}Mixed (follow with caution):{reset} {', '.join(mixed)}")
+    if market_makers:
+        print(f"  {red}Market Maker (DO NOT copy):{reset} {', '.join(market_makers)}")
+    if no_data:
+        print(f"  {dim}No open positions:{reset} {', '.join(no_data)}")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def parse_wallets(spec: str) -> Dict[str, Tuple[str, int]]:
@@ -627,6 +807,14 @@ def main():
         "--consensus-hours", type=int, default=24,
         help="Hours to look back for consensus (default: 24)",
     )
+    parser.add_argument(
+        "--directionality", action="store_true",
+        help=(
+            "Classify each tracked wallet as DIRECTIONAL (>80%% one-sided), "
+            "MIXED (50-80%%), or MARKET MAKER (<50%%). "
+            "Market makers hedge on external books - DO NOT copy them blindly."
+        ),
+    )
 
     args = parser.parse_args()
     wallets = parse_wallets(args.wallets)
@@ -636,6 +824,8 @@ def main():
         cmd_history(args.history.lower(), db_path)
     elif args.consensus:
         cmd_consensus(db_path, args.consensus_hours)
+    elif args.directionality:
+        cmd_directionality(wallets)
     elif args.snapshot:
         cmd_snapshot(wallets, db_path, args.min_usdc)
     else:
