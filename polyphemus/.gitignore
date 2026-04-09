@@ -6,3 +6,6 @@ data/
 *.db-shm
 *.db-wal
 .env
+kb/
+agent/
+research/.venv/
