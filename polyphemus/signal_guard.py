@@ -10,7 +10,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from .types import FilterResult, parse_window_from_slug
+from .models import FilterResult, parse_window_from_slug
 from .config import Settings
 from .position_store import PositionStore
 

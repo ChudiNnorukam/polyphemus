@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from polyphemus.types import (
+from polyphemus.models import (
     Position, ExitSignal, ExitReason, ExecutionResult, OrderStatus,
     BALANCE_CACHE_TTL, TAKER_POLL_MAX, MIN_SHARES_FOR_SELL,
     ASSET_TO_BINANCE, BINANCE_SYMBOLS, parse_window_from_slug,

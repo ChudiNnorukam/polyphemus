@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from .config import setup_logger
-from .types import ASSET_TO_BINANCE
+from .models import ASSET_TO_BINANCE
 
 if TYPE_CHECKING:
     from .config import Settings

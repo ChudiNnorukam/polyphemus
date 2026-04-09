@@ -17,7 +17,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
 
 from .config import Settings, setup_logger
-from .types import ExitSignal, MomentumResult, EXIT_CHECK_INTERVAL, PRICE_FEED_INTERVAL, ASSET_TO_BINANCE
+from .models import ExitSignal, MomentumResult, EXIT_CHECK_INTERVAL, PRICE_FEED_INTERVAL, ASSET_TO_BINANCE
 from .position_store import PositionStore
 from .clob_wrapper import ClobWrapper
 from .position_executor import PositionExecutor
@@ -1358,7 +1358,7 @@ class SignalBot:
                 size = projected / price if price > 0 else 0
 
                 # Create phantom position in store — exit manager will track it
-                from .types import Position
+                from .models import Position
                 phantom_pos = Position(
                     token_id=phantom_token,
                     slug=signal.get("slug", ""),
@@ -1975,7 +1975,7 @@ class SignalBot:
             self._logger.debug(f"No condition_id for {pos.slug}, skipping auto-redeem")
             return
         try:
-            from .types import RedemptionEvent
+            from .models import RedemptionEvent
             self._redeemer.enqueue(RedemptionEvent(
                 condition_id=condition_id,
                 slug=pos.slug,

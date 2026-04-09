@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
 from .config import setup_logger
-from .types import Position
+from .models import Position
 
 
 class PositionStore:
@@ -138,7 +138,7 @@ class PositionStore:
                 # Skip position if slug cannot be parsed
                 parts = slug.rsplit('-', 1) if slug else []
                 if len(parts) == 2 and parts[1].isdigit():
-                    from .types import parse_window_from_slug
+                    from .models import parse_window_from_slug
                     market_epoch = int(parts[1])
                     market_end_time = datetime.fromtimestamp(market_epoch + parse_window_from_slug(slug), tz=timezone.utc)
                 else:

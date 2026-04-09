@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from polyphemus.types import (
+from polyphemus.models import (
     Position, ExitSignal, ExitReason, ExecutionResult, OrderStatus,
     TAKER_POLL_MAX, MIN_SHARES_FOR_SELL, ORDER_POLL_INTERVAL,
 )

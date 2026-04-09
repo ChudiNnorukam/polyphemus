@@ -23,7 +23,7 @@ from typing import Optional, Callable, Any
 
 import aiohttp
 
-from .types import (
+from .models import (
     BACKOFF_BASE,
     BACKOFF_MAX,
     BACKOFF_MULTIPLIER,

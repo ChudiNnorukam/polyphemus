@@ -24,7 +24,7 @@ from polyphemus.exit_manager import ExitManager
 from polyphemus.position_executor import PositionExecutor
 from polyphemus.position_store import PositionStore
 from polyphemus.clob_wrapper import ClobWrapper
-from polyphemus.types import Position, ExitReason, ExecutionResult, OrderStatus
+from polyphemus.models import Position, ExitReason, ExecutionResult, OrderStatus
 
 
 # ============================================================================

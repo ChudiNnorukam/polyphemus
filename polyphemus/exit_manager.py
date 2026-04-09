@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Set, Tuple
 
-from .types import Position, ExitSignal, ExitReason
+from .models import Position, ExitSignal, ExitReason
 from .config import Settings, setup_logger
 from .position_store import PositionStore
 
@@ -153,7 +153,7 @@ class ExitManager:
         # Attempting a SELL on a resolved market = "orderbook does not exist" error
         # → records exit_price=$0.00 → catastrophic P&L. (Bug #35)
         # Instead, treat as market_resolved: skip SELL, let redeemer handle.
-        from .types import parse_window_from_slug
+        from .models import parse_window_from_slug
         window_secs = parse_window_from_slug(pos.slug)
         if pos.market_end_time:
             secs_past_end = (now - pos.market_end_time).total_seconds()
@@ -616,7 +616,7 @@ class ExitManager:
             return False
 
         # 5-min markets handled by market_resolved check in _evaluate (Bug #35 fix)
-        from .types import parse_window_from_slug
+        from .models import parse_window_from_slug
         window_secs = parse_window_from_slug(pos.slug)
         if window_secs <= 300:
             return False

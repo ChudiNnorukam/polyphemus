@@ -291,6 +291,10 @@ class AccumulatorPosition:
     condition_id: str = ""
     blocked_cycles: int = 0
     first_fill_time: Optional[datetime] = None  # set when first leg fills (hedge deadline clock)
+    # Entry instrumentation (logged to metadata for research)
+    book_spread_at_entry: float = 0.0     # abs(up_bid - down_bid) at maker order placement
+    book_depth_up_at_entry: int = 0       # number of resting bids on UP side
+    book_depth_down_at_entry: int = 0     # number of resting bids on DOWN side
 
 
 @dataclass

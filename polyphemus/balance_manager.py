@@ -13,7 +13,7 @@ import time
 import logging
 from typing import TYPE_CHECKING
 
-from .types import BALANCE_CACHE_TTL
+from .models import BALANCE_CACHE_TTL
 from .config import setup_logger, assert_wallet_reconciliation
 
 if TYPE_CHECKING:

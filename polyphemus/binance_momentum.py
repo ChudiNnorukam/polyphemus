@@ -14,7 +14,7 @@ from typing import Callable, Dict, Optional, Set
 
 import aiohttp
 
-from .types import (
+from .models import (
     BACKOFF_BASE, BACKOFF_MAX, BACKOFF_MULTIPLIER,
     BINANCE_WS_URL, BINANCE_SYMBOLS, ASSET_TO_BINANCE,
     COINBASE_WS_URL, COINBASE_PRODUCTS, COINBASE_TO_SYMBOL,
@@ -1906,7 +1906,7 @@ class BinanceMomentumFeed:
         Parses window from each slug to correctly handle mixed 5m/15m markets.
         A slug is stale if market_end + one_window < now (buffer for late processing).
         """
-        from .types import parse_window_from_slug
+        from .models import parse_window_from_slug
         now = time.time()
         stale_slugs = set()
         for slug in self._signaled_slugs:

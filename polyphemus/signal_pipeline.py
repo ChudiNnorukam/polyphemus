@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
-from .types import FilterResult, parse_window_from_slug
+from .models import FilterResult, parse_window_from_slug
 
 
 def _coerce_asset(asset: Any, slug: str) -> str:

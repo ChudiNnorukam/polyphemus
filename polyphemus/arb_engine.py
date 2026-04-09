@@ -20,7 +20,7 @@ import aiohttp
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from .config import setup_logger
-from .types import (
+from .models import (
     ArbOpportunity,
     ArbResult,
     GAMMA_API_URL,

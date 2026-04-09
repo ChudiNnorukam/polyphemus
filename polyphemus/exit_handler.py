@@ -12,7 +12,7 @@ from typing import Optional
 
 from py_clob_client.order_builder.constants import SELL
 
-from .types import (
+from .models import (
     Position,
     ExitSignal,
     ExitReason,

@@ -850,6 +850,226 @@ def grid_search_params(
 
 
 # ============================================================
+#  ADVANCED VALIDATION — bootstrap, FDR, PBO
+# ============================================================
+
+def bootstrap_max_drawdown(
+    trade_pnls: list,
+    n_sims: int = 10_000,
+    percentile: float = 95,
+) -> dict:
+    """Monte Carlo estimate of max drawdown by resampling trade order.
+
+    Preserves the actual P&L distribution but randomizes sequence.
+    Answers: "given these trade outcomes, how bad could drawdown get?"
+
+    Args:
+        trade_pnls: list of per-trade P&L values (positive/negative floats)
+        n_sims: number of bootstrap simulations
+        percentile: percentile of max drawdown distribution to report
+
+    Returns:
+        dict with p_drawdown, mean_drawdown, median_drawdown, interpretation.
+    """
+    import numpy as np
+
+    pnls = np.array(trade_pnls, dtype=float)
+    n = len(pnls)
+    if n < 5:
+        return {
+            "p_drawdown": 0.0,
+            "mean_drawdown": 0.0,
+            "median_drawdown": 0.0,
+            "percentile": percentile,
+            "n_sims": 0,
+            "interpretation": "Insufficient data for bootstrap drawdown (need >= 5 trades).",
+        }
+
+    rng = np.random.default_rng(seed=42)
+    max_drawdowns = np.empty(n_sims)
+
+    for i in range(n_sims):
+        shuffled = rng.choice(pnls, size=n, replace=True)
+        equity = np.cumsum(shuffled)
+        running_max = np.maximum.accumulate(equity)
+        drawdown = running_max - equity
+        max_drawdowns[i] = np.max(drawdown)
+
+    p_dd = float(np.percentile(max_drawdowns, percentile))
+    mean_dd = float(np.mean(max_drawdowns))
+    median_dd = float(np.median(max_drawdowns))
+
+    return {
+        "p_drawdown": round(p_dd, 4),
+        "mean_drawdown": round(mean_dd, 4),
+        "median_drawdown": round(median_dd, 4),
+        "percentile": percentile,
+        "n_sims": n_sims,
+        "interpretation": (
+            f"P{percentile} max drawdown: ${p_dd:.2f} "
+            f"(mean=${mean_dd:.2f}, median=${median_dd:.2f}, {n_sims} sims). "
+            f"Ensure bankroll can absorb this without ruin."
+        ),
+    }
+
+
+def fdr_correction(p_values: list, alpha: float = 0.05) -> dict:
+    """Benjamini-Hochberg False Discovery Rate correction.
+
+    Controls the expected proportion of false discoveries among
+    rejected hypotheses. Less conservative than Bonferroni,
+    recommended for strategy grid searches.
+
+    Args:
+        p_values: list of raw p-values from multiple tests
+        alpha: desired FDR level
+
+    Returns:
+        dict with adjusted_p_values, rejected (bool list), n_discoveries,
+        and interpretation.
+    """
+    n = len(p_values)
+    if n == 0:
+        return {
+            "adjusted_p_values": [],
+            "rejected": [],
+            "n_discoveries": 0,
+            "n_tests": 0,
+            "interpretation": "No p-values to correct.",
+        }
+
+    # BH procedure: sort p-values, find largest k where p(k) <= k/n * alpha
+    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
+    adjusted = [0.0] * n
+    rejected = [False] * n
+
+    # Compute adjusted p-values (step-up)
+    prev_adj = 1.0
+    for rank_idx in range(n - 1, -1, -1):
+        orig_idx, p = indexed[rank_idx]
+        rank = rank_idx + 1  # 1-based rank
+        adj_p = min(prev_adj, p * n / rank)
+        adj_p = min(adj_p, 1.0)
+        adjusted[orig_idx] = round(adj_p, 8)
+        rejected[orig_idx] = adj_p <= alpha
+        prev_adj = adj_p
+
+    n_discoveries = sum(rejected)
+
+    return {
+        "adjusted_p_values": adjusted,
+        "rejected": rejected,
+        "n_discoveries": n_discoveries,
+        "n_tests": n,
+        "interpretation": (
+            f"BH FDR correction at alpha={alpha}: "
+            f"{n_discoveries}/{n} hypotheses survive correction. "
+            f"{'None survive - likely all noise.' if n_discoveries == 0 else ''}"
+        ),
+    }
+
+
+def probability_backtest_overfitting(
+    returns_matrix: list[list],
+    n_partitions: int = 10,
+) -> dict:
+    """Probability of Backtest Overfitting (PBO).
+
+    Tests whether the best in-sample strategy is likely a below-median
+    performer out-of-sample. High PBO (> 0.5) means strategy selection
+    is no better than chance.
+
+    Based on Bailey, Borwein, Lopez de Prado, and Zhu (2014).
+
+    Args:
+        returns_matrix: list of return series, one per strategy variant.
+            Each inner list has the same length (one return per time period).
+        n_partitions: number of time partitions (must be even)
+
+    Returns:
+        dict with pbo_score, is_overfit, logit distribution stats.
+    """
+    import numpy as np
+    from itertools import combinations
+
+    if not returns_matrix or len(returns_matrix) < 2:
+        return {
+            "pbo_score": 1.0,
+            "is_overfit": True,
+            "interpretation": "Need >= 2 strategy variants for PBO.",
+        }
+
+    matrix = np.array(returns_matrix, dtype=float)
+    n_strategies, n_periods = matrix.shape
+
+    if n_periods < n_partitions:
+        return {
+            "pbo_score": 1.0,
+            "is_overfit": True,
+            "interpretation": f"Need >= {n_partitions} time periods for PBO (have {n_periods}).",
+        }
+
+    # Make n_partitions even
+    if n_partitions % 2 != 0:
+        n_partitions -= 1
+
+    partition_size = n_periods // n_partitions
+    half = n_partitions // 2
+
+    # Compute performance per strategy per partition
+    perf = np.zeros((n_strategies, n_partitions))
+    for p in range(n_partitions):
+        start = p * partition_size
+        end = start + partition_size
+        # Use Sharpe-like metric: mean / std
+        chunk = matrix[:, start:end]
+        means = chunk.mean(axis=1)
+        stds = chunk.std(axis=1, ddof=1)
+        stds[stds == 0] = 1e-10
+        perf[:, p] = means / stds
+
+    # For each combination of half the partitions as IS
+    n_below_median = 0
+    n_total = 0
+
+    combos = list(combinations(range(n_partitions), half))
+    # Cap at 252 combinations to keep computation reasonable
+    if len(combos) > 252:
+        rng = np.random.default_rng(42)
+        indices = rng.choice(len(combos), size=252, replace=False)
+        combos = [combos[i] for i in indices]
+
+    for is_indices in combos:
+        oos_indices = [i for i in range(n_partitions) if i not in is_indices]
+
+        # IS performance: mean Sharpe across IS partitions
+        is_perf = perf[:, list(is_indices)].mean(axis=1)
+        # OOS performance: mean Sharpe across OOS partitions
+        oos_perf = perf[:, oos_indices].mean(axis=1)
+
+        # Best IS strategy
+        best_is = np.argmax(is_perf)
+        # Is it below median OOS?
+        oos_median = np.median(oos_perf)
+        if oos_perf[best_is] <= oos_median:
+            n_below_median += 1
+        n_total += 1
+
+    pbo = n_below_median / n_total if n_total > 0 else 1.0
+
+    return {
+        "pbo_score": round(pbo, 4),
+        "is_overfit": pbo > 0.5,
+        "n_combinations_tested": n_total,
+        "n_below_median": n_below_median,
+        "interpretation": (
+            f"PBO={pbo:.2f} ({n_below_median}/{n_total} combos). "
+            f"{'OVERFIT: IS winner is OOS loser more than half the time.' if pbo > 0.5 else 'Acceptable: IS selection has predictive value.'}"
+        ),
+    }
+
+
+# ============================================================
 #  HELPERS
 # ============================================================
 

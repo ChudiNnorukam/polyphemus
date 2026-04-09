@@ -10,7 +10,7 @@ from polyphemus.signal_bot import SignalBot
 from polyphemus.signal_logger import SignalLogger
 from polyphemus.signal_pipeline import normalize_signal
 from polyphemus.ensemble_shadow import BTC5MEnsembleShadow
-from polyphemus.types import FilterResult
+from polyphemus.models import FilterResult
 
 
 def test_normalize_signal_derives_canonical_fields_and_noise_flags():

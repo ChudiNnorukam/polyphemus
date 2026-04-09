@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 import aiohttp
 
-from .types import (
+from .models import (
     MomentumResult,
     BACKOFF_BASE,
     BACKOFF_MAX,

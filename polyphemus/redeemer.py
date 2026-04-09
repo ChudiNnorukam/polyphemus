@@ -24,7 +24,7 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from .config import setup_logger
-from .types import RedemptionEvent
+from .models import RedemptionEvent
 
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_E_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"

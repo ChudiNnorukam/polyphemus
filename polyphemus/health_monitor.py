@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 
 from .config import setup_logger
-from .types import DAILY_RESTART_HOURS, HEALTH_LOG_INTERVAL, WATCHDOG_INTERVAL
+from .models import DAILY_RESTART_HOURS, HEALTH_LOG_INTERVAL, WATCHDOG_INTERVAL
 
 
 class HealthMonitor:

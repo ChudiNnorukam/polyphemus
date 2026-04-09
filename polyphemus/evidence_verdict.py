@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from .config import setup_logger
-from .types import parse_window_from_slug
+from .models import parse_window_from_slug
 
 
 ROLLED_LEVELS = (

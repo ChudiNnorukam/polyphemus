@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from .performance_db import PerformanceDB
 
 from .config import Settings, setup_logger
-from .types import (
+from .models import (
     GAMMA_API_URL,
     AccumulatorState,
     AccumulatorPosition,
@@ -642,6 +642,11 @@ class AccumulatorEngine:
         up_bid = float(up_bids[0]["price"])
         down_bid = float(down_bids[0]["price"])
         bid_pair = up_bid + down_bid
+
+        # Capture book state for research logging
+        pos.book_spread_at_entry = round(abs(up_bid - down_bid), 4)
+        pos.book_depth_up_at_entry = len(up_bids)
+        pos.book_depth_down_at_entry = len(down_bids)
 
         if self._accum_entry_mode() == "fak":
             return await self._evaluate_and_enter_fak(pos, secs_left, up_book, down_book)
@@ -1434,7 +1439,7 @@ class AccumulatorEngine:
 
         # === AUTO-REDEMPTION: queue winning tokens for on-chain redemption ===
         if self._redeemer and pos.exit_reason == "hedged_settlement" and pos.condition_id:
-            from .types import RedemptionEvent
+            from .models import RedemptionEvent
             event = RedemptionEvent(
                 condition_id=pos.condition_id,
                 slug=pos.slug,
@@ -1516,6 +1521,9 @@ class AccumulatorEngine:
                     "down_qty": round(pos.down_qty, 2),
                     "pair_cost": round(entry_cost, 4),
                     "is_hedged": pos.is_fully_hedged,
+                    "book_spread_at_entry": round(pos.book_spread_at_entry, 4),
+                    "book_depth_up": pos.book_depth_up_at_entry,
+                    "book_depth_down": pos.book_depth_down_at_entry,
                 },
             )
 

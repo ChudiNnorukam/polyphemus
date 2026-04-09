@@ -18,8 +18,16 @@ import argparse
 import json
 import math
 import sqlite3
+import sys
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from polyphemus.fees import maker_rebate_per_share, taker_fee_per_share
 
 
 def load_signals(db_path, asset, max_price, min_price=0.0, source=None):
@@ -55,12 +63,10 @@ def simulate_trade(signal, entry_mode="maker", maker_offset=0.005):
     # Realistic entry price
     if entry_mode == "maker":
         entry = max(0.01, mid - maker_offset)  # post below midpoint
-        # Maker rebate: 20 bps of contract premium
-        fee = -mid * (1 - mid) * 0.002  # negative = rebate
+        fee = -maker_rebate_per_share(mid)  # negative = rebate
     else:
         entry = mid + spread / 2  # cross the ask
-        # Taker fee: 30 bps of contract premium
-        fee = mid * (1 - mid) * 0.003
+        fee = taker_fee_per_share(mid)
 
     # Resolution
     if signal["is_win"]:

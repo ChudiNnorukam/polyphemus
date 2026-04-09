@@ -22,7 +22,7 @@ from py_clob_client.clob_types import (
 )
 from py_clob_client.order_builder.constants import BUY, SELL
 
-from .types import ExecutionResult, ORDER_TIMEOUT
+from .models import ExecutionResult, ORDER_TIMEOUT
 
 
 class ClobWrapper:

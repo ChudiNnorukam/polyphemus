@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from polyphemus.types import Position
+from polyphemus.models import Position
 from polyphemus.market_ws import MarketWS
 from polyphemus.exit_manager import ExitManager
 from polyphemus.position_store import PositionStore
@@ -301,14 +301,14 @@ class TestMarketEndTimeParsing:
 
     def test_5m_market_window_detection(self):
         """5m market slug correctly identified."""
-        from polyphemus.types import parse_window_from_slug
+        from polyphemus.models import parse_window_from_slug
 
         window = parse_window_from_slug("btc-updown-5m-123456")
         assert window == 300, f"Expected 300s for 5m, got {window}"
 
     def test_15m_market_window_detection(self):
         """15m market slug correctly identified."""
-        from polyphemus.types import parse_window_from_slug
+        from polyphemus.models import parse_window_from_slug
 
         window = parse_window_from_slug("eth-updown-15m-123456")
         assert window == 900, f"Expected 900s for 15m, got {window}"

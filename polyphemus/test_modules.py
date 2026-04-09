@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 # Ensure polyphemus package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from polyphemus.types import (
+from polyphemus.models import (
     Position, ExitSignal, ExitReason, ExecutionResult, OrderStatus,
     FilterResult, MomentumResult, ASSET_TO_BINANCE,
     ArbOpportunity, ArbResult, ARB_SLIPPAGE_BUFFER, ARB_MARKET_BUFFER_SECS,

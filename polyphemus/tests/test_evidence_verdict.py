@@ -14,7 +14,7 @@ if str(ROOT.parent) not in sys.path:
 from polyphemus.evidence_verdict import BTC5MEvidenceEngine
 from polyphemus.signal_bot import SignalBot
 from polyphemus.signal_logger import SignalLogger
-from polyphemus.types import FilterResult
+from polyphemus.models import FilterResult
 
 
 def build_history_db(

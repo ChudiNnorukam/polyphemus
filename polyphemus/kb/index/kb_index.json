@@ -44764,7 +44764,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.330404+00:00"
+      "updated_at": "2026-04-09T07:00:04.274415+00:00"
     },
     "internal-report-btc5m-bot-improvement-plan": {
       "actionable_lessons": [
@@ -44791,7 +44791,7 @@
         "repo-memory"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.505868+00:00"
+      "updated_at": "2026-04-09T07:00:04.500810+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260312-164254": {
       "actionable_lessons": [
@@ -44818,7 +44818,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.337802+00:00"
+      "updated_at": "2026-04-09T07:00:04.280984+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260312-212651": {
       "actionable_lessons": [
@@ -44845,7 +44845,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.343268+00:00"
+      "updated_at": "2026-04-09T07:00:04.293177+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-022101": {
       "actionable_lessons": [
@@ -44872,7 +44872,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.346622+00:00"
+      "updated_at": "2026-04-09T07:00:04.306628+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-022128": {
       "actionable_lessons": [
@@ -44899,7 +44899,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.348603+00:00"
+      "updated_at": "2026-04-09T07:00:04.307761+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-022152": {
       "actionable_lessons": [
@@ -44926,7 +44926,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.351309+00:00"
+      "updated_at": "2026-04-09T07:00:04.309025+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-022241": {
       "actionable_lessons": [
@@ -44953,7 +44953,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.354262+00:00"
+      "updated_at": "2026-04-09T07:00:04.310395+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-022242": {
       "actionable_lessons": [
@@ -44980,7 +44980,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.356895+00:00"
+      "updated_at": "2026-04-09T07:00:04.312358+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-023134": {
       "actionable_lessons": [
@@ -45007,7 +45007,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.359236+00:00"
+      "updated_at": "2026-04-09T07:00:04.316440+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-023236": {
       "actionable_lessons": [
@@ -45034,7 +45034,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.360562+00:00"
+      "updated_at": "2026-04-09T07:00:04.321805+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-034225": {
       "actionable_lessons": [
@@ -45061,7 +45061,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.362029+00:00"
+      "updated_at": "2026-04-09T07:00:04.324117+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-034227": {
       "actionable_lessons": [
@@ -45088,7 +45088,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.362544+00:00"
+      "updated_at": "2026-04-09T07:00:04.326558+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-035713": {
       "actionable_lessons": [
@@ -45115,7 +45115,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.363032+00:00"
+      "updated_at": "2026-04-09T07:00:04.328879+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-041857": {
       "actionable_lessons": [
@@ -45142,7 +45142,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.364462+00:00"
+      "updated_at": "2026-04-09T07:00:04.330931+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-041900": {
       "actionable_lessons": [
@@ -45169,7 +45169,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.366990+00:00"
+      "updated_at": "2026-04-09T07:00:04.334565+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-041903": {
       "actionable_lessons": [
@@ -45196,7 +45196,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.368442+00:00"
+      "updated_at": "2026-04-09T07:00:04.337921+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-041904": {
       "actionable_lessons": [
@@ -45223,7 +45223,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.370030+00:00"
+      "updated_at": "2026-04-09T07:00:04.340057+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-041907": {
       "actionable_lessons": [
@@ -45250,7 +45250,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.371505+00:00"
+      "updated_at": "2026-04-09T07:00:04.342649+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-041908": {
       "actionable_lessons": [
@@ -45277,7 +45277,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.373587+00:00"
+      "updated_at": "2026-04-09T07:00:04.343931+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-041911": {
       "actionable_lessons": [
@@ -45304,7 +45304,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.375766+00:00"
+      "updated_at": "2026-04-09T07:00:04.346813+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-045246": {
       "actionable_lessons": [
@@ -45331,7 +45331,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.376620+00:00"
+      "updated_at": "2026-04-09T07:00:04.349265+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-045327": {
       "actionable_lessons": [
@@ -45358,7 +45358,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.378392+00:00"
+      "updated_at": "2026-04-09T07:00:04.351967+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-045343": {
       "actionable_lessons": [
@@ -45385,7 +45385,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.379602+00:00"
+      "updated_at": "2026-04-09T07:00:04.356652+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-045352": {
       "actionable_lessons": [
@@ -45412,7 +45412,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.382211+00:00"
+      "updated_at": "2026-04-09T07:00:04.358123+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-045413": {
       "actionable_lessons": [
@@ -45439,7 +45439,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.384635+00:00"
+      "updated_at": "2026-04-09T07:00:04.361035+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-045739": {
       "actionable_lessons": [
@@ -45466,7 +45466,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.385770+00:00"
+      "updated_at": "2026-04-09T07:00:04.363369+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-045921": {
       "actionable_lessons": [
@@ -45493,7 +45493,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.387198+00:00"
+      "updated_at": "2026-04-09T07:00:04.365234+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050025": {
       "actionable_lessons": [
@@ -45520,7 +45520,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.388158+00:00"
+      "updated_at": "2026-04-09T07:00:04.369390+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050053": {
       "actionable_lessons": [
@@ -45547,7 +45547,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.389161+00:00"
+      "updated_at": "2026-04-09T07:00:04.373560+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050206": {
       "actionable_lessons": [
@@ -45574,7 +45574,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.391781+00:00"
+      "updated_at": "2026-04-09T07:00:04.377626+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050215": {
       "actionable_lessons": [
@@ -45601,7 +45601,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.394006+00:00"
+      "updated_at": "2026-04-09T07:00:04.379001+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050225": {
       "actionable_lessons": [
@@ -45628,7 +45628,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.396177+00:00"
+      "updated_at": "2026-04-09T07:00:04.382690+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050246": {
       "actionable_lessons": [
@@ -45655,7 +45655,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.397356+00:00"
+      "updated_at": "2026-04-09T07:00:04.388003+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050247": {
       "actionable_lessons": [
@@ -45682,7 +45682,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.397881+00:00"
+      "updated_at": "2026-04-09T07:00:04.391183+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050248": {
       "actionable_lessons": [
@@ -45709,7 +45709,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.399230+00:00"
+      "updated_at": "2026-04-09T07:00:04.393094+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050321": {
       "actionable_lessons": [
@@ -45736,7 +45736,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.400264+00:00"
+      "updated_at": "2026-04-09T07:00:04.394878+00:00"
     },
     "internal-report-btc5m-ensemble-go-live-gate-20260313-050337": {
       "actionable_lessons": [
@@ -45763,7 +45763,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.402662+00:00"
+      "updated_at": "2026-04-09T07:00:04.398129+00:00"
     },
     "internal-report-btc5m-live-emmanuel-20260310": {
       "actionable_lessons": [
@@ -45790,7 +45790,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.405626+00:00"
+      "updated_at": "2026-04-09T07:00:04.400995+00:00"
     },
     "internal-report-btc5m-live-emmanuel-debug-20260310": {
       "actionable_lessons": [
@@ -45817,7 +45817,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.411044+00:00"
+      "updated_at": "2026-04-09T07:00:04.407640+00:00"
     },
     "internal-report-btc5m-live-ruleset-candidate-20260310": {
       "actionable_lessons": [
@@ -45844,7 +45844,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.413268+00:00"
+      "updated_at": "2026-04-09T07:00:04.411539+00:00"
     },
     "internal-report-btc5m-shadow-lab-v3-initial-live-comparison-20260312": {
       "actionable_lessons": [
@@ -45871,7 +45871,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.415139+00:00"
+      "updated_at": "2026-04-09T07:00:04.415997+00:00"
     },
     "internal-report-btc5m-strategy-shadow-scan-20260312-081336": {
       "actionable_lessons": [
@@ -45898,7 +45898,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.419031+00:00"
+      "updated_at": "2026-04-09T07:00:04.422235+00:00"
     },
     "internal-report-btc5m-strategy-shadow-scan-20260312-081435": {
       "actionable_lessons": [
@@ -45925,7 +45925,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.422139+00:00"
+      "updated_at": "2026-04-09T07:00:04.426737+00:00"
     },
     "internal-report-btc5m-strategy-shadow-scan-20260312-081516": {
       "actionable_lessons": [
@@ -45952,7 +45952,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.425334+00:00"
+      "updated_at": "2026-04-09T07:00:04.446371+00:00"
     },
     "internal-report-btc5m-strategy-shadow-scan-20260312-081720": {
       "actionable_lessons": [
@@ -45979,7 +45979,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.429360+00:00"
+      "updated_at": "2026-04-09T07:00:04.448495+00:00"
     },
     "internal-report-btc5m-strategy-shadow-scan-20260312-081818": {
       "actionable_lessons": [
@@ -46006,7 +46006,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.430327+00:00"
+      "updated_at": "2026-04-09T07:00:04.453226+00:00"
     },
     "internal-report-btc5m-strategy-shadow-scan-20260312-084012": {
       "actionable_lessons": [
@@ -46033,7 +46033,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.437440+00:00"
+      "updated_at": "2026-04-09T07:00:04.456874+00:00"
     },
     "internal-report-claude-memory-reconciliation": {
       "actionable_lessons": [
@@ -46060,7 +46060,7 @@
         "repo-memory"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.502225+00:00"
+      "updated_at": "2026-04-09T07:00:04.497182+00:00"
     },
     "internal-report-dario-btceth-5m-filter-20260220": {
       "actionable_lessons": [
@@ -46087,7 +46087,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.449949+00:00"
+      "updated_at": "2026-04-09T07:00:04.461574+00:00"
     },
     "internal-report-dario-full-codebase-audit-20260219": {
       "actionable_lessons": [
@@ -46114,7 +46114,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.463296+00:00"
+      "updated_at": "2026-04-09T07:00:04.465254+00:00"
     },
     "internal-report-dario-preflight-stages-20260219": {
       "actionable_lessons": [
@@ -46141,7 +46141,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.468111+00:00"
+      "updated_at": "2026-04-09T07:00:04.472762+00:00"
     },
     "internal-report-pnl-protection-package-20260310": {
       "actionable_lessons": [
@@ -46168,7 +46168,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.473062+00:00"
+      "updated_at": "2026-04-09T07:00:04.478136+00:00"
     },
     "internal-report-progress": {
       "actionable_lessons": [
@@ -46195,7 +46195,7 @@
         "repo-memory"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.499218+00:00"
+      "updated_at": "2026-04-09T07:00:04.494854+00:00"
     },
     "internal-report-shadow-eval-polyphemus-20260402-175432": {
       "actionable_lessons": [
@@ -46222,7 +46222,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.477886+00:00"
+      "updated_at": "2026-04-09T07:00:04.482074+00:00"
     },
     "internal-report-shadow-eval-polyphemus-20260402-180026": {
       "actionable_lessons": [
@@ -46249,7 +46249,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.481730+00:00"
+      "updated_at": "2026-04-09T07:00:04.488536+00:00"
     },
     "internal-report-shadow-eval-polyphemus-latest": {
       "actionable_lessons": [
@@ -46276,7 +46276,7 @@
         "analysis"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.485187+00:00"
+      "updated_at": "2026-04-09T07:00:04.492116+00:00"
     },
     "kelly-1956": {
       "actionable_lessons": [
@@ -46354,7 +46354,7 @@
         "operations"
       ],
       "trust_tier": "T2",
-      "updated_at": "2026-04-05T01:09:02.626380+00:00"
+      "updated_at": "2026-04-09T07:00:04.780134+00:00"
     },
     "playbook-audit-mismatch-triage": {
       "actionable_lessons": [],
@@ -46374,7 +46374,7 @@
         "operations"
       ],
       "trust_tier": "T2",
-      "updated_at": "2026-04-05T01:09:02.627166+00:00"
+      "updated_at": "2026-04-09T07:00:04.782002+00:00"
     },
     "playbook-execution-failure-diagnosis": {
       "actionable_lessons": [],
@@ -46394,7 +46394,7 @@
         "operations"
       ],
       "trust_tier": "T2",
-      "updated_at": "2026-04-05T01:09:02.628325+00:00"
+      "updated_at": "2026-04-09T07:00:04.786926+00:00"
     },
     "playbook-go-live-gating": {
       "actionable_lessons": [],
@@ -46414,7 +46414,7 @@
         "operations"
       ],
       "trust_tier": "T2",
-      "updated_at": "2026-04-05T01:09:02.628560+00:00"
+      "updated_at": "2026-04-09T07:00:04.803437+00:00"
     },
     "playbook-quant-research-operating-system": {
       "actionable_lessons": [],
@@ -46434,7 +46434,7 @@
         "operations"
       ],
       "trust_tier": "T2",
-      "updated_at": "2026-04-05T01:09:02.630263+00:00"
+      "updated_at": "2026-04-09T07:00:04.814904+00:00"
     },
     "playbook-signal-starvation-diagnosis": {
       "actionable_lessons": [],
@@ -46454,7 +46454,7 @@
         "operations"
       ],
       "trust_tier": "T2",
-      "updated_at": "2026-04-05T01:09:02.630659+00:00"
+      "updated_at": "2026-04-09T07:00:04.816911+00:00"
     },
     "playbook-strategy-promotion-review": {
       "actionable_lessons": [],
@@ -46474,7 +46474,7 @@
         "operations"
       ],
       "trust_tier": "T2",
-      "updated_at": "2026-04-05T01:09:02.631379+00:00"
+      "updated_at": "2026-04-09T07:00:04.822553+00:00"
     },
     "polymarket-api-introduction": {
       "actionable_lessons": [
@@ -46730,7 +46730,7 @@
         "current-state"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.528426+00:00"
+      "updated_at": "2026-04-09T07:00:04.531344+00:00"
     },
     "runtime-dependency_audit_status": {
       "actionable_lessons": [
@@ -46754,7 +46754,7 @@
         "current-state"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.536702+00:00"
+      "updated_at": "2026-04-09T07:00:04.544010+00:00"
     },
     "runtime-go_live_gate_status": {
       "actionable_lessons": [
@@ -46778,7 +46778,7 @@
         "current-state"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.520745+00:00"
+      "updated_at": "2026-04-09T07:00:04.523930+00:00"
     },
     "runtime-security_audit_status": {
       "actionable_lessons": [
@@ -46802,7 +46802,7 @@
         "current-state"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.530980+00:00"
+      "updated_at": "2026-04-09T07:00:04.537027+00:00"
     },
     "runtime-service_hardening_status": {
       "actionable_lessons": [
@@ -46826,7 +46826,7 @@
         "current-state"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.540712+00:00"
+      "updated_at": "2026-04-09T07:00:04.549008+00:00"
     },
     "runtime-shadow_window_checklist": {
       "actionable_lessons": [
@@ -46850,7 +46850,7 @@
         "current-state"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.515548+00:00"
+      "updated_at": "2026-04-09T07:00:04.514103+00:00"
     },
     "runtime-shadow_window_status": {
       "actionable_lessons": [
@@ -46874,7 +46874,7 @@
         "current-state"
       ],
       "trust_tier": "T1",
-      "updated_at": "2026-04-05T01:09:02.513504+00:00"
+      "updated_at": "2026-04-09T07:00:04.511926+00:00"
     },
     "sklearn-calibration": {
       "actionable_lessons": [
@@ -46935,7 +46935,7 @@
       "updated_at": "2026-03-13T02:22:39.041929+00:00"
     }
   },
-  "generated_at": "2026-04-05T01:09:02.654268+00:00",
+  "generated_at": "2026-04-09T07:00:04.903783+00:00",
   "inverted_index": {
     "00": {
       "internal-report-btc5m-ensemble-go-live-gate-20260313-035713#0": 12,

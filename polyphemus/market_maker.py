@@ -24,7 +24,7 @@ from py_clob_client.order_builder.constants import BUY
 from .config import Settings, setup_logger
 from .clob_wrapper import ClobWrapper
 from .market_ws import MarketWS
-from .types import Position, RedemptionEvent
+from .models import Position, RedemptionEvent
 from .vpin_engine import VPINCalculator, AdaptiveQuoteEngine, calculate_lob_imbalance, resolution_urgency
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
@@ -1448,7 +1448,7 @@ class MarketMaker:
         if not self._momentum_feed or not self._rebate_vpin:
             return
 
-        from .types import ASSET_TO_BINANCE
+        from .models import ASSET_TO_BINANCE
         for asset in assets:
             symbol = ASSET_TO_BINANCE.get(asset)
             if not symbol:

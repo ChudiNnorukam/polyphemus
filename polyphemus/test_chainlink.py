@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from .chainlink_feed import ChainlinkFeed
 from .config import Settings
 from .exit_manager import ExitManager
-from .types import Position, ExitSignal, ExitReason
+from .models import Position, ExitSignal, ExitReason
 from .position_store import PositionStore
 
 

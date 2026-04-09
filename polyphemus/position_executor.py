@@ -12,7 +12,7 @@ from typing import Optional
 
 from py_clob_client.order_builder.constants import BUY
 
-from .types import (
+from .models import (
     Position,
     ExecutionResult,
     OrderStatus,
@@ -318,7 +318,7 @@ class PositionExecutor:
             return ExecutionResult(success=False, error=msg, reason="zero_size")
 
         # Determine entry mode based on config (maker saves ~1.3% taker fee)
-        from .types import parse_window_from_slug
+        from .models import parse_window_from_slug
         window = parse_window_from_slug(slug)
         retry_candidate = self._is_btc5m_retry_candidate(signal, window)
         use_maker = self._config.entry_mode == "maker"
@@ -583,7 +583,7 @@ class PositionExecutor:
                     else:
                         _parts = slug.rsplit('-', 1)
                         if len(_parts) == 2 and _parts[1].isdigit():
-                            from .types import parse_window_from_slug
+                            from .models import parse_window_from_slug
                             _epoch = int(_parts[1])
                             _adv_epoch_end = datetime.fromtimestamp(
                                 _epoch + parse_window_from_slug(slug), tz=timezone.utc
@@ -764,7 +764,7 @@ class PositionExecutor:
         else:
             parts = slug.rsplit('-', 1)
             if len(parts) == 2 and parts[1].isdigit():
-                from .types import parse_window_from_slug
+                from .models import parse_window_from_slug
                 market_epoch = int(parts[1])
                 market_end_time = datetime.fromtimestamp(market_epoch + parse_window_from_slug(slug), tz=timezone.utc)
 

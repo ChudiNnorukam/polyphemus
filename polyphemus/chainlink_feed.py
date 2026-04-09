@@ -22,7 +22,7 @@ from typing import Dict, Optional, Tuple
 
 import aiohttp
 
-from .types import BACKOFF_BASE, BACKOFF_MAX, BACKOFF_MULTIPLIER
+from .models import BACKOFF_BASE, BACKOFF_MAX, BACKOFF_MULTIPLIER
 from .config import Settings, setup_logger
 
 # Polymarket RTDS WebSocket — actual resolution price source (Chainlink Data Streams)
