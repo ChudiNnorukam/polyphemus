@@ -44,7 +44,6 @@ from .gabagool_tracker import GabagoolTracker
 from .tugao9_watcher import Tugao9Watcher
 from .adaptive_tuner import AdaptiveTuner
 from .market_ws import MarketWS
-from .telegram_approver import TelegramApprover
 from .slack_notifier import SlackNotifier
 from .chainlink_feed import ChainlinkFeed
 from .market_maker import MarketMaker
@@ -240,7 +239,6 @@ class SignalBot:
         # 11. Signal feed (created last so health monitor is ready)
         self._feed = None
         self._momentum_feed = None
-        self._weather_feed = None
         if config.signal_mode == "binance_momentum":
             # Momentum mode: Binance prices are the PRIMARY signal source
             self._momentum_feed = BinanceMomentumFeed(
@@ -260,16 +258,6 @@ class SignalBot:
                 f"Signal mode: Binance momentum (primary)"
                 f"{f' | shadow={shadow}' if shadow else ''}"
             )
-        elif config.signal_mode == "noaa_weather":
-            from .weather_feed import WeatherFeed
-            self._weather_feed = WeatherFeed(
-                config=config,
-                clob=self._clob,
-                on_signal=self._on_signal,
-                db=self._tracker.db,
-            )
-            self._logger.info("Signal mode: NOAA weather arb")
-
         # 11b. Chainlink oracle feed (wired to momentum feed + exit manager)
         self._chainlink = None
         if config.oracle_enabled and self._momentum_feed:
@@ -303,14 +291,7 @@ class SignalBot:
                 f"interval={config.mm_scan_interval}s)"
             )
 
-        # Telegram approval gate (weather mode only; no-op if token not configured)
-        self._telegram = TelegramApprover(
-            config=config,
-            on_execute=self._execute_weather_signal,
-        )
-        if self._telegram.enabled:
-            self._logger.info("Telegram approval gate ENABLED")
-        elif config.signal_mode in ("binance_momentum", "noaa_weather"):
+        if config.signal_mode in ("binance_momentum", "noaa_weather"):
             self._logger.info("Signal feed: disabled (dedicated feed active for signal_mode=%s)", config.signal_mode)
         else:
             # Copy-trade mode (existing behavior)
@@ -797,10 +778,6 @@ class SignalBot:
                 tasks.append(self._feed.start())
             if self._momentum_feed:
                 tasks.append(self._momentum_feed.start())
-            if self._weather_feed:
-                tasks.append(self._weather_feed.start())
-            if self._telegram.enabled:
-                tasks.append(self._safe_task(self._telegram.start(), "telegram_approver"))
             # Critical tasks — crash the bot if they fail
             tasks.extend([
                 self._exit_loop(),
@@ -1436,12 +1413,6 @@ class SignalBot:
                 )
                 return
 
-            # 5b. Telegram approval gate (weather signals only)
-            if signal.get('source') == 'noaa_weather' and self._telegram.enabled:
-                self._mark_signal_stage(signal_id, "approval", "pending", "telegram")
-                await self._telegram.submit(signal)
-                return  # execution happens via _execute_weather_signal callback
-
             # Inject ensemble score for Layer 1k sizing (None for non-BTC signals — fallback to neutral)
             if ensemble_verdict is not None:
                 signal['ensemble_score'] = ensemble_verdict.score
@@ -1560,46 +1531,6 @@ class SignalBot:
         except Exception as e:
             self._logger.exception(f"Error in _on_signal: {e}")
             self._health.record_error()
-
-    async def _execute_weather_signal(self, signal: dict) -> None:
-        """Called by TelegramApprover when user taps Approve. Executes the weather buy."""
-        try:
-            available = await self._balance.get_available()
-            if available < self._config.min_bet:
-                self._logger.warning(
-                    f"Telegram-approved signal skipped: insufficient capital "
-                    f"${available:.2f} < ${self._config.min_bet:.2f}"
-                )
-                return
-
-            exec_result = await self._executor.execute_buy(signal, available)
-            if not exec_result.success:
-                self._logger.error(
-                    f"Telegram-approved buy failed for {signal.get('slug', '?')}: "
-                    f"{exec_result.error}"
-                )
-                raise RuntimeError(exec_result.error)
-
-            self._logger.info(
-                f"Telegram-approved buy executed: {signal.get('slug', '?')} "
-                f"@ ${exec_result.fill_price:.4f} x {exec_result.fill_size:.1f}"
-            )
-
-            await self._tracker.record_entry(
-                trade_id=exec_result.order_id,
-                token_id=signal.get("token_id", ""),
-                slug=signal.get("slug", ""),
-                entry_price=exec_result.fill_price,
-                entry_size=exec_result.fill_size,
-                entry_tx_hash=exec_result.order_id,
-                outcome=signal.get("outcome", ""),
-                market_title=signal.get("market_title", ""),
-                entry_time=time.time(),
-                filter_score=None,
-            )
-        except Exception as e:
-            self._logger.exception(f"_execute_weather_signal error: {e}")
-            raise
 
     def _momentum_confirms(self, signal: dict, momentum: MomentumResult) -> bool:
         """Check if Binance momentum confirms the signal direction.
