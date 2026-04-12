@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 # Polymarket fee coefficient for weather markets
 _WEATHER_FEE_COEFF = 0.050
 
+# Estimated half-spread for weather markets (conservative).
+# Paper trades at midpoint overstate edge; this haircut accounts for
+# the cost of crossing the spread when actually executing.
+_SPREAD_HAIRCUT = 0.015
+
 
 def detect_divergences(
     market_data: dict,
@@ -42,9 +47,10 @@ def detect_divergences(
 
     from .forecast import forecast_cumulative_prob
 
-    # We need forecast_temp and unit to compute cumulative probabilities
+    # We need forecast_temp, unit, and days_until for cumulative probabilities
     forecast_temp = market_data.get("_forecast_temp")
     unit = market_data.get("_unit", "C")
+    days_until = market_data.get("_days_until", 1)
 
     for bucket in market_data.get("buckets", []):
         temp = parse_temp_from_label(bucket.get("temp_label", ""))
@@ -67,36 +73,42 @@ def detect_divergences(
         q_type = classify_question(question)
 
         if q_type == "cumulative_higher" and forecast_temp is not None:
-            forecast_prob = forecast_cumulative_prob(temp, forecast_temp, unit)
+            forecast_prob = forecast_cumulative_prob(temp, forecast_temp, unit, days_until=days_until)
         elif q_type == "cumulative_lower" and forecast_temp is not None:
-            forecast_prob = forecast_cumulative_prob(temp, forecast_temp, unit, direction="or_lower")
+            forecast_prob = forecast_cumulative_prob(temp, forecast_temp, unit, direction="or_lower", days_until=days_until)
         else:
             # Bucket/exact probability
             forecast_prob = forecast_dist.get(temp, 0.0)
 
-        edge = forecast_prob - market_price
+        raw_edge = forecast_prob - market_price
 
-        if abs(edge) < threshold:
+        if abs(raw_edge) < threshold:
             continue
 
-        direction = "BUY" if edge > 0 else "SELL"
+        direction = "BUY" if raw_edge > 0 else "SELL"
 
-        # Expected value per share
+        # Apply spread haircut: BUY pays ask (higher), SELL receives bid (lower)
         if direction == "BUY":
-            # Pay market_price per share, win (1 - market_price) if correct, lose market_price if wrong
-            ev_gross = forecast_prob * (1.0 - market_price) - (1.0 - forecast_prob) * market_price
+            execution_price = min(market_price + _SPREAD_HAIRCUT, 0.98)
         else:
-            # SELL: sell NO at (1 - market_price), so effective YES short
-            # Win (1 - market_price) if event doesn't happen (prob = 1 - forecast_prob)
-            ev_gross = (1.0 - forecast_prob) * market_price - forecast_prob * (1.0 - market_price)
+            execution_price = max(market_price - _SPREAD_HAIRCUT, 0.02)
+
+        edge = forecast_prob - execution_price if direction == "BUY" else raw_edge
+
+        # Expected value per share (using execution price, not midpoint)
+        if direction == "BUY":
+            ev_gross = forecast_prob * (1.0 - execution_price) - (1.0 - forecast_prob) * execution_price
+        else:
+            ev_gross = (1.0 - forecast_prob) * execution_price - forecast_prob * (1.0 - execution_price)
 
         # Polymarket weather fee = coeff * price * (1 - price)
-        fee = _WEATHER_FEE_COEFF * market_price * (1.0 - market_price)
+        fee = _WEATHER_FEE_COEFF * execution_price * (1.0 - execution_price)
         ev_net = ev_gross - fee
 
         opportunities.append({
             "temp": temp,
-            "market_price": round(market_price, 4),
+            "market_price": round(execution_price, 4),  # use execution price (spread-adjusted)
+            "midpoint_price": round(market_price, 4),    # original midpoint for reference
             "forecast_prob": round(forecast_prob, 4),
             "edge": round(edge, 4),
             "direction": direction,
@@ -146,26 +158,33 @@ def parse_temp_from_label(label: str) -> int | None:
     return None
 
 
-def compute_kelly(edge: float, market_price: float) -> float:
-    """Optimal Kelly fraction for a binary YES bet in a prediction market.
+def compute_kelly(edge: float, market_price: float, direction: str = "BUY") -> float:
+    """Optimal Kelly fraction for a prediction market bet.
+
+    For BUY (YES bet):
+      p = forecast_prob, b = (1 - market_price) / market_price
+    For SELL (NO bet):
+      p = 1 - forecast_prob, b = market_price / (1 - market_price)
 
     Formula: f* = (p*b - q) / b
-    where:
-      p = true probability (market_price + edge)
-      b = net odds = (1 - market_price) / market_price
-      q = 1 - p
-
     Returns fraction of bankroll (clamped to [0, 1]).
-    Never returns negative (no fractional shorts via Kelly here).
     """
     if market_price <= 0.0 or market_price >= 1.0:
         return 0.0
 
-    true_prob = market_price + edge
-    if true_prob <= 0.0 or true_prob >= 1.0:
+    forecast_prob = market_price + edge
+    if forecast_prob <= 0.0 or forecast_prob >= 1.0:
         return 0.0
 
-    b = (1.0 - market_price) / market_price  # net odds for YES
-    q = 1.0 - true_prob
-    kelly = (true_prob * b - q) / b
+    if direction == "SELL":
+        # NO bet: we believe event WON'T happen
+        p = 1.0 - forecast_prob  # true prob of NO
+        b = market_price / (1.0 - market_price)  # net odds for NO
+    else:
+        # YES bet: we believe event WILL happen
+        p = forecast_prob
+        b = (1.0 - market_price) / market_price  # net odds for YES
+
+    q = 1.0 - p
+    kelly = (p * b - q) / b
     return round(max(0.0, min(1.0, kelly)), 4)

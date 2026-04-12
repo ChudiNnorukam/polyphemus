@@ -97,24 +97,28 @@ async def fetch_forecast(city_key: str, target_date: date) -> dict | None:
     return None
 
 
-def forecast_to_distribution(temp_max: float, unit: str, std_dev: float = 1.5) -> dict[int, float]:
+def forecast_to_distribution(temp_max: float, unit: str, std_dev: float = 1.5,
+                              days_until: int = 1) -> dict[int, float]:
     """Convert a point forecast into a probability distribution over integer temperature buckets.
 
     Uses a Gaussian centered on the forecast with configurable std_dev.
     Default std_dev of 1.5 degC (2.7 degF) represents typical 1-day forecast uncertainty.
+    Scales by sqrt(days_until) for multi-day horizons (forecast uncertainty grows).
 
     Each integer bucket i captures P(i - 0.5 < actual_temp <= i + 0.5).
 
     Args:
         temp_max: Forecast maximum temperature.
         unit: "C" or "F".
-        std_dev: Forecast uncertainty in degrees C (converted to F if needed).
+        std_dev: Base forecast uncertainty in degrees C (1-day horizon).
+        days_until: Days until market resolution. Uncertainty scales as sqrt(days).
 
     Returns:
         dict mapping integer temperature -> probability (values sum to ~1.0).
     """
     center = temp_max
-    std = std_dev * (9 / 5) if unit == "F" else std_dev
+    horizon_std = std_dev * math.sqrt(max(1, days_until))
+    std = horizon_std * (9 / 5) if unit == "F" else horizon_std
 
     # Cover +/- 4 sigma to capture essentially all probability mass
     low = int(math.floor(center - 4 * std))
@@ -132,14 +136,18 @@ def forecast_to_distribution(temp_max: float, unit: str, std_dev: float = 1.5) -
 
 
 def forecast_cumulative_prob(temp_threshold: int, temp_max: float, unit: str,
-                             std_dev: float = 1.5, direction: str = "or_higher") -> float:
+                             std_dev: float = 1.5, direction: str = "or_higher",
+                             days_until: int = 1) -> float:
     """Compute cumulative probability: P(actual >= threshold) or P(actual <= threshold).
 
     For "X or higher" markets: P(actual >= X) = 1 - CDF(X - 0.5)
     For "X or lower" markets: P(actual <= X) = CDF(X + 0.5)
+
+    Scales std_dev by sqrt(days_until) for multi-day forecast horizons.
     """
     center = temp_max
-    std = std_dev * (9 / 5) if unit == "F" else std_dev
+    horizon_std = std_dev * math.sqrt(max(1, days_until))
+    std = horizon_std * (9 / 5) if unit == "F" else horizon_std
 
     if direction == "or_higher":
         z = (temp_threshold - 0.5 - center) / std

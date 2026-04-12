@@ -84,16 +84,20 @@ class ScannerService:
             unit = city_cfg["unit"]
             forecast_temp = forecast["temp_max_f"] if unit == "F" else forecast["temp_max_c"]
 
-            dist = forecast_to_distribution(forecast_temp, unit)
+            days_until = (target_date - today).days
+            dist = forecast_to_distribution(forecast_temp, unit, days_until=days_until)
             market["_forecast_temp"] = forecast_temp
             market["_unit"] = unit
+            market["_days_until"] = days_until
 
             raw_opps = detect_divergences(market, dist, threshold=self.settings.weather_threshold)
             result = []
             for raw in raw_opps:
                 if raw["ev_net"] < self.settings.weather_min_ev:
                     continue
-                kelly = compute_kelly(raw["edge"], raw["market_price"])
+                kelly = compute_kelly(raw["edge"], raw["market_price"], raw["direction"])
+                if kelly < self.settings.weather_min_kelly:
+                    continue
                 q_type = classify_question(raw.get("question", ""))
 
                 # Compute countdown

@@ -106,9 +106,11 @@ async def run(
         unit = city_cfg["unit"]
         forecast_temp = forecast["temp_max_f"] if unit == "F" else forecast["temp_max_c"]
 
-        dist = forecast_to_distribution(forecast_temp, unit)
+        days_until = (target_date - today).days
+        dist = forecast_to_distribution(forecast_temp, unit, days_until=days_until)
         market["_forecast_temp"] = forecast_temp
         market["_unit"] = unit
+        market["_days_until"] = days_until
         opps = detect_divergences(market, dist, threshold=threshold)
 
         for opp in opps:
@@ -119,7 +121,7 @@ async def run(
             opp["date"] = date_str
             opp["forecast_temp"] = round(forecast_temp, 1)
             opp["unit"] = unit
-            opp["kelly"] = compute_kelly(opp["edge"], opp["market_price"])
+            opp["kelly"] = compute_kelly(opp["edge"], opp["market_price"], opp["direction"])
             all_opportunities.append(opp)
 
     # Step 3: Sort and report
