@@ -93,7 +93,11 @@ def detect_divergences(
         else:
             execution_price = max(market_price - _SPREAD_HAIRCUT, 0.02)
 
-        edge = forecast_prob - execution_price if direction == "BUY" else raw_edge
+        # Edge vs execution price for both directions
+        if direction == "BUY":
+            edge = forecast_prob - execution_price
+        else:
+            edge = forecast_prob - execution_price  # negative: forecast_prob < execution_price
 
         # Expected value per share (using execution price, not midpoint)
         if direction == "BUY":
