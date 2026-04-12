@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}{{ opp.city_display or opp.title }} - Polyphemus{% endblock %}
+
+{% block content %}
+<div class="pt-4">
+
+    <!-- Back button -->
+    <a href="/" class="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-300 mb-4">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        Back
+    </a>
+
+    <!-- Header card -->
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <div class="flex items-start justify-between mb-3">
+            <div>
+                <h1 class="text-2xl font-bold">{{ opp.city_display or opp.title[:40] }}</h1>
+                {% if opp.temp is not none %}
+                <p class="text-gray-400">{{ opp.temp }}&deg;{{ opp.unit or '' }} &middot; {{ opp.market_date }}</p>
+                {% endif %}
+            </div>
+            <span class="px-4 py-2 text-lg font-bold rounded-lg {% if opp.direction == 'BUY' %}bg-buy/20 text-buy{% else %}bg-sell/20 text-sell{% endif %}">
+                {{ opp.direction }}
+            </span>
+        </div>
+
+        {% if opp.question %}
+        <p class="text-sm text-gray-400 mb-4 bg-gray-800/50 rounded-lg p-3">{{ opp.question }}</p>
+        {% endif %}
+
+        <!-- Key metrics -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-gray-800 rounded-lg p-3 text-center">
+                <p class="text-2xl font-bold {% if opp.edge > 0 %}text-buy{% else %}text-sell{% endif %}">{{ "%.1f"|format(opp.edge * 100) }}%</p>
+                <p class="text-xs text-gray-500">Edge</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-3 text-center">
+                <p class="text-2xl font-bold text-white">{{ "%.1f"|format(opp.kelly * 100) }}%</p>
+                <p class="text-xs text-gray-500">Kelly</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-3 text-center">
+                <p class="text-2xl font-bold text-white">${{ "%.3f"|format(opp.market_price) }}</p>
+                <p class="text-xs text-gray-500">Market Price</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-3 text-center">
+                <p class="text-2xl font-bold text-white">${{ "%.4f"|format(opp.ev_net) }}</p>
+                <p class="text-xs text-gray-500">EV/share</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Forecast comparison -->
+    {% if opp.scanner_type == "weather" %}
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Forecast</h2>
+        <div class="flex items-center justify-between mb-3">
+            <div>
+                <p class="text-lg font-bold">{{ opp.forecast_temp }}&deg;{{ opp.unit }}</p>
+                <p class="text-xs text-gray-500">Open-Meteo (GFS/ECMWF)</p>
+            </div>
+            <div class="text-right">
+                <p class="text-lg font-bold">{{ "%.1f"|format(opp.forecast_prob * 100) }}%</p>
+                <p class="text-xs text-gray-500">Model probability</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-2 mt-2">
+            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/20 text-amber-400">1 SOURCE</span>
+            <span class="text-xs text-gray-500">Cross-validate for higher confidence</span>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Order book (loaded via HTMX) -->
+    {% if opp.token_id %}
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Order Book</h2>
+        <div id="orderbook" hx-get="/api/orderbook/{{ opp.token_id }}" hx-trigger="load" hx-swap="innerHTML">
+            <div class="text-center py-6 text-gray-500 text-sm animate-pulse">Loading order book...</div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- P&L Calculator -->
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">P&L Calculator</h2>
+        <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+                <label class="text-xs text-gray-500 block mb-1">Shares</label>
+                <input type="number" id="calc-shares" value="100" min="1"
+                       class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
+                       oninput="updateCalc()">
+            </div>
+            <div>
+                <label class="text-xs text-gray-500 block mb-1">Entry Price</label>
+                <input type="number" id="calc-price" value="{{ '%.3f'|format(opp.market_price) }}" step="0.001"
+                       class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white"
+                       oninput="updateCalc()">
+            </div>
+        </div>
+        <div id="calc-results" class="grid grid-cols-3 gap-2 mt-3 text-center">
+            <div class="bg-gray-800 rounded-lg p-2">
+                <p id="calc-cost" class="text-sm font-semibold text-white">-</p>
+                <p class="text-[10px] text-gray-500">Cost</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-2">
+                <p id="calc-win" class="text-sm font-semibold text-buy">-</p>
+                <p class="text-[10px] text-gray-500">If Win</p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-2">
+                <p id="calc-lose" class="text-sm font-semibold text-sell">-</p>
+                <p class="text-[10px] text-gray-500">If Lose</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Paper Trade button -->
+    <div class="mb-6">
+        <button hx-post="/api/trade" hx-vals='{"opportunity_id": "{{ opp.id }}"}'
+                hx-target="#toast-container" hx-swap="beforeend"
+                class="w-full py-3 rounded-xl font-bold text-lg transition-colors
+                {% if opp.direction == 'BUY' %}bg-buy hover:bg-buy/80 text-white{% else %}bg-sell hover:bg-sell/80 text-white{% endif %}">
+            Paper Trade {{ opp.direction }}
+        </button>
+        <p class="text-center text-xs text-gray-600 mt-2">No real money. Records to paper trading log.</p>
+    </div>
+
+</div>
+
+<script>
+function updateCalc() {
+    const shares = parseFloat(document.getElementById('calc-shares').value) || 0;
+    const price = parseFloat(document.getElementById('calc-price').value) || 0;
+    const cost = shares * price;
+    const fee = 0.05 * price * (1 - price) * shares;
+    const winProfit = shares * (1 - price) - fee;
+    const lossCost = cost;
+
+    document.getElementById('calc-cost').textContent = '$' + cost.toFixed(2);
+    document.getElementById('calc-win').textContent = '+$' + winProfit.toFixed(2);
+    document.getElementById('calc-lose').textContent = '-$' + lossCost.toFixed(2);
+}
+updateCalc();
+</script>
+{% endblock %}

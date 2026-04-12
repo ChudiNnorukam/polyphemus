@@ -1,0 +1,69 @@
+<a href="/opportunity/{{ opp.id }}" class="block bg-gray-900 rounded-xl border border-gray-800 hover:border-gray-700 transition-colors p-4">
+    <!-- Header: scanner badge + countdown -->
+    <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-2">
+            {% if opp.scanner_type == "weather" %}
+            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-sky-500/20 text-sky-400 uppercase tracking-wide">Weather</span>
+            {% elif opp.scanner_type == "kalshi" %}
+            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-purple-500/20 text-purple-400 uppercase tracking-wide">Kalshi</span>
+            {% else %}
+            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/20 text-amber-400 uppercase tracking-wide">Arb</span>
+            {% endif %}
+
+            {% if opp.question_type == "cumulative_higher" or opp.question_type == "cumulative_lower" %}
+            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/20 text-emerald-400 uppercase tracking-wide">CDF</span>
+            {% endif %}
+        </div>
+
+        {% if opp.countdown %}
+        <span class="text-xs text-gray-500">{{ opp.countdown }}</span>
+        {% endif %}
+    </div>
+
+    <!-- City + temp -->
+    <div class="mb-2">
+        <h3 class="text-lg font-semibold text-white leading-tight">
+            {{ opp.city_display or opp.title[:30] }}
+        </h3>
+        {% if opp.temp is not none %}
+        <p class="text-sm text-gray-400">
+            {{ opp.temp }}&deg;{{ opp.unit or '' }}
+            {% if opp.market_date %}&middot; {{ opp.market_date }}{% endif %}
+        </p>
+        {% endif %}
+    </div>
+
+    <!-- Edge + Direction -->
+    <div class="flex items-end justify-between mb-3">
+        <div>
+            <p class="text-3xl font-bold {% if opp.edge > 0 %}text-buy{% else %}text-sell{% endif %}">
+                {{ "%.1f"|format(opp.edge * 100) }}%
+            </p>
+            <p class="text-[10px] text-gray-500 uppercase tracking-wide">Edge</p>
+        </div>
+
+        <span class="px-3 py-1.5 text-sm font-bold rounded-lg {% if opp.direction == 'BUY' %}bg-buy/20 text-buy{% elif opp.direction == 'SELL' %}bg-sell/20 text-sell{% else %}bg-gray-700 text-gray-300{% endif %}">
+            {{ opp.direction }}
+        </span>
+    </div>
+
+    <!-- Stats row -->
+    <div class="grid grid-cols-3 gap-2 text-center">
+        <div class="bg-gray-800/50 rounded-lg py-1.5">
+            <p class="text-sm font-semibold text-white">{{ "%.1f"|format(opp.kelly * 100) }}%</p>
+            <p class="text-[10px] text-gray-500">Kelly</p>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg py-1.5">
+            <p class="text-sm font-semibold text-white">${{ "%.3f"|format(opp.market_price) }}</p>
+            <p class="text-[10px] text-gray-500">Price</p>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg py-1.5">
+            <p class="text-sm font-semibold text-white">${{ "%.3f"|format(opp.ev_net) }}</p>
+            <p class="text-[10px] text-gray-500">EV/share</p>
+        </div>
+    </div>
+
+    {% if opp.question %}
+    <p class="mt-2 text-xs text-gray-500 truncate">{{ opp.question }}</p>
+    {% endif %}
+</a>

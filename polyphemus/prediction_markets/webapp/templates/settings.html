@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Settings - Polyphemus{% endblock %}
+
+{% block content %}
+<div class="pt-4">
+
+    <h1 class="text-xl font-bold mb-4">Settings</h1>
+
+    <form hx-post="/settings" hx-target="#toast-container" hx-swap="beforeend" class="space-y-6">
+
+        <!-- Capital -->
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Capital</h2>
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Bankroll ($)</label>
+                    <input type="number" name="bankroll" value="{{ settings.bankroll }}" step="1" min="1"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Max deployment %</label>
+                    <input type="number" name="max_total_deployment_pct" value="{{ "%.0f"|format(settings.max_total_deployment_pct * 100) }}" step="5" min="10" max="100"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Max per position %</label>
+                    <input type="number" name="max_single_position_pct" value="{{ "%.0f"|format(settings.max_single_position_pct * 100) }}" step="1" min="1" max="25"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Max per city/date</label>
+                    <input type="number" name="max_positions_per_city_date" value="{{ settings.max_positions_per_city_date }}" step="1" min="1" max="10"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+            </div>
+        </div>
+
+        <!-- Weather scanner -->
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Weather Scanner</h2>
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Min edge threshold</label>
+                    <input type="number" name="weather_threshold" value="{{ settings.weather_threshold }}" step="0.01" min="0.01" max="0.50"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Min EV/share ($)</label>
+                    <input type="number" name="weather_min_ev" value="{{ settings.weather_min_ev }}" step="0.005" min="0"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Min Kelly %</label>
+                    <input type="number" name="weather_min_kelly" value="{{ settings.weather_min_kelly }}" step="0.01" min="0"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Scan interval (min)</label>
+                    <input type="number" name="weather_scan_interval_min" value="{{ settings.weather_scan_interval_min }}" step="1" min="1" max="60"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+            </div>
+        </div>
+
+        <!-- Arbitrage -->
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Arbitrage Scanner</h2>
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Min spread ($)</label>
+                    <input type="number" name="arb_min_spread" value="{{ settings.arb_min_spread }}" step="0.005" min="0"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500 block mb-1">Scan interval (min)</label>
+                    <input type="number" name="arb_scan_interval_min" value="{{ settings.arb_scan_interval_min }}" step="1" min="1" max="60"
+                           class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
+                </div>
+            </div>
+        </div>
+
+        <!-- Save -->
+        <button type="submit"
+                class="w-full py-3 rounded-xl font-bold text-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors">
+            Save Settings
+        </button>
+    </form>
+
+</div>
+{% endblock %}

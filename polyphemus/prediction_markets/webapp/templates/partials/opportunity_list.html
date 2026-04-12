@@ -1,0 +1,9 @@
+{% if opportunities %}
+    {% for opp in opportunities %}
+        {% include "partials/opportunity_card.html" %}
+    {% endfor %}
+{% else %}
+    <div class="col-span-full text-center py-12">
+        <p class="text-gray-500 text-sm">No opportunities match your filters</p>
+    </div>
+{% endif %}

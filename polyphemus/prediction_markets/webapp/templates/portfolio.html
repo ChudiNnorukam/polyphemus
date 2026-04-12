@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Portfolio - Polyphemus{% endblock %}
+
+{% block content %}
+<div class="pt-4">
+
+    <h1 class="text-xl font-bold mb-4">Portfolio</h1>
+
+    <!-- Summary stats -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 text-center">
+            <p class="text-2xl font-bold {% if summary.total_pnl is defined and summary.total_pnl > 0 %}text-buy{% elif summary.total_pnl is defined and summary.total_pnl < 0 %}text-sell{% else %}text-white{% endif %}">
+                {% if summary.total_pnl is defined %}${{ "%.2f"|format(summary.total_pnl) }}{% else %}-{% endif %}
+            </p>
+            <p class="text-xs text-gray-500">Total P&L</p>
+        </div>
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 text-center">
+            <p class="text-2xl font-bold text-white">
+                {% if summary.win_rate is not none %}{{ "%.0f"|format(summary.win_rate * 100) }}%{% else %}-{% endif %}
+            </p>
+            <p class="text-xs text-gray-500">Win Rate</p>
+        </div>
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 text-center">
+            <p class="text-2xl font-bold text-white">{{ summary.resolved or 0 }}</p>
+            <p class="text-xs text-gray-500">Resolved</p>
+        </div>
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 text-center">
+            <p class="text-2xl font-bold text-blue-400">{{ summary.unresolved or 0 }}</p>
+            <p class="text-xs text-gray-500">Open</p>
+        </div>
+    </div>
+
+    <!-- Open positions -->
+    <div class="mb-6">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Open Positions ({{ open_trades|length }})</h2>
+        {% if open_trades %}
+        <div class="space-y-2">
+            {% for t in open_trades %}
+            <div class="bg-gray-900 rounded-xl border border-gray-800 p-4">
+                <div class="flex items-center justify-between mb-2">
+                    <div>
+                        <span class="font-semibold text-white">{{ t.city }}</span>
+                        <span class="text-gray-400">{{ t.temp }}&deg;{{ t.unit }}</span>
+                    </div>
+                    <span class="px-2 py-0.5 text-xs font-bold rounded {% if t.direction == 'BUY' %}bg-buy/20 text-buy{% else %}bg-sell/20 text-sell{% endif %}">
+                        {{ t.direction }}
+                    </span>
+                </div>
+                <div class="flex items-center justify-between text-sm text-gray-400">
+                    <span>{{ t.market_date }} &middot; ${{ "%.3f"|format(t.market_price) }}</span>
+                    <span>Edge {{ "%+.1f"|format(t.edge * 100) }}% &middot; ${{ "%.2f"|format(t.hypothetical_size) }}</span>
+                </div>
+                <!-- Resolve buttons -->
+                <div class="flex gap-2 mt-3">
+                    <button hx-post="/api/portfolio/resolve/{{ t.id }}" hx-vals='{"outcome": "YES"}'
+                            hx-target="#portfolio-content" hx-swap="innerHTML"
+                            class="flex-1 py-2 text-sm font-bold rounded-lg bg-buy/20 text-buy hover:bg-buy/30 transition-colors">
+                        Resolved YES
+                    </button>
+                    <button hx-post="/api/portfolio/resolve/{{ t.id }}" hx-vals='{"outcome": "NO"}'
+                            hx-target="#portfolio-content" hx-swap="innerHTML"
+                            class="flex-1 py-2 text-sm font-bold rounded-lg bg-sell/20 text-sell hover:bg-sell/30 transition-colors">
+                        Resolved NO
+                    </button>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-center py-8 text-gray-600 text-sm">No open positions</div>
+        {% endif %}
+    </div>
+
+    <!-- Resolved trades -->
+    <div class="mb-6">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Recent Resolutions ({{ resolved_trades|length }})</h2>
+        {% if resolved_trades %}
+        <div class="space-y-2">
+            {% for t in resolved_trades %}
+            <div class="bg-gray-900 rounded-xl border border-gray-800 p-3 flex items-center justify-between">
+                <div>
+                    <span class="text-sm font-medium text-white">{{ t.city }} {{ t.temp }}&deg;{{ t.unit }}</span>
+                    <span class="text-xs text-gray-500 ml-1">{{ t.market_date }}</span>
+                </div>
+                <div class="text-right">
+                    <span class="text-sm font-bold {% if t.pnl and t.pnl > 0 %}text-buy{% else %}text-sell{% endif %}">
+                        {% if t.pnl %}${{ "%+.2f"|format(t.pnl) }}{% else %}-{% endif %}
+                    </span>
+                    <span class="text-xs ml-1 {% if t.resolution_outcome == 'YES' %}text-buy{% else %}text-sell{% endif %}">
+                        {{ t.resolution_outcome or '?' }}
+                    </span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-center py-8 text-gray-600 text-sm">No resolved trades yet</div>
+        {% endif %}
+    </div>
+
+</div>
+{% endblock %}

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Polyphemus - Scanner{% endblock %}
+
+{% block content %}
+<div hx-ext="sse" sse-connect="/api/events">
+
+    <!-- Header -->
+    <div class="pt-4 pb-3">
+        <h1 class="text-xl font-bold">Opportunity Scanner</h1>
+        <p class="text-sm text-gray-500">Live prediction market mispricings</p>
+    </div>
+
+    <!-- Scanner status pills -->
+    <div id="scanner-status" sse-swap="scanner_status" class="flex gap-2 mb-4 overflow-x-auto">
+        {% include "partials/scanner_status.html" %}
+    </div>
+
+    <!-- Filter tabs -->
+    <div class="flex gap-1 mb-4 bg-gray-900 rounded-lg p-1">
+        <button hx-get="/api/opportunities" hx-target="#opportunity-list" hx-swap="innerHTML"
+                class="flex-1 py-2 text-sm font-medium rounded-md bg-gray-800 text-white">All</button>
+        <button hx-get="/api/opportunities?scanner=weather" hx-target="#opportunity-list" hx-swap="innerHTML"
+                class="flex-1 py-2 text-sm font-medium rounded-md text-gray-400 hover:text-white">Weather</button>
+        <button hx-get="/api/opportunities?scanner=kalshi" hx-target="#opportunity-list" hx-swap="innerHTML"
+                class="flex-1 py-2 text-sm font-medium rounded-md text-gray-400 hover:text-white">Kalshi</button>
+        <button hx-get="/api/opportunities?scanner=arbitrage" hx-target="#opportunity-list" hx-swap="innerHTML"
+                class="flex-1 py-2 text-sm font-medium rounded-md text-gray-400 hover:text-white">Arb</button>
+    </div>
+
+    <!-- Sort controls -->
+    <div class="flex gap-2 mb-4 text-xs">
+        <span class="text-gray-500 self-center">Sort:</span>
+        <button hx-get="/api/opportunities?sort=ev_net" hx-target="#opportunity-list" hx-swap="innerHTML"
+                class="px-2 py-1 rounded bg-gray-800 text-gray-300 hover:text-white">EV</button>
+        <button hx-get="/api/opportunities?sort=edge" hx-target="#opportunity-list" hx-swap="innerHTML"
+                class="px-2 py-1 rounded bg-gray-800 text-gray-300 hover:text-white">Edge</button>
+        <button hx-get="/api/opportunities?sort=kelly" hx-target="#opportunity-list" hx-swap="innerHTML"
+                class="px-2 py-1 rounded bg-gray-800 text-gray-300 hover:text-white">Kelly</button>
+    </div>
+
+    <!-- Opportunity list (SSE auto-updates) -->
+    <div id="opportunity-list" sse-swap="scan_complete" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {% if opportunities %}
+            {% for opp in opportunities %}
+                {% include "partials/opportunity_card.html" %}
+            {% endfor %}
+        {% else %}
+            <div class="col-span-full text-center py-12">
+                <div class="animate-pulse text-gray-500">
+                    <svg class="w-12 h-12 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    <p class="text-sm">Scanners initializing...</p>
+                    <p class="text-xs mt-1">First scan takes ~30 seconds</p>
+                </div>
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- Count -->
+    {% if opportunities %}
+    <p class="text-center text-xs text-gray-600 mt-4 mb-2">{{ opportunities|length }} opportunities found</p>
+    {% endif %}
+
+</div>
+{% endblock %}

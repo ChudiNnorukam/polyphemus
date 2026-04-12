@@ -1,0 +1,13 @@
+{% for name, ts in scanner_status.items() %}
+<div class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap
+    {% if ts %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20
+    {% else %}bg-gray-800 text-gray-500 border border-gray-700{% endif %}">
+    <span class="w-1.5 h-1.5 rounded-full {% if ts %}bg-emerald-400 animate-pulse{% else %}bg-gray-600{% endif %}"></span>
+    {{ name|capitalize }}
+    {% if ts %}
+    <span class="text-gray-500">{{ ts[11:16] }}</span>
+    {% else %}
+    <span>waiting</span>
+    {% endif %}
+</div>
+{% endfor %}

@@ -40,6 +40,7 @@ linkedin-outreach-output/
 
 # Large analysis artifacts
 *.html
+!polyphemus/prediction_markets/webapp/templates/**/*.html
 polyphemus_charts.py
 
 # Nested repos (separate projects with own remotes)
