@@ -41,38 +41,67 @@ class PerformanceTracker:
         filter_score: Optional[float] = None,
         metadata: Optional[dict] = None,
         fg_at_entry: Optional[float] = None,
+        is_dry_run: bool = False,
+        # Phase 2 v4 observability pass-throughs (see PerformanceDB.record_entry).
+        fill_model: Optional[str] = None,
+        fill_model_reason: Optional[str] = None,
+        signal_id: Optional[int] = None,
+        fill_latency_ms: Optional[int] = None,
+        book_spread_at_entry: Optional[float] = None,
+        book_depth_bid: Optional[float] = None,
+        book_depth_ask: Optional[float] = None,
+        entry_mode: Optional[str] = None,
+        signal_source: Optional[str] = None,
     ) -> None:
-        """
-        Record a trade entry asynchronously.
+        """Record a trade entry asynchronously.
 
-        Args:
-            trade_id: Unique identifier for the trade.
-            token_id: Token ID from Polymarket.
-            slug: Market slug.
-            entry_price: Entry price (0.0 - 1.0).
-            entry_size: Size of position in shares.
-            entry_tx_hash: Transaction hash of the entry order.
-            outcome: Outcome name (e.g., 'YES', 'NO').
-            market_title: Human-readable market title.
-            entry_time: Entry timestamp (Unix epoch seconds). If None, uses current time.
-            filter_score: Signal quality score from XGBoost model (0-100).
-            fg_at_entry: Fear & Greed index value at time of entry (0-100).
+        Phase 2 kwargs (fill_model, book state, signal_id, etc.) flow through
+        unchanged to :meth:`PerformanceDB.record_entry`; see that method for
+        semantics. When omitted they remain None and the DB layer will not
+        touch the corresponding v4 columns, so older callers keep working.
         """
         if entry_time is None:
             entry_time = asyncio.get_event_loop().time()
 
-        # Delegate to DB layer (run in executor to avoid blocking)
+        # Derive signal_source from metadata if the caller didn't pass it,
+        # so v4 attribution queries work without updating every record_entry
+        # site in lock-step.
+        if signal_source is None and isinstance(metadata, dict):
+            signal_source = metadata.get("source")
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None,
-            self.db.record_entry,
-            trade_id, token_id, slug, entry_time, entry_price, entry_size,
-            entry_tx_hash, outcome, market_title, filter_score, metadata,
-            "signal_bot", fg_at_entry
+            lambda: self.db.record_entry(
+                trade_id=trade_id,
+                token_id=token_id,
+                slug=slug,
+                entry_time=entry_time,
+                entry_price=entry_price,
+                entry_size=entry_size,
+                entry_tx_hash=entry_tx_hash,
+                outcome=outcome,
+                market_title=market_title,
+                filter_score=filter_score,
+                metadata=metadata,
+                strategy="signal_bot",
+                fg_at_entry=fg_at_entry,
+                is_dry_run=is_dry_run,
+                fill_model=fill_model,
+                fill_model_reason=fill_model_reason,
+                signal_id=signal_id,
+                fill_latency_ms=fill_latency_ms,
+                book_spread_at_entry=book_spread_at_entry,
+                book_depth_bid=book_depth_bid,
+                book_depth_ask=book_depth_ask,
+                entry_mode=entry_mode,
+                signal_source=signal_source,
+            ),
         )
 
+        model_str = f' model={fill_model}' if fill_model else ''
         self.logger.info(
-            f'Entry recorded: {trade_id} | {outcome} @ ${entry_price:.4f} x {entry_size} shares'
+            f'Entry recorded: {trade_id} | {outcome} @ ${entry_price:.4f} x {entry_size} shares{model_str}'
         )
 
     async def record_exit(

@@ -29,6 +29,7 @@ from .models import (
 )
 from .balance_manager import BalanceManager
 from .clob_wrapper import ClobWrapper
+from .dry_run_fill_model import dry_run_v2_enabled as _v2_flag_on
 from .position_store import PositionStore
 
 
@@ -91,8 +92,6 @@ class AccumulatorEngine:
         self._orders_filled: int = 0
         self._orders_timed_out: int = 0
         self._best_bid_pair: float = 0.0
-        # Phase 1.4: lazy-init maker fill model for DRY_RUN_V2
-        self._maker_fill_model = None
 
         # Auto-redeemer (injected by signal_bot)
         self._redeemer = None
@@ -1575,6 +1574,10 @@ class AccumulatorEngine:
             entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 300
             entry_cost = pos.pair_cost if pos.pair_cost > 0 else (pos.up_avg_price or pos.down_avg_price or 0)
 
+            # Phase 2: pair_arb fills are aggregated across multiple maker
+            # decisions; fill_model reflects the mode active for the session.
+            fill_model = ("v2_probabilistic" if self._dry_run and _v2_flag_on()
+                          else ("v1_taker" if self._dry_run else "live"))
             self._perf_db.record_entry(
                 trade_id=trade_id,
                 token_id=pos.up_token_id or pos.down_token_id,
@@ -1587,6 +1590,12 @@ class AccumulatorEngine:
                 market_title=pos.slug,
                 strategy="pair_arb",
                 is_dry_run=bool(self._dry_run),
+                fill_model=fill_model,
+                entry_mode="maker",
+                signal_source="pair_arb",
+                book_spread_at_entry=round(pos.book_spread_at_entry, 6) if pos.book_spread_at_entry else None,
+                book_depth_bid=pos.book_depth_up_at_entry or None,
+                book_depth_ask=pos.book_depth_down_at_entry or None,
                 metadata={
                     "up_price": round(pos.up_avg_price, 4),
                     "down_price": round(pos.down_avg_price, 4),
@@ -1892,36 +1901,28 @@ class AccumulatorEngine:
         """
         price = self._side_price(pos, side)
         if self._dry_run:
-            from .dry_run_fill_model import dry_run_v2_enabled
-            if dry_run_v2_enabled() and best_bid > 0 and best_ask > 0:
-                elapsed = 0.0
-                if order_time:
-                    elapsed = (datetime.now(tz=timezone.utc) - order_time).total_seconds()
-                if self._maker_fill_model is None:
-                    from .dry_run_fill_model import MakerFillModel
-                    self._maker_fill_model = MakerFillModel()
-                decision = self._maker_fill_model.evaluate(
-                    our_price=price,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    qty=pos.target_shares,
-                    elapsed_secs=elapsed,
-                )
-                if decision.filled:
-                    self._apply_fill(pos, side, decision.fill_price, decision.fill_qty, order_id)
-                    self._clear_order(pos, side)
-                    self._orders_filled += 1
-                    return "filled"
-                self._logger.debug(
-                    f"[DRY RUN V2] maker miss {pos.slug} {side} | "
-                    f"price=${price:.3f} bid=${best_bid:.3f} ask=${best_ask:.3f} "
-                    f"elapsed={elapsed:.1f}s reason={decision.reason}"
-                )
-                return "waiting"
-            self._apply_fill(pos, side, price, pos.target_shares, order_id)
-            self._clear_order(pos, side)
-            self._orders_filled += 1
-            return "filled"
+            from .fill_router import route_dry_run_fill
+            elapsed = 0.0
+            if order_time:
+                elapsed = (datetime.now(tz=timezone.utc) - order_time).total_seconds()
+            record = route_dry_run_fill(
+                our_price=price,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                qty=pos.target_shares,
+                elapsed_secs=elapsed,
+            )
+            if record.filled:
+                self._apply_fill(pos, side, record.fill_price, record.fill_qty, order_id)
+                self._clear_order(pos, side)
+                self._orders_filled += 1
+                return "filled"
+            self._logger.debug(
+                f"[DRY RUN {record.fill_model}] maker miss {pos.slug} {side} | "
+                f"price=${price:.3f} bid=${best_bid:.3f} ask=${best_ask:.3f} "
+                f"elapsed={elapsed:.1f}s reason={record.fill_model_reason}"
+            )
+            return "waiting"
 
         try:
             status = await self._clob.get_order_status(order_id)

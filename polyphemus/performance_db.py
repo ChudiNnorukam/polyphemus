@@ -275,6 +275,17 @@ class PerformanceDB:
         strategy: str = "signal_bot",
         fg_at_entry: float = None,
         is_dry_run: bool = False,
+        # Phase 2 v4 observability kwargs (all optional so legacy callers work
+        # during rollout; Phase 5 verifies every new trade populates them).
+        fill_model: Optional[str] = None,
+        fill_model_reason: Optional[str] = None,
+        signal_id: Optional[int] = None,
+        fill_latency_ms: Optional[int] = None,
+        book_spread_at_entry: Optional[float] = None,
+        book_depth_bid: Optional[float] = None,
+        book_depth_ask: Optional[float] = None,
+        entry_mode: Optional[str] = None,
+        signal_source: Optional[str] = None,
     ) -> None:
         """
         Record a new trade entry.
@@ -294,28 +305,72 @@ class PerformanceDB:
             is_dry_run: True when caller is running in DRY_RUN mode — required
                 for segregating dry vs live aggregates. Default False (fail-closed
                 towards live; caller must opt-in to dry-run flagging).
+            fill_model: "live" / "v1_taker" / "v2_probabilistic" — how the fill
+                was decided. Populated from :func:`fill_router.route_dry_run_fill`
+                in dry run, or directly by the live CLOB callback.
+            fill_model_reason: V2-only detail tag (prob_hit / prob_miss /
+                crossed_book / buried / v1_instant).
+            signal_id: Denormalized from ``signals.id`` for indexed attribution
+                queries. Nullable for entries that don't correspond to a signal
+                row (e.g., pair_arb legs, manual fills).
+            fill_latency_ms: ``order_fill_time - order_place_time``.
+            book_spread_at_entry: ``best_ask - best_bid`` at fill moment.
+            book_depth_bid: Size at best bid at fill moment.
+            book_depth_ask: Size at best ask at fill moment.
+            entry_mode: "maker" / "taker" / "fak" — what the router chose.
+            signal_source: Denormalized from metadata JSON for indexed slicing.
+                When provided, wins over ``metadata['source']``.
         """
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             metadata_json = json.dumps(metadata) if metadata else None
-            cursor.execute('''
-                INSERT INTO trades (
-                    trade_id, token_id, slug, entry_time, entry_price, entry_size,
-                    entry_tx_hash, outcome, market_title, is_resolved, is_redeemed,
-                    side, entry_amount, strategy, filter_score, metadata, fg_at_entry,
-                    is_dry_run
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
+            # Only populate optional columns when the table has them. Older
+            # test DBs (see test_phase0_is_dry_run_migration) skip the v4
+            # migration, and fg_at_entry has never been in the shared
+            # migration list, so it is absent from production and fresh
+            # test DBs alike — treat it the same way as v4 columns.
+            optional_cols = {
+                'fg_at_entry': fg_at_entry,
+                'fill_model': fill_model,
+                'fill_model_reason': fill_model_reason,
+                'signal_id': signal_id,
+                'fill_latency_ms': fill_latency_ms,
+                'book_spread_at_entry': book_spread_at_entry,
+                'book_depth_bid': book_depth_bid,
+                'book_depth_ask': book_depth_ask,
+                'entry_mode': entry_mode,
+                'signal_source': signal_source,
+            }
+            optional_cols = {
+                k: v for k, v in optional_cols.items()
+                if k in self._columns and v is not None
+            }
+
+            base_cols = [
+                'trade_id', 'token_id', 'slug', 'entry_time', 'entry_price', 'entry_size',
+                'entry_tx_hash', 'outcome', 'market_title', 'is_resolved', 'is_redeemed',
+                'side', 'entry_amount', 'strategy', 'filter_score', 'metadata',
+                'is_dry_run',
+            ]
+            base_vals = [
                 trade_id, token_id, slug, entry_time, entry_price, entry_size,
                 entry_tx_hash, outcome, market_title, 0, 0,
                 'BUY', entry_price * entry_size, strategy, filter_score, metadata_json,
-                fg_at_entry, 1 if is_dry_run else 0,
-            ))
+                1 if is_dry_run else 0,
+            ]
+            all_cols = base_cols + list(optional_cols.keys())
+            all_vals = base_vals + list(optional_cols.values())
+            placeholders = ', '.join(['?'] * len(all_cols))
+            cursor.execute(
+                f'INSERT INTO trades ({", ".join(all_cols)}) VALUES ({placeholders})',
+                all_vals,
+            )
             conn.commit()
             fg_str = f' fg={fg_at_entry}' if fg_at_entry is not None else ''
             tag = ' [DRY]' if is_dry_run else ''
-            self.logger.info(f'Recorded entry{tag}: {trade_id} @ {entry_price:.4f} x {entry_size} score={filter_score}{fg_str}')
+            model_str = f' model={fill_model}' if fill_model else ''
+            self.logger.info(f'Recorded entry{tag}: {trade_id} @ {entry_price:.4f} x {entry_size} score={filter_score}{fg_str}{model_str}')
         finally:
             conn.close()
 
