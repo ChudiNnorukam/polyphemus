@@ -119,6 +119,18 @@ class PerformanceDB:
                 ('adverse_fill', 'INTEGER'),
                 ('adverse_fill_bps', 'REAL'),
                 ('check_window_secs', 'INTEGER'),
+                # v4 (2026-04-17) — Trade Observability Overhaul Phase 1.
+                # Every new field populated at write time. Nullable for
+                # backfill safety; record_entry enrichment lands in Phase 2.
+                ('fill_model', 'TEXT'),
+                ('fill_model_reason', 'TEXT'),
+                ('signal_id', 'INTEGER'),
+                ('fill_latency_ms', 'INTEGER'),
+                ('book_spread_at_entry', 'REAL'),
+                ('book_depth_bid', 'REAL'),
+                ('book_depth_ask', 'REAL'),
+                ('entry_mode', 'TEXT'),
+                ('signal_source', 'TEXT'),
             ]
 
             cursor.execute('PRAGMA table_info(trades)')
@@ -155,10 +167,76 @@ class PerformanceDB:
                 except sqlite3.OperationalError as e:
                     self.logger.error(f'is_dry_run migration failed: {e}')
 
+            self._migrate_v4_trade_observability(cursor)
+
             conn.commit()
             self.logger.info('Database schema initialized')
         finally:
             conn.close()
+
+    def _migrate_v4_trade_observability(self, cursor: sqlite3.Cursor) -> None:
+        """Phase 1 backfills + indexes for the 9 trade-observability columns.
+
+        The ALTER TABLE additions themselves live in ``columns_to_add`` above;
+        this helper only handles one-time backfills and index creation so
+        historical rows surface in attribution views without NULL blind spots.
+        Idempotent: safe to re-run on every startup.
+        """
+        # Backfill signal_source from existing metadata JSON (source is the
+        # canonical key written by build_entry_metadata in signal_pipeline.py).
+        try:
+            cursor.execute(
+                """UPDATE trades
+                   SET signal_source = json_extract(metadata, '$.source')
+                   WHERE metadata IS NOT NULL
+                     AND signal_source IS NULL
+                     AND json_extract(metadata, '$.source') IS NOT NULL"""
+            )
+            if cursor.rowcount > 0:
+                self.logger.info(
+                    f'v4 backfill: signal_source populated for {cursor.rowcount} rows from metadata JSON'
+                )
+        except sqlite3.OperationalError as e:
+            # Older SQLite without JSON1 — skip; new writes will populate the column.
+            self.logger.warning(f'v4 backfill: signal_source skipped ({e})')
+
+        # Backfill fill_model: pre-migration rows cannot be recovered, but the
+        # explicit label keeps attribution queries honest (no silent NULL bucket).
+        cursor.execute(
+            "UPDATE trades SET fill_model = 'unknown_legacy' WHERE fill_model IS NULL"
+        )
+        if cursor.rowcount > 0:
+            self.logger.info(
+                f'v4 backfill: fill_model=unknown_legacy for {cursor.rowcount} pre-migration rows'
+            )
+
+        # Backfill pnl for open trades — closes the SUM(pnl) NULL-exclusion bug
+        # class (Apr 10 precedent). Closed trades with NULL pnl are a data
+        # anomaly; do NOT overwrite them with 0.0, surface them instead.
+        cursor.execute(
+            "UPDATE trades SET pnl = 0.0 WHERE pnl IS NULL AND exit_time IS NULL"
+        )
+        open_backfill = cursor.rowcount
+        cursor.execute(
+            "SELECT COUNT(*) FROM trades WHERE pnl IS NULL AND exit_time IS NOT NULL"
+        )
+        closed_with_null_pnl = cursor.fetchone()[0]
+        if open_backfill > 0:
+            self.logger.info(f'v4 backfill: pnl=0.0 for {open_backfill} open trades')
+        if closed_with_null_pnl > 0:
+            self.logger.warning(
+                f'v4 data anomaly: {closed_with_null_pnl} closed trades have NULL pnl — '
+                'manual triage required (do not mask with 0.0)'
+            )
+
+        # Attribution-friendly indexes (no-ops if already present).
+        for idx_sql in (
+            'CREATE INDEX IF NOT EXISTS idx_trades_signal_id ON trades(signal_id)',
+            'CREATE INDEX IF NOT EXISTS idx_trades_fill_model ON trades(fill_model)',
+            'CREATE INDEX IF NOT EXISTS idx_trades_signal_source ON trades(signal_source)',
+            'CREATE INDEX IF NOT EXISTS idx_trades_is_dry_run_strategy ON trades(is_dry_run, strategy)',
+        ):
+            cursor.execute(idx_sql)
 
     def _get_existing_columns(self) -> set:
         """Return set of column names in trades table."""
