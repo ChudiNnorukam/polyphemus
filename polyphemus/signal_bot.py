@@ -37,6 +37,7 @@ from .accumulator import AccumulatorEngine
 from .signal_logger import SignalLogger
 from .evidence_verdict import BTC5MEvidenceEngine
 from .trade_tracer import emit as _trace_emit, EventType as _ET
+from .fill_router import route_dry_run_fill
 from .signal_scorer import SignalScorer
 from .fill_optimizer import FillOptimizer
 from .regime_detector import RegimeDetector
@@ -1387,18 +1388,65 @@ class SignalBot:
                 )
                 self._store.add(phantom_pos)
 
-                # Record to performance DB (same as live)
+                # Route the phantom through fill_router so the fill-model label
+                # matches actual behavior (Phase 2 proper V2 wiring):
+                #   maker entries with book state  → V2 probabilistic (may not fill)
+                #   taker / FAK entries            → V1 instant (V2 is maker-only)
+                #   maker entries missing bid/ask  → V1 instant (router auto-degrades)
+                # ``signal.entry_mode_override`` wins over config default (cheap_side
+                # forces "fak"). When the router reports filled=False, we skip phantom
+                # creation entirely — that's the whole point of V2: an honest rest-model
+                # reports unfilled orders as unfilled.
+                _effective_entry_mode = signal.get("entry_mode_override") or self._config.entry_mode
+
+                if _effective_entry_mode == "maker":
+                    _fr = route_dry_run_fill(
+                        our_price=price,
+                        best_bid=float(signal.get("best_bid") or 0),
+                        best_ask=float(signal.get("best_ask") or 0),
+                        qty=size,
+                        elapsed_secs=0.0,
+                    )
+                    if not _fr.filled:
+                        _trace_emit(phantom_id, _ET.SIGNAL_FIRED, {
+                            "source": signal.get("source"), "signal_id": signal_id,
+                            "momentum_pct": signal.get("momentum_pct"),
+                            "price": price, "size": size, "dry_run": True,
+                        })
+                        self._logger.info(
+                            f"[DRY RUN] Phantom SKIPPED by V2: {signal.get('slug', 'unknown')} "
+                            f"reason={_fr.fill_model_reason} price=${price:.4f} "
+                            f"bid/ask=${_fr.book_spread_at_decision:.4f} spread"
+                        )
+                        # Remove the phantom position we added speculatively above —
+                        # V2 said the resting order didn't fill, so no position exists.
+                        self._store.remove(phantom_token)
+                        return
+                    _phantom_fill_model = _fr.fill_model
+                    _phantom_fill_reason = _fr.fill_model_reason
+                    _phantom_book_spread = _fr.book_spread_at_decision
+                    _phantom_fill_price = _fr.fill_price
+                    _phantom_fill_qty = _fr.fill_qty
+                else:
+                    # Taker / FAK: instant fill at signal price. V2 doesn't model
+                    # takers — the fill model is for maker queue-position decay.
+                    _phantom_fill_model = "v1_taker"
+                    _phantom_fill_reason = "dry_run_phantom_taker"
+                    _phantom_book_spread = signal.get("spread") or 0.0
+                    _phantom_fill_price = price
+                    _phantom_fill_qty = size
+
                 _trace_emit(phantom_id, _ET.SIGNAL_FIRED, {
                     "source": signal.get("source"), "signal_id": signal_id,
                     "momentum_pct": signal.get("momentum_pct"),
-                    "price": price, "size": size, "dry_run": True,
+                    "price": _phantom_fill_price, "size": _phantom_fill_qty, "dry_run": True,
                 })
                 await self._tracker.record_entry(
                     trade_id=phantom_id,
                     token_id=phantom_token,
                     slug=signal.get("slug", ""),
-                    entry_price=price,
-                    entry_size=size,
+                    entry_price=_phantom_fill_price,
+                    entry_size=_phantom_fill_qty,
                     entry_tx_hash=phantom_id,
                     outcome=signal.get("outcome", ""),
                     market_title=signal.get("market_title", ""),
@@ -1406,9 +1454,17 @@ class SignalBot:
                     filter_score=signal_score,
                     metadata=phantom_pos.metadata,
                     fg_at_entry=signal.get("fear_greed"),
+                    is_dry_run=True,
+                    fill_model=_phantom_fill_model,
+                    fill_model_reason=_phantom_fill_reason,
+                    signal_id=signal_id if signal_id > 0 else None,
+                    fill_latency_ms=0,
+                    book_spread_at_entry=_phantom_book_spread,
+                    entry_mode=_effective_entry_mode,
                 )
                 _trace_emit(phantom_id, _ET.ORDER_FILLED, {
-                    "fill_price": price, "fill_size": size, "fill_model": "dry_run_phantom",
+                    "fill_price": _phantom_fill_price, "fill_size": _phantom_fill_qty,
+                    "fill_model": _phantom_fill_model, "reason": _phantom_fill_reason,
                 })
 
                 # Update signal logger
@@ -1495,7 +1551,11 @@ class SignalBot:
                 "fill_time_ms": getattr(exec_result, 'fill_time_ms', None),
                 "entry_mode": self._config.entry_mode,
             })
-            # 7. Record to performance DB (include metadata for direction analysis)
+            # 7. Record to performance DB (include metadata for direction analysis).
+            # v4 observability: every live fill gets ``fill_model="live"`` so the
+            # attribution views can separate real fills from V1/V2 dry-run labels.
+            # fill_latency_ms, entry_mode, signal_id, book_spread_at_entry populated
+            # from context so one trade_id reconstructs the decision end-to-end.
             await self._tracker.record_entry(
                 trade_id=exec_result.order_id,
                 token_id=signal.get("token_id", ""),
@@ -1509,6 +1569,11 @@ class SignalBot:
                 filter_score=signal_score,
                 metadata=signal.get("metadata"),
                 fg_at_entry=signal.get("fear_greed"),
+                fill_model="live",
+                signal_id=signal_id if signal_id > 0 else None,
+                fill_latency_ms=getattr(exec_result, "fill_time_ms", None),
+                book_spread_at_entry=signal.get("spread"),
+                entry_mode=self._config.entry_mode,
             )
 
             # 7b. Adverse selection handled by position_executor._run_adverse_check (epoch-aware)
