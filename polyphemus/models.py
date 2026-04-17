@@ -185,7 +185,7 @@ REDEEM_INTERVAL = 600
 DAILY_RESTART_HOURS = 20
 
 # Order Sizing
-MIN_SHARES_FOR_SELL = 5.0
+MIN_SHARES_FOR_SELL = 1.0  # was 5.0→4.5→1.0 — CLOB deducts fees in shares (~4.4%), need floor low enough for any valid fill
 
 # Binance Momentum Feed
 BINANCE_WS_URL = os.environ.get("BINANCE_WS_URL", "wss://stream.binance.com:9443/stream")
