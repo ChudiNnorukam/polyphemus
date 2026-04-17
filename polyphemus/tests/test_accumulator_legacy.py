@@ -33,6 +33,7 @@ import sys
 import time
 import types
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -97,10 +98,12 @@ MOCK_EMPTY_BOOK = {"bids": [], "asks": []}
 
 
 @pytest.fixture
-def config():
-    """Minimal config for accumulator tests."""
+def config(tmp_path):
+    """Minimal config for accumulator tests. `tmp_path` isolates the
+    per-instance data dir so the circuit breaker state from other test files
+    (or prior runs) cannot bleed in."""
     cfg = MagicMock(spec=Settings)
-    cfg.lagbot_data_dir = "/tmp/test_accumulator_legacy"
+    cfg.lagbot_data_dir = str(tmp_path / "instance-data")
     cfg.accum_dry_run = True
     cfg.accum_assets = "BTC"
     cfg.accum_window_types = "5m"
@@ -161,13 +164,28 @@ def mock_store():
 
 
 @pytest.fixture
-def engine(config, mock_clob, mock_balance, mock_store):
+def engine(config, mock_clob, mock_balance, mock_store, tmp_path):
     eng = AccumulatorEngine(
         clob=mock_clob,
         balance=mock_balance,
         store=mock_store,
         config=config,
     )
+    # __init__ already loaded (and possibly migrated) circuit breaker state
+    # from the repo's legacy data dir. Pin the legacy path to tmp_path, nuke
+    # the migrated file, and zero the in-memory counters so prior real state
+    # (e.g. $348 pnl, 26 hedged) cannot silently bleed into tests.
+    eng._legacy_cb_state_path = str(tmp_path / "legacy-data" / "circuit_breaker.json")
+    cb_path = Path(eng._cb_state_path)
+    if cb_path.exists():
+        cb_path.unlink()
+    eng._accum_total_pnl = 0.0
+    eng._accum_hedged_count = 0
+    eng._accum_orphaned_count = 0
+    eng._accum_unwound_count = 0
+    eng._consecutive_unwinds = 0
+    eng._circuit_tripped = False
+    eng._settlements = []
     return eng
 
 
@@ -246,10 +264,10 @@ class TestStateTransitions:
 
 
 class TestScanForWindow:
-    @pytest.mark.xfail(reason="Strategy drift: accumulator now re-fetches book mid-scan (book_fetch_error path). Test mocks only _discover_markets; need to also mock new fetch path. See polyphemus/accumulator.py:748.", strict=False)
     @pytest.mark.asyncio
     async def test_creates_position_on_opportunity(self, engine, mock_clob):
-        """When market discovered with good bid pair cost, create position in SCANNING."""
+        """When market discovered with good bid pair cost, create position and
+        transition into ACCUMULATING (orders placed)."""
         # expires_at = now + 260s means market opened 40s ago (300s window) — passes 30s guard
         engine._discover_markets = AsyncMock(return_value=[{
             "slug": "btc-updown-5m-123",
@@ -258,13 +276,22 @@ class TestScanForWindow:
             "window_secs": 300,
             "expires_at": datetime.now(tz=timezone.utc) + timedelta(seconds=260),
         }])
-        # bid pair cost: 0.48 + 0.47 = 0.95 → enters
-        mock_clob.get_order_book = AsyncMock(side_effect=[MOCK_UP_BOOK, MOCK_DOWN_BOOK])
+        # Scan fetches books once for cost check, then _evaluate_and_enter
+        # re-fetches against fresh data. Return the same book for any token.
+        def _book_for(token_id):
+            return MOCK_UP_BOOK if token_id == "up_token" else MOCK_DOWN_BOOK
+        mock_clob.get_order_book = AsyncMock(side_effect=_book_for)
+        # _evaluate_and_enter places maker orders; stub the maker placement
+        # so it returns a fake order id rather than hitting None.
+        engine._place_maker_order = AsyncMock(side_effect=["up_oid", "down_oid"])
 
         await engine._scan_for_window()
 
         assert "btc-updown-5m-123" in engine._positions
-        assert engine._positions["btc-updown-5m-123"].state == AccumulatorState.SCANNING
+        pos = engine._positions["btc-updown-5m-123"]
+        assert pos.state == AccumulatorState.ACCUMULATING
+        assert pos.up_order_id == "up_oid"
+        assert pos.down_order_id == "down_oid"
 
     @pytest.mark.asyncio
     async def test_stays_empty_no_markets(self, engine):
@@ -338,7 +365,6 @@ class TestScanForWindow:
 
 
 class TestEvaluateAndEnter:
-    @pytest.mark.xfail(reason="Strategy drift: _evaluate_and_enter post-Phase-1 no longer calls place_order synchronously on the test's mock path. Needs fixture update for new simultaneous-order flow.", strict=False)
     @pytest.mark.asyncio
     async def test_places_both_orders_simultaneously(self, engine, mock_clob, mock_balance):
         """P1 fix: Both UP and DOWN orders placed simultaneously on first call (eliminates leg risk)."""
@@ -347,7 +373,12 @@ class TestEvaluateAndEnter:
         # UP best_bid=0.46, DOWN best_bid=0.48, pair=0.94 < 0.975
         up_book = {"bids": [{"price": 0.46, "size": 200}], "asks": [{"price": 0.54, "size": 200}]}
         down_book = {"bids": [{"price": 0.48, "size": 200}], "asks": [{"price": 0.52, "size": 200}]}
-        mock_clob.get_order_book = AsyncMock(side_effect=[up_book, down_book])
+        # _evaluate_and_enter fetches once per side; _accumulate_both_sides'
+        # dual-resting branch re-fetches before checking order status. Dispatch
+        # by token_id so the same books apply to any call count.
+        def _book_for(token_id):
+            return up_book if token_id == "up_token" else down_book
+        mock_clob.get_order_book = AsyncMock(side_effect=_book_for)
 
         # Call 1: places BOTH orders simultaneously → ACCUMULATING (orders resting, not yet filled)
         await engine._evaluate_and_enter(pos)
@@ -357,25 +388,31 @@ class TestEvaluateAndEnter:
         # _set_side_price called for UP then DOWN; DOWN price is set last → pending_order_price=down_bid
         assert pos.pending_order_price == pytest.approx(0.48, abs=0.001)
 
-        # Call 2: _accumulate_both_sides detects dry_run instant fills, records first_fill_time
+        # Call 2: _accumulate_both_sides detects dry_run instant fills on both
+        # legs inside the dual-resting branch (legacy fill path is deterministic).
         await engine._accumulate_both_sides(pos)
         assert pos.up_qty > 0
         assert pos.down_qty > 0
-        # Call 3: both legs already filled → transitions to HEDGED
+        # Call 3: both legs already filled → HEDGED branch transitions state.
         await engine._accumulate_both_sides(pos)
         assert pos.state == AccumulatorState.HEDGED
         assert pos.up_qty > 0
         assert pos.down_qty > 0
 
-    @pytest.mark.xfail(reason="Strategy drift: _evaluate_and_enter no longer synchronously removes positions at min_secs_remaining boundary. Removal now happens in a separate cleanup path.", strict=False)
     @pytest.mark.asyncio
-    async def test_removes_on_time_expiry(self, engine):
-        """When time < min_secs_remaining, remove position."""
+    async def test_abandons_on_time_expiry(self, engine):
+        """When time < min_secs_remaining, refuse entry and mark the slug
+        abandoned so the scanner won't retry it. The production flow only
+        reaches _evaluate_and_enter via _start_candidate_position, which
+        only commits the position into _positions on entered=True — so the
+        real invariant is 'entered=False and slug is now abandoned', not
+        'already-tracked position is removed'."""
         pos = _make_pos(mins_left=1)  # Only 60s left < 180s min
-        engine._positions[pos.slug] = pos
 
-        await engine._evaluate_and_enter(pos)
+        entered = await engine._evaluate_and_enter(pos)
 
+        assert entered is False
+        assert pos.slug in engine._abandoned_slugs
         assert pos.slug not in engine._positions
 
     @pytest.mark.asyncio
@@ -415,7 +452,6 @@ class TestEvaluateAndEnter:
 
 
 class TestAccumulateBothSides:
-    @pytest.mark.xfail(reason="Potential real bug in accumulator.py:842 (up_book UnboundLocalError on code path where DOWN already held). Test may be revealing a live bug, not drift. Needs audit — do not fix the test until accumulator.py is investigated.", strict=False)
     @pytest.mark.asyncio
     async def test_buys_missing_down_side(self, engine, mock_clob):
         """When only UP held, place DOWN order then fill on next cycle (dry_run)."""
@@ -437,7 +473,6 @@ class TestAccumulateBothSides:
         assert pos.down_qty > 0
         assert pos.state == AccumulatorState.HEDGED
 
-    @pytest.mark.xfail(reason="Potential real bug in accumulator.py:844 (down_book UnboundLocalError on symmetric code path). Same story as test_buys_missing_down_side — audit accumulator.py before fixing test.", strict=False)
     @pytest.mark.asyncio
     async def test_buys_missing_up_side(self, engine, mock_clob):
         """When only DOWN held, place UP order then fill on next cycle (dry_run)."""
@@ -1048,7 +1083,6 @@ class TestUnwindRegressions:
             "update_balance_allowance() found in _unwind_orphan — Bug #46 regression"
         )
 
-    @pytest.mark.xfail(reason="Potential Bug #47 regression — assertion 'Circuit breaker incremented for expired market skip' fires. Either real regression or test fixture drift; MUST audit before fixing.", strict=False)
     @pytest.mark.asyncio
     async def test_bug47_unwind_skipped_when_market_expired(self, engine, mock_clob):
         """Bug #47: when market already expired, _unwind_orphan skips FOK SELL entirely."""
@@ -1126,17 +1160,20 @@ class TestUnwindRegressions:
             "Circuit breaker incremented for infra unwind — should not count infra failures as strategy losses"
         )
 
-    @pytest.mark.xfail(reason="Strategy drift: place_fok_order mock never called on the live-market path — _unwind_orphan flow has changed. Needs audit to determine whether unwind logic is still correct.", strict=False)
     @pytest.mark.asyncio
     async def test_unwind_proceeds_when_market_live(self, engine, mock_clob):
-        """Sanity: when market has time remaining, FOK SELL path is entered."""
+        """Sanity: when market has time remaining, FAK SELL path is entered
+        (the sellback ladder uses FAK, not FOK — see accumulator.py:1257)."""
         mock_clob.get_order_book = AsyncMock(return_value={
             "bids": [{"price": 0.45, "size": 200}],
             "asks": [],
         })
         mock_clob.get_share_balance = AsyncMock(return_value=100.0)
+        mock_clob.get_order_details = AsyncMock(
+            return_value={"average_price": 0.45, "size_matched": 100.0}
+        )
         from polyphemus.models import ExecutionResult
-        mock_clob.place_fok_order = AsyncMock(
+        mock_clob.place_fak_order = AsyncMock(
             return_value=ExecutionResult(success=True, order_id="SELL001")
         )
         engine._dry_run = False
@@ -1153,4 +1190,4 @@ class TestUnwindRegressions:
 
         await engine._unwind_orphan(pos, "UP")
 
-        mock_clob.place_fok_order.assert_called_once()
+        mock_clob.place_fak_order.assert_called_once()

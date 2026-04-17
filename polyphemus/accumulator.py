@@ -745,6 +745,11 @@ class AccumulatorEngine:
         # --- Dual-resting phase: BOTH orders placed, neither filled yet ---
         # _get_resting_order() only returns one side; we need to check both.
         if pos.up_order_id and pos.down_order_id and pos.up_qty == 0 and pos.down_qty == 0:
+            try:
+                up_book = await self._clob.get_order_book(pos.up_token_id)
+                down_book = await self._clob.get_order_book(pos.down_token_id)
+            except Exception:
+                return
             up_bid_v, up_ask_v = self._top_of_book(up_book)
             down_bid_v, down_ask_v = self._top_of_book(down_book)
             up_result = await self._check_and_handle_order(
@@ -838,10 +843,12 @@ class AccumulatorEngine:
         # Check for existing resting order
         side, order_id, order_time = self._get_resting_order(pos)
         if order_id:
-            if side == "UP":
-                rest_bid, rest_ask = self._top_of_book(up_book)
-            else:
-                rest_bid, rest_ask = self._top_of_book(down_book)
+            try:
+                rest_token = pos.up_token_id if side == "UP" else pos.down_token_id
+                rest_book = await self._clob.get_order_book(rest_token)
+            except Exception:
+                return
+            rest_bid, rest_ask = self._top_of_book(rest_book)
             result = await self._check_and_handle_order(
                 pos, side, order_id, order_time,
                 best_bid=rest_bid, best_ask=rest_ask,
@@ -1178,7 +1185,8 @@ class AccumulatorEngine:
                 f"(includes entry fees ${entry_fee_paid:.2f})"
             )
             self._accum_total_pnl -= forced_loss
-            self._consecutive_unwinds += 1
+            # Infra failure, not strategy: market timing prevented the exit.
+            # Matches the forced_hold_clob_unindexed / infra-unwind convention.
             self._accum_orphaned_count += 1
             self._save_circuit_breaker_state()
             self._emit_cycle(pos, -forced_loss, "forced_hold_expired")
