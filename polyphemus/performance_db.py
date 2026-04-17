@@ -10,6 +10,10 @@ import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional
 from .config import setup_logger
+# Phase 3: trade_tracer emissions for lifecycle events recorded at the DB layer.
+# The tracer is env-gated (POLYPHEMUS_TRACER_ENABLED) and fail-soft, so
+# importing here is safe even when the flag is off — emits become no-ops.
+from .trade_tracer import emit as _trace_emit, EventType as _ET
 
 
 logger = setup_logger('polyphemus.performance_db')
@@ -633,6 +637,28 @@ class PerformanceDB:
                 self.logger.info(
                     f'Force-closed trade by token_id: {token_id[:16]}... | reason={exit_reason}'
                 )
+                # Phase 3: emit FORCE_CLOSED (orphan sweep / market resolution path).
+                # Look up trade_id inside the same connection so the event
+                # correlates with the trades row debug_trade will render.
+                # exit_reason semantic is preserved in payload — a resolver
+                # calls this with reason="market_resolved" while orphan-sweep
+                # uses reason="orphan" etc.
+                try:
+                    cur = conn.execute(
+                        "SELECT trade_id FROM trades WHERE token_id=? "
+                        "ORDER BY entry_time DESC LIMIT 1",
+                        (token_id,),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        _trace_emit(row[0], _ET.FORCE_CLOSED, {
+                            "token_id": token_id,
+                            "exit_reason": exit_reason,
+                            "exit_price": exit_price,
+                        })
+                except Exception:
+                    # Lookup failure must not block the close path.
+                    pass
             return updated
         finally:
             conn.close()
@@ -901,6 +927,18 @@ class PerformanceDB:
             conn.commit()
         finally:
             conn.close()
+
+        # Phase 3: emit the adverse-selection measurement so the timeline
+        # shows when we checked for drift and what we found. Payload carries
+        # the signed bps so debug_trade can surface adverse trades directly.
+        _trace_emit(trade_id, _ET.ADVERSE_CHECK_RUN, {
+            "binance_at_fill": binance_at_fill,
+            "binance_at_check": binance_at_check,
+            "direction": direction,
+            "adverse_fill_bps": adverse_fill_bps,
+            "adverse_fill": adverse,
+            "check_window_secs": check_window_secs,
+        })
 
     def get_source_stats(self, source: str) -> dict:
         """Return stats for completed trades matching a source in metadata JSON.

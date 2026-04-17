@@ -1367,6 +1367,15 @@ class SignalBot:
                 phantom_token = signal.get("token_id", phantom_id)
                 size = projected / price if price > 0 else 0
 
+                # Phase 3: emit sizing decision so debug_trade shows the
+                # pre-execution math (bet_size, price, shares) in the timeline.
+                # Fires BEFORE fill eval so the event exists even on V2-skip.
+                _trace_emit(phantom_id, _ET.SIZING_COMPUTED, {
+                    "source": signal.get("source"), "signal_id": signal_id,
+                    "projected_usd": projected, "price": price, "size": size,
+                    "asset": asset, "dry_run": True,
+                })
+
                 # Create phantom position in store — exit manager will track it
                 from .models import Position
                 phantom_pos = Position(
@@ -1425,6 +1434,7 @@ class SignalBot:
                             "source": signal.get("source"), "signal_id": signal_id,
                             "momentum_pct": signal.get("momentum_pct"),
                             "price": price, "size": size, "dry_run": True,
+                            "skipped": True, "skip_reason": _fr.fill_model_reason,
                         })
                         self._logger.info(
                             f"[DRY RUN] Phantom SKIPPED by V2: {signal.get('slug', 'unknown')} "
@@ -1453,6 +1463,16 @@ class SignalBot:
                     "source": signal.get("source"), "signal_id": signal_id,
                     "momentum_pct": signal.get("momentum_pct"),
                     "price": _phantom_fill_price, "size": _phantom_fill_qty, "dry_run": True,
+                })
+                # Phase 3: symmetric ORDER_PLACED for phantom path. No real
+                # order ever hits the book, but the event keeps the timeline
+                # parallel to the live path (signal → place → fill).
+                _trace_emit(phantom_id, _ET.ORDER_PLACED, {
+                    "price": _phantom_fill_price, "size": _phantom_fill_qty,
+                    "entry_mode": _effective_entry_mode,
+                    "fill_model": _phantom_fill_model,
+                    "book_spread": _phantom_book_spread,
+                    "dry_run": True,
                 })
                 await self._tracker.record_entry(
                     trade_id=phantom_id,
@@ -1530,11 +1550,11 @@ class SignalBot:
                     return
 
             self._mark_signal_stage(signal_id, "execution", "attempted", self._config.entry_mode)
-            _trace_emit(signal.get("token_id", ""), _ET.ORDER_PLACED, {
-                "price": signal.get("price"), "size_usd_available": available,
-                "entry_mode": self._config.entry_mode,
-                "signal_id": signal_id,
-            })
+            # Phase 3: stash placement timestamp so we can emit ORDER_PLACED
+            # AFTER the order_id exists (keeps trade_id consistent with
+            # trades.trade_id = exec_result.order_id). The timeline still
+            # shows true placement latency in the payload.
+            _order_place_ts = time.time()
             exec_result = await self._executor.execute_buy(signal, available)
 
             if not exec_result.success:
@@ -1558,6 +1578,16 @@ class SignalBot:
                 f"@ ${exec_result.fill_price:.4f} x {exec_result.fill_size:.1f}"
             )
 
+            # Phase 3: emit ORDER_PLACED + ORDER_FILLED with the same trade_id
+            # (= exec_result.order_id = trades.trade_id). The placed_ts field
+            # lets timeline viewers compute latency from this event alone.
+            _trace_emit(exec_result.order_id, _ET.ORDER_PLACED, {
+                "price": signal.get("price"),
+                "size_usd_available": available,
+                "entry_mode": self._config.entry_mode,
+                "signal_id": signal_id,
+                "placed_ts": _order_place_ts,
+            })
             _trace_emit(exec_result.order_id, _ET.ORDER_FILLED, {
                 "fill_price": exec_result.fill_price,
                 "fill_size": exec_result.fill_size,
