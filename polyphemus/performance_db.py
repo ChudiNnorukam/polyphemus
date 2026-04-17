@@ -179,6 +179,7 @@ class PerformanceDB:
                     self.logger.error(f'is_dry_run migration failed: {e}')
 
             self._migrate_v4_trade_observability(cursor)
+            self._init_trade_events(cursor)
 
             conn.commit()
             self.logger.info('Database schema initialized')
@@ -248,6 +249,36 @@ class PerformanceDB:
             'CREATE INDEX IF NOT EXISTS idx_trades_is_dry_run_strategy ON trades(is_dry_run, strategy)',
         ):
             cursor.execute(idx_sql)
+
+    def _init_trade_events(self, cursor: sqlite3.Cursor) -> None:
+        """Phase 3 — append-only lifecycle event log per trade_id.
+
+        Every event is rehydrated by tools/debug_trade.py to replay a
+        trade end-to-end. The table is intentionally narrow (trade_id,
+        ts, event_type, payload_json) so emission stays cheap at the
+        trade path; interpretation lives in the reader.
+
+        Not foreign-keyed to trades(trade_id): the tracer must be able
+        to emit ``signal_fired`` before the trade row is inserted and
+        ``error`` events for trade_ids that never made it to insert.
+        """
+        cursor.execute(
+            '''CREATE TABLE IF NOT EXISTS trade_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT NOT NULL,
+                ts REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                payload TEXT
+            )'''
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_trade_events_trade_id_ts '
+            'ON trade_events(trade_id, ts)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_trade_events_type_ts '
+            'ON trade_events(event_type, ts)'
+        )
 
     def _get_existing_columns(self) -> set:
         """Return set of column names in trades table."""

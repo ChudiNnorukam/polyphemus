@@ -36,6 +36,7 @@ from .arb_engine import ArbEngine
 from .accumulator import AccumulatorEngine
 from .signal_logger import SignalLogger
 from .evidence_verdict import BTC5MEvidenceEngine
+from .trade_tracer import emit as _trace_emit, EventType as _ET
 from .signal_scorer import SignalScorer
 from .fill_optimizer import FillOptimizer
 from .regime_detector import RegimeDetector
@@ -196,7 +197,9 @@ class SignalBot:
             _perf_conn.close()
             if _recent:
                 # Reverse to oldest-first order
-                self._guard.seed_outcomes([row[0] > 0 for row in reversed(_recent)])
+                outcomes_oldest_first = [row[0] > 0 for row in reversed(_recent)]
+                self._guard.seed_outcomes(outcomes_oldest_first)
+                self._guard.seed_markov_outcomes(outcomes_oldest_first)
                 self._logger.info(
                     f"Outcome gate seeded with {len(_recent)} recent trades"
                 )
@@ -1070,6 +1073,10 @@ class SignalBot:
                 )
 
             result = self._guard.check(signal)
+            # Inject Markov state into signal for downstream Kelly sizing
+            if self._config.markov_kelly_enabled and result.context:
+                signal['markov_consec_w'] = result.context.get('markov_consec_w', 0)
+                signal['markov_consec_l'] = result.context.get('markov_consec_l', 0)
             signal_id = -1
             if self._signal_logger:
                 signal_id, ensemble_verdict = self._log_signal_observation(
@@ -1348,7 +1355,7 @@ class SignalBot:
             if self._dry_run:
                 price = signal.get('price', 0)
                 asset = signal.get('asset', '')
-                projected = self._executor._calculate_size(price, available, asset, spread=signal.get("spread"))
+                projected = self._executor._calculate_size(price, available, asset, spread=signal.get("spread"), signal=signal)
                 if price <= 0 or projected <= 0:
                     return
 
@@ -1379,6 +1386,11 @@ class SignalBot:
                 self._store.add(phantom_pos)
 
                 # Record to performance DB (same as live)
+                _trace_emit(phantom_id, _ET.SIGNAL_FIRED, {
+                    "source": signal.get("source"), "signal_id": signal_id,
+                    "momentum_pct": signal.get("momentum_pct"),
+                    "price": price, "size": size, "dry_run": True,
+                })
                 await self._tracker.record_entry(
                     trade_id=phantom_id,
                     token_id=phantom_token,
@@ -1393,6 +1405,9 @@ class SignalBot:
                     metadata=phantom_pos.metadata,
                     fg_at_entry=signal.get("fear_greed"),
                 )
+                _trace_emit(phantom_id, _ET.ORDER_FILLED, {
+                    "fill_price": price, "fill_size": size, "fill_model": "dry_run_phantom",
+                })
 
                 # Update signal logger
                 if self._signal_logger and signal_id > 0:
@@ -1444,6 +1459,11 @@ class SignalBot:
                     return
 
             self._mark_signal_stage(signal_id, "execution", "attempted", self._config.entry_mode)
+            _trace_emit(signal.get("token_id", ""), _ET.ORDER_PLACED, {
+                "price": signal.get("price"), "size_usd_available": available,
+                "entry_mode": self._config.entry_mode,
+                "signal_id": signal_id,
+            })
             exec_result = await self._executor.execute_buy(signal, available)
 
             if not exec_result.success:
@@ -1467,6 +1487,12 @@ class SignalBot:
                 f"@ ${exec_result.fill_price:.4f} x {exec_result.fill_size:.1f}"
             )
 
+            _trace_emit(exec_result.order_id, _ET.ORDER_FILLED, {
+                "fill_price": exec_result.fill_price,
+                "fill_size": exec_result.fill_size,
+                "fill_time_ms": getattr(exec_result, 'fill_time_ms', None),
+                "entry_mode": self._config.entry_mode,
+            })
             # 7. Record to performance DB (include metadata for direction analysis)
             await self._tracker.record_entry(
                 trade_id=exec_result.order_id,
@@ -1724,6 +1750,11 @@ class SignalBot:
             if self._dry_run and not is_pair_arb:
                 dry_exit_price = exit_signal.exit_price or pos.current_price or pos.entry_price
                 dry_pnl = (dry_exit_price - pos.entry_price) * pos.entry_size
+                _trace_emit(pos.entry_tx_hash, _ET.EXIT_DECISION, {
+                    "reason": exit_signal.reason,
+                    "exit_price": dry_exit_price,
+                    "pnl": dry_pnl, "dry_run": True,
+                })
                 self._logger.info(
                     f"[DRY RUN] Exit {pos.slug} "
                     f"@ ${dry_exit_price:.4f} pnl=${dry_pnl:+.4f} "
@@ -1736,6 +1767,7 @@ class SignalBot:
                     pass
                 try:
                     self._guard.record_outcome(dry_pnl > 0)
+                    self._guard.record_markov_outcome(dry_pnl > 0)
                 except Exception:
                     pass
                 # Record exit to performance DB (same as live)
@@ -1826,6 +1858,12 @@ class SignalBot:
                 f"Order: {exec_result.order_id} "
                 f"@ ${exec_result.fill_price:.4f} x {exec_result.fill_size:.1f}"
             )
+            _trace_emit(pos.entry_tx_hash, _ET.EXIT_FILLED, {
+                "exit_price": exec_result.fill_price,
+                "exit_size": exec_result.fill_size,
+                "order_id": exec_result.order_id,
+                "reason": exit_signal.reason,
+            })
 
             # 4. Record exit to performance DB (non-fatal — cleanup MUST run)
             try:
@@ -1886,6 +1924,7 @@ class SignalBot:
                 )
             try:
                 self._guard.record_outcome(exit_pnl > 0)
+                self._guard.record_markov_outcome(exit_pnl > 0)
             except Exception:
                 pass
 
