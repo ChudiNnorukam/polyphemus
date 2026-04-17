@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Session startup state snapshot. Run at the start of every trading session.
 
-Queries live DBs and .env directly - never trusts stale MEMORY.md values.
+Queries live DBs, .env, and systemd drop-in overrides - never trusts stale
+MEMORY.md values. Config precedence: drop-in env > Doppler > .env file.
 
 Usage:
     python3 /opt/lagbot/lagbot/tools/session_state.py
@@ -73,6 +74,41 @@ def read_env(env_path):
                 k, _, v = line.partition("=")
                 config[k.strip()] = v.strip().strip('"').strip("'")
     return config
+
+
+def read_dropin_env(service_name):
+    """Parse env KEY=VALUE overrides from systemd drop-in ExecStart line.
+
+    Drop-in format:
+      ExecStart=/usr/bin/doppler run ... -- env KEY=VAL KEY=VAL ... /opt/.../python -m lagbot.main
+
+    These override both .env and Doppler values at runtime.
+    """
+    import re
+    conf_path = f"/etc/systemd/system/{service_name}.service.d/dry_run.conf"
+    if not os.path.exists(conf_path):
+        return {}
+    try:
+        with open(conf_path) as f:
+            text = f.read()
+    except Exception:
+        return {}
+
+    # Find the ExecStart line that contains "env "
+    overrides = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("ExecStart=") or " env " not in line:
+            continue
+        # Extract the segment between "-- env " and the python command
+        m = re.search(r'-- env (.+?)/opt/', line)
+        if not m:
+            continue
+        for pair in m.group(1).strip().split():
+            if "=" in pair:
+                k, _, v = pair.partition("=")
+                overrides[k] = v
+    return overrides
 
 
 def service_status(service_name):
@@ -159,6 +195,8 @@ def run(days=7):
     for name, inst in INSTANCES.items():
         print(f"\n{'─'*30} {name.upper()} {'─'*30}")
         config = read_env(inst["env"])
+        dropin = read_dropin_env(inst["service"])
+        config.update(dropin)  # drop-in overrides .env
         dashboard_base = get_dashboard_base(config)
         accum = fetch_json(f"{dashboard_base}/api/accumulator")
         status_api = fetch_json(f"{dashboard_base}/api/status")
@@ -310,7 +348,8 @@ def run(days=7):
             print(f"  Config:")
             for k in CONFIG_KEYS:
                 v = config.get(k, "NOT SET")
-                print(f"    {k}={v}")
+                suffix = " [override]" if k in dropin else ""
+                print(f"    {k}={v}{suffix}")
 
     # Gate
     print(f"\n{'=' * 70}")
