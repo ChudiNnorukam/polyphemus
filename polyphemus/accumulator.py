@@ -91,6 +91,8 @@ class AccumulatorEngine:
         self._orders_filled: int = 0
         self._orders_timed_out: int = 0
         self._best_bid_pair: float = 0.0
+        # Phase 1.4: lazy-init maker fill model for DRY_RUN_V2
+        self._maker_fill_model = None
 
         # Auto-redeemer (injected by signal_bot)
         self._redeemer = None
@@ -743,8 +745,11 @@ class AccumulatorEngine:
         # --- Dual-resting phase: BOTH orders placed, neither filled yet ---
         # _get_resting_order() only returns one side; we need to check both.
         if pos.up_order_id and pos.down_order_id and pos.up_qty == 0 and pos.down_qty == 0:
+            up_bid_v, up_ask_v = self._top_of_book(up_book)
+            down_bid_v, down_ask_v = self._top_of_book(down_book)
             up_result = await self._check_and_handle_order(
-                pos, "UP", pos.up_order_id, pos.up_order_time
+                pos, "UP", pos.up_order_id, pos.up_order_time,
+                best_bid=up_bid_v, best_ask=up_ask_v,
             )
             if up_result == "abandoned":
                 await self._cancel_resting_orders(pos)
@@ -754,7 +759,8 @@ class AccumulatorEngine:
             # Also check DOWN in same cycle (both can fill simultaneously)
             if pos.down_order_id:
                 down_result = await self._check_and_handle_order(
-                    pos, "DOWN", pos.down_order_id, pos.down_order_time
+                    pos, "DOWN", pos.down_order_id, pos.down_order_time,
+                    best_bid=down_bid_v, best_ask=down_ask_v,
                 )
                 if down_result == "abandoned":
                     await self._cancel_resting_orders(pos)
@@ -832,7 +838,14 @@ class AccumulatorEngine:
         # Check for existing resting order
         side, order_id, order_time = self._get_resting_order(pos)
         if order_id:
-            result = await self._check_and_handle_order(pos, side, order_id, order_time)
+            if side == "UP":
+                rest_bid, rest_ask = self._top_of_book(up_book)
+            else:
+                rest_bid, rest_ask = self._top_of_book(down_book)
+            result = await self._check_and_handle_order(
+                pos, side, order_id, order_time,
+                best_bid=rest_bid, best_ask=rest_ask,
+            )
             if result == "filled":
                 # Check if now fully hedged
                 if pos.up_qty > 0 and pos.down_qty > 0:
@@ -1778,6 +1791,19 @@ class AccumulatorEngine:
             )
             self._last_eval_log_ts = now
 
+    def _top_of_book(self, book: dict) -> tuple[float, float]:
+        """Return (best_bid, best_ask) from a CLOB order-book snapshot.
+
+        Empty sides return 0.0 — the maker fill model treats zero as invalid
+        (crossed_book) and reports no-fill. Keeps the dry-run path safe when
+        books momentarily disappear.
+        """
+        bids = book.get("bids", []) if book else []
+        asks = book.get("asks", []) if book else []
+        best_bid = float(bids[0]["price"]) if bids else 0.0
+        best_ask = float(asks[0]["price"]) if asks else 0.0
+        return best_bid, best_ask
+
     def _get_resting_order(self, pos: AccumulatorPosition):
         """Return (side, order_id, order_time) for any resting order."""
         if pos.up_order_id:
@@ -1815,14 +1841,52 @@ class AccumulatorEngine:
         pos.reprice_count = max(pos.up_reprice_count, pos.down_reprice_count)
 
     async def _check_and_handle_order(
-        self, pos: AccumulatorPosition, side: str, order_id: str, order_time: Optional[datetime]
+        self,
+        pos: AccumulatorPosition,
+        side: str,
+        order_id: str,
+        order_time: Optional[datetime],
+        *,
+        best_bid: float = 0.0,
+        best_ask: float = 0.0,
     ) -> str:
         """Check resting order status and handle appropriately.
 
         Returns: "filled", "waiting", "repriced", "abandoned", "error"
+
+        `best_bid` and `best_ask` are the top-of-book for the given `side`.
+        They're read by the Phase 1.4 probabilistic maker fill model under
+        POLYPHEMUS_DRY_RUN_V2. When the flag is off (default), they are
+        ignored and the legacy taker-optimistic "always fill" path runs.
         """
         price = self._side_price(pos, side)
         if self._dry_run:
+            from .dry_run_fill_model import dry_run_v2_enabled
+            if dry_run_v2_enabled() and best_bid > 0 and best_ask > 0:
+                elapsed = 0.0
+                if order_time:
+                    elapsed = (datetime.now(tz=timezone.utc) - order_time).total_seconds()
+                if self._maker_fill_model is None:
+                    from .dry_run_fill_model import MakerFillModel
+                    self._maker_fill_model = MakerFillModel()
+                decision = self._maker_fill_model.evaluate(
+                    our_price=price,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                    qty=pos.target_shares,
+                    elapsed_secs=elapsed,
+                )
+                if decision.filled:
+                    self._apply_fill(pos, side, decision.fill_price, decision.fill_qty, order_id)
+                    self._clear_order(pos, side)
+                    self._orders_filled += 1
+                    return "filled"
+                self._logger.debug(
+                    f"[DRY RUN V2] maker miss {pos.slug} {side} | "
+                    f"price=${price:.3f} bid=${best_bid:.3f} ask=${best_ask:.3f} "
+                    f"elapsed={elapsed:.1f}s reason={decision.reason}"
+                )
+                return "waiting"
             self._apply_fill(pos, side, price, pos.target_shares, order_id)
             self._clear_order(pos, side)
             self._orders_filled += 1
