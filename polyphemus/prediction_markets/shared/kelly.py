@@ -100,3 +100,48 @@ def fractional_kelly(
     """
     f = kelly_fraction(true_prob, market_price)
     return round(max(0.0, f * fraction), 4)
+
+
+def kelly_with_drawdown_feedback(
+    edge: float,
+    var: float,
+    current_dd: float,
+    dd_limit: float,
+) -> float:
+    """Continuous-approximation Kelly with a linear drawdown brake.
+
+    Raw Kelly fraction under the Gaussian-return approximation is edge/var.
+    As current_dd approaches dd_limit, the fraction scales linearly to 0,
+    so the bet size shrinks automatically the closer the book is to its
+    drawdown budget. At current_dd >= dd_limit the function returns 0 and
+    refuses further exposure; the caller should already be in a cool-off.
+
+    Args:
+        edge: expected per-trade return (dollars or fraction — caller's unit).
+            Must be > 0; negative or zero edge returns 0.0 (no bet).
+        var: return variance (same units as edge, squared). Must be > 0;
+            undefined variance returns 0.0.
+        current_dd: current drawdown magnitude (>= 0, same units as dd_limit).
+        dd_limit: drawdown ceiling (> 0). Reaching it halts new exposure.
+
+    Returns:
+        Kelly fraction scaled by the drawdown brake, clamped to >= 0 and
+        rounded to 4 decimals to match the rest of this module.
+
+    Rationale for linear (not quadratic) scaling:
+        Linear is the conservative default at the top of the DD budget —
+        it starts throttling immediately, whereas a squared brake would
+        stay near full Kelly for most of the range and snap off at the end.
+        For prediction-market bets with fat-tailed losses, earlier throttling
+        is the right side to err on.
+    """
+    if edge <= 0.0 or var <= 0.0:
+        return 0.0
+    if dd_limit <= 0.0:
+        return 0.0
+    if current_dd >= dd_limit:
+        return 0.0
+
+    raw = edge / var
+    dd_scale = 1.0 - (max(0.0, current_dd) / dd_limit)
+    return round(max(0.0, raw * dd_scale), 4)
