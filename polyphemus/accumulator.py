@@ -1149,6 +1149,8 @@ class AccumulatorEngine:
 
         if qty < 5:
             self._logger.warning(f"Sellback skip: {filled_side} qty={qty:.0f} below minimum")
+            sunk_loss = avg_price * qty + entry_fee_paid
+            self._emit_cycle(pos, -sunk_loss, "sellback_skipped_below_min")
             self._store.remove(token_id)
             self._drop_position(pos, "sellback_skipped_below_min")
             return
@@ -1166,6 +1168,7 @@ class AccumulatorEngine:
             self._consecutive_unwinds += 1
             self._accum_orphaned_count += 1
             self._save_circuit_breaker_state()
+            self._emit_cycle(pos, -forced_loss, "forced_hold_expired")
             self._drop_position(pos, "forced_hold_market_expired")
             self._record_db_trade(pos, -forced_loss, "forced_hold_expired")
             return
@@ -1215,6 +1218,7 @@ class AccumulatorEngine:
                 self._consecutive_unwinds += 1
                 self._accum_orphaned_count += 1
                 self._save_circuit_breaker_state()
+                self._emit_cycle(pos, -forced_loss, "forced_hold_clob_unindexed")
                 self._drop_position(pos, "forced_hold_clob_unindexed")
                 self._record_db_trade(pos, -forced_loss, "forced_hold_clob_unindexed")
                 return
@@ -1290,6 +1294,7 @@ class AccumulatorEngine:
             self._accum_total_pnl -= unwind_loss
             self._accum_unwound_count += 1
             self._save_circuit_breaker_state()
+            self._emit_cycle(pos, -unwind_loss, "sellback")
             self._record_db_trade(pos, -unwind_loss, "sellback")
         else:
             # All sell attempts failed — forced hold (CRITICAL, should be rare)
@@ -1301,6 +1306,7 @@ class AccumulatorEngine:
             )
             self._accum_total_pnl -= forced_hold_loss
             self._consecutive_unwinds += 1
+            self._emit_cycle(pos, -forced_hold_loss, "forced_hold_sell_failed")
             self._record_db_trade(pos, -forced_hold_loss, "forced_hold_sell_failed")
             self._accum_orphaned_count += 1
             self._save_circuit_breaker_state()
@@ -1417,25 +1423,9 @@ class AccumulatorEngine:
             self._save_circuit_breaker_state()
 
         # Record cycle to metrics DB for adaptive tuner
-        if self._metrics and pnl is not None:
-            from .accumulator_metrics import CycleRecord
-            entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 60
-            self._metrics.record_cycle(CycleRecord(
-                slug=pos.slug,
-                started_at=entry_ts,
-                ended_at=time.time(),
-                up_qty=pos.up_qty,
-                down_qty=pos.down_qty,
-                up_avg_price=pos.up_avg_price,
-                down_avg_price=pos.down_avg_price,
-                pair_cost=pos.pair_cost,
-                pnl=pnl,
-                exit_reason=pos.exit_reason or "unknown",
-                reprices_used=pos.reprice_count,
-                fill_time_secs=time.time() - entry_ts,
-                hedge_time_secs=time.time() - entry_ts if is_hedged else 0.0,
-                spread_at_entry=self._best_bid_pair,
-            ))
+        if pnl is not None:
+            self._emit_cycle(pos, pnl, pos.exit_reason or "unknown",
+                             hedge_time_if_hedged=is_hedged)
 
         # === AUTO-REDEMPTION: queue winning tokens for on-chain redemption ===
         if self._redeemer and pos.exit_reason == "hedged_settlement" and pos.condition_id:
@@ -1491,6 +1481,46 @@ class AccumulatorEngine:
             self._logger.info(f"Position removed: {pos.slug} | reason={reason}")
         self._positions.pop(pos.slug, None)
 
+    def _emit_cycle(
+        self,
+        pos: AccumulatorPosition,
+        pnl: float,
+        exit_reason: str,
+        *,
+        hedge_time_if_hedged: bool = False,
+    ) -> None:
+        """Write one CycleRecord to accum_metrics.db for adaptive tuner / MTC gate.
+
+        Called from every terminal path (hedged settlement, orphaned settlement,
+        sellback, forced-hold). Before this existed, sellback cycles were silently
+        dropped — the Apr 10 2026 bug class.
+        """
+        if not self._metrics or pnl is None:
+            return
+        from .accumulator_metrics import CycleRecord
+        entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 60
+        ended = time.time()
+        try:
+            self._metrics.record_cycle(CycleRecord(
+                slug=pos.slug,
+                started_at=entry_ts,
+                ended_at=ended,
+                up_qty=pos.up_qty,
+                down_qty=pos.down_qty,
+                up_avg_price=pos.up_avg_price,
+                down_avg_price=pos.down_avg_price,
+                pair_cost=pos.pair_cost,
+                pnl=pnl,
+                exit_reason=exit_reason,
+                reprices_used=pos.reprice_count,
+                fill_time_secs=max(0.0, ended - entry_ts),
+                hedge_time_secs=(ended - entry_ts) if hedge_time_if_hedged else 0.0,
+                spread_at_entry=self._best_bid_pair,
+                is_dry_run=bool(self._dry_run),
+            ))
+        except Exception as e:
+            self._logger.warning(f"emit_cycle failed for {pos.slug} ({exit_reason}): {e}")
+
     def _record_db_trade(self, pos: AccumulatorPosition, pnl: float, exit_reason: str):
         """Record a completed pair arb cycle (entry+exit) to performance.db."""
         if not self._perf_db or pnl is None:
@@ -1512,6 +1542,7 @@ class AccumulatorEngine:
                 outcome="PAIR" if pos.is_fully_hedged else "ORPHAN",
                 market_title=pos.slug,
                 strategy="pair_arb",
+                is_dry_run=bool(self._dry_run),
                 metadata={
                     "up_price": round(pos.up_avg_price, 4),
                     "down_price": round(pos.down_avg_price, 4),

@@ -185,6 +185,7 @@ class PerformanceDB:
         metadata: Optional[dict] = None,
         strategy: str = "signal_bot",
         fg_at_entry: float = None,
+        is_dry_run: bool = False,
     ) -> None:
         """
         Record a new trade entry.
@@ -201,6 +202,9 @@ class PerformanceDB:
             market_title: Human-readable market title.
             filter_score: Signal quality score from XGBoost model (0-100).
             fg_at_entry: Fear & Greed index value at time of entry (0-100).
+            is_dry_run: True when caller is running in DRY_RUN mode — required
+                for segregating dry vs live aggregates. Default False (fail-closed
+                towards live; caller must opt-in to dry-run flagging).
         """
         conn = self._get_conn()
         try:
@@ -210,17 +214,19 @@ class PerformanceDB:
                 INSERT INTO trades (
                     trade_id, token_id, slug, entry_time, entry_price, entry_size,
                     entry_tx_hash, outcome, market_title, is_resolved, is_redeemed,
-                    side, entry_amount, strategy, filter_score, metadata, fg_at_entry
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    side, entry_amount, strategy, filter_score, metadata, fg_at_entry,
+                    is_dry_run
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 trade_id, token_id, slug, entry_time, entry_price, entry_size,
                 entry_tx_hash, outcome, market_title, 0, 0,
                 'BUY', entry_price * entry_size, strategy, filter_score, metadata_json,
-                fg_at_entry
+                fg_at_entry, 1 if is_dry_run else 0,
             ))
             conn.commit()
             fg_str = f' fg={fg_at_entry}' if fg_at_entry is not None else ''
-            self.logger.info(f'Recorded entry: {trade_id} @ {entry_price:.4f} x {entry_size} score={filter_score}{fg_str}')
+            tag = ' [DRY]' if is_dry_run else ''
+            self.logger.info(f'Recorded entry{tag}: {trade_id} @ {entry_price:.4f} x {entry_size} score={filter_score}{fg_str}')
         finally:
             conn.close()
 
