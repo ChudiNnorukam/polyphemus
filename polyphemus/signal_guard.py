@@ -50,6 +50,13 @@ class SignalGuard:
         self._outcome_gate_blocked: bool = False
         self._outcome_gate_blocked_since: float = 0  # timestamp when gate was blocked
 
+        # Markov gate: sequential streak-based regime detection
+        self._markov_consecutive_wins: int = 0
+        self._markov_consecutive_losses: int = 0
+        self._markov_blocked: bool = False
+        self._markov_blocked_since: float = 0
+        self._markov_total_outcomes: int = 0
+
     def check(self, signal: dict) -> FilterResult:
         """Apply all filters and validators to a signal.
 
@@ -468,6 +475,34 @@ class SignalGuard:
                         reasons.append('outcome_gate_regime')
 
         # ====================================================================
+        # FILTER 8b: Markov Gate (sequential streak regime detection)
+        # Unlike outcome gate (rolling WR), this tracks consecutive W/L streaks.
+        # P(W|W)=0.59 vs P(W|L)=0.31 — a 28pp swing. Blocks after loss streaks,
+        # resumes after a win. Auto-unblocks after timeout to probe regime.
+        # ====================================================================
+        if self._config.markov_gate_enabled and not is_weather:
+            if self._markov_total_outcomes >= 1:
+                context['markov_consec_w'] = self._markov_consecutive_wins
+                context['markov_consec_l'] = self._markov_consecutive_losses
+                context['markov_blocked'] = self._markov_blocked
+                # Auto-unblock after timeout to prevent deadlock
+                if (self._markov_blocked
+                        and self._markov_blocked_since > 0
+                        and time.time() - self._markov_blocked_since > self._config.markov_gate_timeout_secs):
+                    self._markov_blocked = False
+                    self._markov_blocked_since = 0
+                    self._logger.info(
+                        f"Markov gate AUTO-UNBLOCKED after {self._config.markov_gate_timeout_secs}s | "
+                        f"consec_l={self._markov_consecutive_losses} | probing regime"
+                    )
+                    context['markov_blocked'] = False
+                if self._markov_blocked:
+                    if self._config.markov_gate_dry_run:
+                        context['markov_blocked_dry_run'] = True
+                    else:
+                        reasons.append('markov_cold_regime')
+
+        # ====================================================================
         # VALIDATOR 1: Market Expiry Check (configurable window)
         # Parse epoch from slug like "btc-updown-15m-1770598800"
         # Reject if market has < min_secs_remaining left
@@ -652,6 +687,65 @@ class SignalGuard:
                 self._outcome_gate_blocked_since = time.time()
                 self._logger.warning(
                     f"Outcome gate BLOCKED at startup | rolling_wr={rolling_wr:.1%} | n={n}"
+                )
+
+    def record_markov_outcome(self, is_win: bool) -> None:
+        """Record a trade outcome for Markov streak tracking.
+
+        Updates consecutive win/loss counters and blocked state.
+        """
+        self._markov_total_outcomes += 1
+        if is_win:
+            self._markov_consecutive_wins += 1
+            self._markov_consecutive_losses = 0
+            was_blocked = self._markov_blocked
+            if (self._markov_blocked
+                    and self._markov_consecutive_wins >= self._config.markov_gate_min_wins):
+                self._markov_blocked = False
+                self._markov_blocked_since = 0
+                self._logger.info(
+                    f"Markov gate UNBLOCKED | {self._markov_consecutive_wins} consecutive wins "
+                    f">= threshold={self._config.markov_gate_min_wins}"
+                )
+        else:
+            self._markov_consecutive_losses += 1
+            self._markov_consecutive_wins = 0
+            if (not self._markov_blocked
+                    and self._markov_consecutive_losses >= self._config.markov_gate_max_losses):
+                self._markov_blocked = True
+                self._markov_blocked_since = time.time()
+                self._logger.warning(
+                    f"Markov gate BLOCKED | {self._markov_consecutive_losses} consecutive losses "
+                    f">= threshold={self._config.markov_gate_max_losses}"
+                )
+
+    def seed_markov_outcomes(self, outcomes: list) -> None:
+        """Seed Markov gate from historical trade outcomes at startup.
+
+        Args:
+            outcomes: List of bools (True=win, False=loss), oldest first.
+        """
+        for o in outcomes:
+            self._markov_total_outcomes += 1
+            if o:
+                self._markov_consecutive_wins += 1
+                self._markov_consecutive_losses = 0
+            else:
+                self._markov_consecutive_losses += 1
+                self._markov_consecutive_wins = 0
+
+        if self._markov_total_outcomes > 0:
+            if self._markov_consecutive_losses >= self._config.markov_gate_max_losses:
+                self._markov_blocked = True
+                self._markov_blocked_since = time.time()
+                self._logger.warning(
+                    f"Markov gate BLOCKED at startup | "
+                    f"last {self._markov_consecutive_losses} trades were losses"
+                )
+            else:
+                self._logger.info(
+                    f"Markov gate seeded | consec_w={self._markov_consecutive_wins}, "
+                    f"consec_l={self._markov_consecutive_losses}, total={self._markov_total_outcomes}"
                 )
 
     def reset_metrics(self) -> None:

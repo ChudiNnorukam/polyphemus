@@ -980,16 +980,32 @@ class PositionExecutor:
             return max(0, size)
 
         # Layer 1: Base bet as percentage of available capital
-        hc_thresh = self._config.high_confidence_threshold
-        hc_pct = self._config.high_confidence_bet_pct
-        if hc_thresh > 0 and hc_pct > 0 and price >= hc_thresh:
-            effective_pct = hc_pct
-            self._logger.info(
-                f"Layer 1 (high-conf): price={price:.2f}>={hc_thresh:.2f}, "
-                f"using {hc_pct:.0%} instead of {self._config.base_bet_pct:.0%}"
-            )
-        else:
-            if self._config.enable_kelly_sizing:
+        # Priority: Markov-Kelly > high-confidence > DB-Kelly > base_bet_pct
+        markov_kelly_used = False
+        if (self._config.markov_kelly_enabled and signal
+                and 'markov_consec_w' in signal):
+            consec_w = signal.get('markov_consec_w', 0)
+            consec_l = signal.get('markov_consec_l', 0)
+            mk_f = self._compute_markov_kelly(consec_w, consec_l, price)
+            if mk_f is not None and mk_f > 0:
+                effective_pct = mk_f
+                markov_kelly_used = True
+                self._logger.info(
+                    f"Layer 1 (Markov-Kelly): consec_w={consec_w} "
+                    f"consec_l={consec_l} -> {effective_pct:.4f} "
+                    f"(vs base {self._config.base_bet_pct:.2f})"
+                )
+
+        if not markov_kelly_used:
+            hc_thresh = self._config.high_confidence_threshold
+            hc_pct = self._config.high_confidence_bet_pct
+            if hc_thresh > 0 and hc_pct > 0 and price >= hc_thresh:
+                effective_pct = hc_pct
+                self._logger.info(
+                    f"Layer 1 (high-conf): price={price:.2f}>={hc_thresh:.2f}, "
+                    f"using {hc_pct:.0%} instead of {self._config.base_bet_pct:.0%}"
+                )
+            elif self._config.enable_kelly_sizing:
                 kelly_f = self._compute_kelly(asset, price)
                 if kelly_f is not None:
                     effective_pct = min(
@@ -1392,6 +1408,83 @@ class PositionExecutor:
             f"kelly_fraction={kelly_f:.3f} (WR={wr:.2f}, n={n}, entry={price:.2f})"
         )
         return kelly_f
+
+    def _compute_markov_kelly(self, consec_w: int, consec_l: int, entry_price: float) -> Optional[float]:
+        """Markov-conditioned Kelly fraction for binary epoch markets.
+
+        Uses sequential win probability P(W|streak) from Markov analysis
+        instead of rolling WR from DB. Applies backtest-to-live haircut.
+
+        Kelly formula: f* = (p*b - q) / b
+        where b = (1 - entry - fee) / (entry + fee), q = 1 - p
+
+        Returns:
+            Kelly fraction (0.0 to markov_kelly_max_bet_pct), or None if no edge.
+        """
+        cfg = self._config
+        # Determine win probability from Markov state
+        if consec_w >= 3:
+            p_raw = cfg.markov_kelly_pw_www
+            state = "WWW+"
+        elif consec_w == 2:
+            p_raw = cfg.markov_kelly_pw_ww
+            state = "WW"
+        elif consec_w == 1 and consec_l == 0:
+            p_raw = cfg.markov_kelly_pw_w
+            state = "W"
+        elif consec_w == 1 and consec_l > 0:
+            # Recovery from loss streak: L...LW pattern (eighth-Kelly territory)
+            p_raw = cfg.markov_kelly_pw_lw
+            state = "LW"
+        else:
+            # After losses or no history — Markov gate should block these,
+            # but if somehow reached, return zero sizing
+            self._logger.debug(
+                f"Markov-Kelly: no edge (consec_w={consec_w}, consec_l={consec_l})"
+            )
+            return None
+
+        # Apply backtest-to-live haircut
+        p_live = p_raw * (1.0 - cfg.markov_kelly_haircut)
+
+        # Polymarket fee: ~2% of notional
+        fee = entry_price * (1.0 - entry_price) * 0.02
+
+        # Binary payoff ratio: profit if win / cost if lose
+        cost = entry_price + fee
+        profit = 1.0 - entry_price - fee
+        if cost <= 0 or profit <= 0:
+            return None
+        b = profit / cost
+
+        # Kelly fraction
+        q = 1.0 - p_live
+        f_star = (p_live * b - q) / b
+        if f_star <= 0:
+            self._logger.info(
+                f"Markov-Kelly: no edge after haircut | state={state} "
+                f"p_raw={p_raw:.3f} p_live={p_live:.3f} entry={entry_price:.2f} "
+                f"b={b:.2f} f*={f_star:.4f}"
+            )
+            return None
+
+        # Quarter-Kelly (conservative: survival > growth)
+        quarter_f = f_star * 0.25
+
+        # LW recovery state: eighth-Kelly (extra conservative after loss streak)
+        if state == "LW":
+            quarter_f = f_star * 0.125
+
+        # Hard cap
+        capped = min(quarter_f, cfg.markov_kelly_max_bet_pct)
+
+        self._logger.info(
+            f"Markov-Kelly: state={state} p_raw={p_raw:.3f} "
+            f"p_live={p_live:.3f} entry={entry_price:.2f} fee={fee:.4f} "
+            f"b={b:.2f} f*={f_star:.4f} quarter={quarter_f:.4f} "
+            f"capped={capped:.4f}"
+        )
+        return capped
 
     async def _async_confirm_fak(
         self, order_id: str, token_id: str, price: float, size: float, slug: str,

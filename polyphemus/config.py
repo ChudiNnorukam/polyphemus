@@ -302,6 +302,29 @@ class Settings(BaseSettings):
     outcome_gate_min_wr: float = 0.40     # block if rolling WR < 40%
     outcome_gate_resume_wr: float = 0.55  # resume when rolling WR recovers to 55%
 
+    # Markov gate: sequential state-space regime detection
+    # Research (Apr 9, n=1193): P(W|W)=0.59, P(L|L)=0.69, P(W|LL)=0.27, P(W|WW)=0.65.
+    # Losses cluster into streaks (max=82). After W + cheap entry (0.35-0.50) = only profitable cohort.
+    # Gate blocks entries after consecutive losses, resumes after a win.
+    markov_gate_enabled: bool = False
+    markov_gate_dry_run: bool = True       # log only, no actual blocking
+    markov_gate_max_losses: int = 1        # block after N consecutive losses (1 = block after any L)
+    markov_gate_min_wins: int = 1          # resume after N consecutive wins (1 = resume after any W)
+    markov_gate_timeout_secs: int = 1800   # auto-unblock after 30min to probe regime
+
+    # Markov-Kelly position sizing: condition bet size on Markov regime state
+    # Uses sequential win probability P(W|streak) instead of rolling WR from DB.
+    # Research (Apr 9, n=1193): After W + cheap entry = only profitable cohort.
+    # Kelly formula for binary: f* = (p*b - q) / b, b = (1 - entry - fee) / (entry + fee)
+    # Quarter-Kelly recommended for small bankrolls (survival > growth).
+    markov_kelly_enabled: bool = False
+    markov_kelly_haircut: float = 0.15       # backtest-to-live degradation (15% conservative)
+    markov_kelly_max_bet_pct: float = 0.10   # hard cap: never bet >10% of capital per trade
+    markov_kelly_pw_w: float = 0.588         # P(W|W) after 1 consecutive win
+    markov_kelly_pw_ww: float = 0.650        # P(W|WW) after 2 consecutive wins
+    markov_kelly_pw_www: float = 0.690       # P(W|WWW+) after 3+ consecutive wins
+    markov_kelly_pw_lw: float = 0.310        # P(W|LW) after loss->win recovery (eighth-Kelly)
+
     # Mid-price stop-loss for momentum positions (bypasses hold_to_resolution)
     mid_price_stop_enabled: bool = False
     mid_price_stop_pct: float = 0.08   # exit when mid-price drops 8% below entry
