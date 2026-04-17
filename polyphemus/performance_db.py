@@ -134,9 +134,14 @@ class PerformanceDB:
 
             # is_dry_run: added 2026-04-16 for dry/live segregation. Separate from columns_to_add
             # because it requires explicit backfill of existing rows (historical data is dry-run).
+            # NOT NULL DEFAULT 0 matches accumulator_metrics.cycles and rejects NULL writes
+            # (NULL rows would match neither is_dry_run=0 nor =1, silently dropping from get_stats —
+            # same bug class as Apr 10).
             if 'is_dry_run' not in pre_migration_cols:
                 try:
-                    cursor.execute('ALTER TABLE trades ADD COLUMN is_dry_run INTEGER DEFAULT 0')
+                    cursor.execute(
+                        'ALTER TABLE trades ADD COLUMN is_dry_run INTEGER NOT NULL DEFAULT 0'
+                    )
                     cursor.execute('SELECT COUNT(*) FROM trades')
                     pre_existing = cursor.fetchone()[0]
                     if pre_existing > 0:

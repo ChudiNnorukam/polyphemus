@@ -173,6 +173,24 @@ class TestAccumMetricsMigration:
         )
         assert cycle.is_dry_run is False
 
+    def test_null_is_dry_run_rejected(self, tmp_path):
+        """NOT NULL constraint must reject NULL writes (see perf_db sibling test)."""
+        path = _unique_db(tmp_path, "accum_null")
+        AccumulatorMetrics(db_path=path)
+        conn = sqlite3.connect(path)
+        now = time.time()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO cycles (slug, started_at, ended_at, up_qty, down_qty,
+                    up_avg_price, down_avg_price, pair_cost, pnl, exit_reason,
+                    reprices_used, fill_time_secs, hedge_time_secs, spread_at_entry,
+                    is_dry_run)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                ("null-slug", now - 30, now, 10.0, 10.0, 0.5, 0.5, 5.0, 0.0,
+                 "hedged_settlement", 0, 1.0, 1.0, 0.0),
+            )
+        conn.close()
+
 
 class TestPerformanceDBMigration:
     def test_fresh_db_has_column(self, tmp_path):
@@ -210,6 +228,24 @@ class TestPerformanceDBMigration:
         conn.close()
         assert rows[0] == 2
         assert rows[1] == 2
+
+    def test_null_is_dry_run_rejected(self, tmp_path):
+        """Constraint must reject NULL writes. NULL rows match neither filter
+        (is_dry_run=1 nor =0), which would silently drop rows from get_stats —
+        same bug class as Apr 10."""
+        path = _unique_db(tmp_path, "perf_null")
+        PerformanceDB(db_path=path)
+        conn = sqlite3.connect(path)
+        now = time.time()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO trades (trade_id, token_id, slug, entry_time, exit_time,
+                    entry_price, exit_price, entry_size, pnl, exit_reason, is_dry_run)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                ("tid-null", "0xnull", "null-slug", now - 60, now, 0.5, 0.55,
+                 10.0, 0.1, "market_resolved"),
+            )
+        conn.close()
 
     def test_get_stats_dry_run_only_filter(self, tmp_path):
         path = _unique_db(tmp_path, "perf_stats")
