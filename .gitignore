@@ -33,6 +33,9 @@ dario_output/
 
 # Data directories (live bot state)
 data/
+# R&D lab derived datasets (rebuildable via rnd_lab/build_dataset.py,
+# may contain instance trade data — keep local)
+polyphemus/rnd_lab/data/
 
 # Local paths / temp scripts
 lead-finder-output/
