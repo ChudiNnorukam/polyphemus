@@ -1,16 +1,18 @@
-"""Auto-resolve paper trades by fetching actual temperatures.
+"""Auto-resolve paper trades by checking actual outcomes.
 
-Uses Open-Meteo archive API to get observed max temperatures,
-then resolves each trade based on its question type.
+Primary: Polymarket resolution via Gamma API (ground truth).
+Fallback: Open-Meteo observed temperatures (may differ from Polymarket's
+resolution source by 1-3 deg, flagged with warning).
 
 Usage:
     python -m polyphemus.prediction_markets.weather.resolver
+    python -m polyphemus.prediction_markets.weather.resolver --source open-meteo
     python -m polyphemus.prediction_markets.weather.resolver --dry-run
     python -m polyphemus.prediction_markets.weather.resolver --date 2026-04-13
 """
 import asyncio
+import json
 import logging
-import math
 import re
 from datetime import date, datetime, timezone
 
@@ -22,15 +24,251 @@ from .detector import classify_question
 
 logger = logging.getLogger(__name__)
 
+GAMMA_BASE = "https://gamma-api.polymarket.com"
 ARCHIVE_BASE = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_BASE = "https://api.open-meteo.com/v1/forecast"
 
 
+# ---------------------------------------------------------------------------
+# Polymarket resolution (primary source)
+# ---------------------------------------------------------------------------
+
+async def fetch_resolved_temperature_markets() -> dict[str, str]:
+    """Fetch resolved temperature markets from Gamma API.
+
+    Returns dict mapping condition_id -> "YES" or "NO".
+    Only includes markets that have fully resolved.
+    """
+    resolutions: dict[str, str] = {}
+    offset = 0
+    limit = 100
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            try:
+                resp = await client.get(
+                    f"{GAMMA_BASE}/events",
+                    params={
+                        "tag_slug": "temperature",
+                        "closed": "true",
+                        "limit": limit,
+                        "offset": offset,
+                    },
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.error("Gamma API error fetching resolved markets: %s", exc)
+                break
+
+            events = resp.json()
+            if not isinstance(events, list):
+                break
+
+            for event in events:
+                for market in event.get("markets", []):
+                    cid = market.get("conditionId")
+                    if not cid:
+                        continue
+
+                    # Parse outcome prices to determine resolution
+                    prices_raw = market.get("outcomePrices", "[]")
+                    try:
+                        prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+                        if not prices:
+                            continue
+                        yes_price = float(prices[0])
+                    except (json.JSONDecodeError, IndexError, ValueError, TypeError):
+                        continue
+
+                    if yes_price >= 0.99:
+                        resolutions[cid] = "YES"
+                    elif yes_price <= 0.01:
+                        resolutions[cid] = "NO"
+                    # else: market closed but not clearly resolved (e.g. voided)
+
+            if len(events) < limit:
+                break
+            offset += limit
+
+    logger.info("Fetched %d resolved temperature markets from Polymarket", len(resolutions))
+    return resolutions
+
+
+async def resolve_via_polymarket(
+    target_date: date | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Resolve paper trades using actual Polymarket market outcomes.
+
+    This is the most accurate resolution method: it uses the same outcome
+    that Polymarket used, regardless of which temperature source they checked.
+    """
+    conn = get_db()
+    today = datetime.now(timezone.utc).date()
+
+    if target_date:
+        rows = conn.execute(
+            "SELECT * FROM paper_trades WHERE resolved = 0 AND market_date = ?",
+            (target_date.isoformat(),),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM paper_trades WHERE resolved = 0 AND market_date <= ?",
+            (today.isoformat(),),
+        ).fetchall()
+
+    if not rows:
+        print("No trades to resolve.")
+        conn.close()
+        return {"resolved": 0, "pnl": 0.0}
+
+    print(f"Found {len(rows)} trades to resolve via Polymarket")
+
+    # Fetch all resolved temperature markets
+    print("Fetching resolved markets from Gamma API...")
+    resolutions = await fetch_resolved_temperature_markets()
+    print(f"  {len(resolutions)} resolved markets found")
+
+    # Build set of condition_ids NOT found in batch, plus trades missing condition_id
+    unmatched_cids = set()
+    for r in rows:
+        cid = r["condition_id"]
+        if cid and cid not in resolutions:
+            unmatched_cids.add(cid)
+        elif not cid:
+            pass  # will fall through to token_id
+
+    # For any trade whose condition_id wasn't in the batch OR has no condition_id,
+    # try individual token_id lookups as fallback
+    fallback_token_ids = set()
+    for r in rows:
+        cid = r["condition_id"]
+        in_batch = cid and cid in resolutions
+        if not in_batch and r["token_id"]:
+            fallback_token_ids.add(r["token_id"])
+
+    token_to_resolution: dict[str, str] = {}
+    if fallback_token_ids:
+        print(f"  {len(fallback_token_ids)} trades not in batch, trying token_id lookup...")
+        token_to_resolution = await _lookup_by_token_ids(fallback_token_ids)
+        print(f"  Matched {len(token_to_resolution)} by token_id")
+
+    print()
+
+    resolved_count = 0
+    total_pnl = 0.0
+    wins = 0
+    losses = 0
+    skipped = 0
+
+    for r in rows:
+        outcome = None
+        source = None
+
+        # Try condition_id match first
+        if r["condition_id"] and r["condition_id"] in resolutions:
+            outcome = resolutions[r["condition_id"]]
+            source = "polymarket"
+        # Fall back to token_id match
+        elif r["token_id"] and r["token_id"] in token_to_resolution:
+            outcome = token_to_resolution[r["token_id"]]
+            source = "polymarket-token"
+        else:
+            print(f"  #{r['id']:3d} SKIP - market not yet resolved on Polymarket")
+            skipped += 1
+            continue
+
+        city_cfg = CITIES.get(r["city"], {})
+        display = city_cfg.get("display", r["city"])
+
+        if dry_run:
+            pnl = _compute_pnl(r, outcome)
+            symbol = "W" if pnl > 0 else "L"
+            print(f"  #{r['id']:3d} [DRY] {r['direction']} {display:15s} "
+                  f"thresh={r['temp']}{chr(176)}{r['unit']} -> {outcome} "
+                  f"({symbol}) P&L=${pnl:+.2f} [{source}]")
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+            resolved_count += 1
+        else:
+            try:
+                pnl = resolve_trade(conn, r["id"], outcome)
+                # Record resolution source
+                conn.execute(
+                    "UPDATE paper_trades SET resolution_source = ? WHERE id = ?",
+                    (source, r["id"]),
+                )
+                conn.commit()
+                symbol = "W" if pnl > 0 else "L"
+                print(f"  #{r['id']:3d} {r['direction']} {display:15s} "
+                      f"thresh={r['temp']}{chr(176)}{r['unit']} -> {outcome} "
+                      f"({symbol}) P&L=${pnl:+.2f} [{source}]")
+                total_pnl += pnl
+                if pnl > 0:
+                    wins += 1
+                else:
+                    losses += 1
+                resolved_count += 1
+            except Exception as exc:
+                print(f"  #{r['id']:3d} ERROR: {exc}")
+                skipped += 1
+
+    conn.close()
+    _print_summary(resolved_count, skipped, wins, losses, total_pnl, dry_run)
+    return {
+        "resolved": resolved_count,
+        "skipped": skipped,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(100 * wins / resolved_count, 1) if resolved_count > 0 else 0,
+        "pnl": round(total_pnl, 2),
+        "source": "polymarket",
+    }
+
+
+async def _lookup_by_token_ids(token_ids: set[str]) -> dict[str, str]:
+    """Look up market resolutions by CLOB token IDs via Gamma API."""
+    results: dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        for tid in token_ids:
+            try:
+                resp = await client.get(
+                    f"{GAMMA_BASE}/markets",
+                    params={"clob_token_ids": tid, "closed": "true"},
+                )
+                if resp.status_code != 200:
+                    continue
+                markets = resp.json()
+                if not markets:
+                    continue
+                m = markets[0] if isinstance(markets, list) else markets
+                prices_raw = m.get("outcomePrices", "[]")
+                prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+                if prices:
+                    yes_price = float(prices[0])
+                    if yes_price >= 0.99:
+                        results[tid] = "YES"
+                    elif yes_price <= 0.01:
+                        results[tid] = "NO"
+            except Exception as exc:
+                logger.debug("Token lookup failed for %s: %s", tid, exc)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Open-Meteo temperature resolution (fallback)
+# ---------------------------------------------------------------------------
+
 async def fetch_actual_temp(city_key: str, target_date: date) -> dict | None:
     """Fetch actual observed max temperature for a city on a past date.
 
-    Tries archive API first (reliable for dates > 5 days ago),
-    falls back to forecast API (has recent actuals within its window).
+    WARNING: Open-Meteo temperature_2m_max is model-derived, not station
+    observations. It can differ from Polymarket's resolution source
+    (Weather Underground, KMA, Met Office, etc.) by 1-3 deg C/F.
+    Use resolve_via_polymarket() for accurate paper trade scoring.
 
     Returns:
         {"temp_max_c": float, "temp_max_f": float, "source": str} or None.
@@ -41,8 +279,8 @@ async def fetch_actual_temp(city_key: str, target_date: date) -> dict | None:
 
     date_str = target_date.isoformat()
 
-    # Try forecast API first (has actuals for recent dates within 16-day window)
     async with httpx.AsyncClient(timeout=15) as client:
+        # Try forecast API first (has actuals for recent dates within 16-day window)
         try:
             resp = await client.get(FORECAST_BASE, params={
                 "latitude": city["lat"],
@@ -118,8 +356,7 @@ def determine_outcome(question: str, temp_threshold: int, unit: str,
 
     else:
         # Bucket: "exactly X" or "between X-Y"
-        # Check for range pattern first: "between 48-49°F"
-        range_match = re.search(r"between\s+(\d+)[-–](\d+)", question.lower())
+        range_match = re.search(r"between\s+(\d+)[-\u2013](\d+)", question.lower())
         if range_match:
             low = int(range_match.group(1))
             high = int(range_match.group(2))
@@ -131,10 +368,15 @@ def determine_outcome(question: str, temp_threshold: int, unit: str,
         return "YES" if rounded == temp_threshold else "NO"
 
 
-async def resolve_pending(target_date: date | None = None, dry_run: bool = False) -> dict:
-    """Resolve all pending paper trades for a given date (or all past dates).
+async def resolve_via_open_meteo(
+    target_date: date | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Resolve paper trades using Open-Meteo temperature data (fallback).
 
-    Returns summary dict with counts and P&L.
+    WARNING: Open-Meteo temperature_2m_max can differ from Polymarket's
+    actual resolution source by 1-3 deg. Results scored here may not match
+    actual Polymarket outcomes. Use resolve_via_polymarket() when possible.
     """
     conn = get_db()
     today = datetime.now(timezone.utc).date()
@@ -152,9 +394,11 @@ async def resolve_pending(target_date: date | None = None, dry_run: bool = False
 
     if not rows:
         print("No trades to resolve.")
+        conn.close()
         return {"resolved": 0, "pnl": 0.0}
 
-    print(f"Found {len(rows)} trades to resolve")
+    print(f"Found {len(rows)} trades to resolve via Open-Meteo")
+    print("WARNING: Open-Meteo temps may differ from Polymarket resolution by 1-3 deg")
     print()
 
     # Group by city to batch API calls
@@ -163,7 +407,7 @@ async def resolve_pending(target_date: date | None = None, dry_run: bool = False
         city_dates.setdefault(r["city"], set()).add(r["market_date"])
 
     # Fetch actual temperatures
-    actual_temps: dict[str, dict[str, dict]] = {}  # city -> date -> temp_data
+    actual_temps: dict[str, dict[str, dict]] = {}
     for city_key, dates in city_dates.items():
         actual_temps[city_key] = {}
         for d in dates:
@@ -174,13 +418,13 @@ async def resolve_pending(target_date: date | None = None, dry_run: bool = False
                 city_cfg = CITIES.get(city_key, {})
                 unit = city_cfg.get("unit", "C")
                 display_temp = temp_data["temp_max_f"] if unit == "F" else temp_data["temp_max_c"]
-                print(f"  {city_cfg.get('display', city_key)} {d}: actual max = {display_temp}{chr(176)}{unit} ({temp_data['source']})")
+                print(f"  {city_cfg.get('display', city_key)} {d}: actual max = "
+                      f"{display_temp}{chr(176)}{unit} ({temp_data['source']})")
             else:
-                print(f"  {city_key} {d}: MISSING - cannot resolve (API unavailable)")
+                print(f"  {city_key} {d}: MISSING - cannot resolve")
 
     print()
 
-    # Resolve trades
     resolved_count = 0
     total_pnl = 0.0
     wins = 0
@@ -193,7 +437,7 @@ async def resolve_pending(target_date: date | None = None, dry_run: bool = False
 
         temps = actual_temps.get(city_key, {}).get(market_date)
         if not temps:
-            print(f"  #{r['id']:2d} SKIP {city_key} {market_date} - no actual temp data")
+            print(f"  #{r['id']:3d} SKIP {city_key} {market_date} - no actual temp data")
             skipped += 1
             continue
 
@@ -206,22 +450,14 @@ async def resolve_pending(target_date: date | None = None, dry_run: bool = False
         )
 
         city_cfg = CITIES.get(city_key, {})
+        display = city_cfg.get("display", city_key)
         unit = r["unit"]
         actual = temps["temp_max_f"] if unit == "F" else temps["temp_max_c"]
 
         if dry_run:
-            # Compute P&L without writing
-            price = r["market_price"]
-            size = r["hypothetical_size"]
-            shares = size / price if price > 0 else 0
-            fee = 0.05 * price * (1 - price) * shares
-            if r["direction"] == "BUY":
-                pnl = (shares * (1 - price) - fee) if outcome == "YES" else -size
-            else:
-                pnl = (shares * price - fee) if outcome == "NO" else -size
-
+            pnl = _compute_pnl(r, outcome)
             symbol = "W" if pnl > 0 else "L"
-            print(f"  #{r['id']:2d} [DRY] {r['direction']} {city_cfg.get('display', city_key):15s} "
+            print(f"  #{r['id']:3d} [DRY] {r['direction']} {display:15s} "
                   f"thresh={r['temp']}{chr(176)}{unit} actual={actual}{chr(176)}{unit} -> {outcome} "
                   f"({symbol}) P&L=${pnl:+.2f}")
             total_pnl += pnl
@@ -233,8 +469,13 @@ async def resolve_pending(target_date: date | None = None, dry_run: bool = False
         else:
             try:
                 pnl = resolve_trade(conn, r["id"], outcome)
+                conn.execute(
+                    "UPDATE paper_trades SET resolution_source = ? WHERE id = ?",
+                    ("open-meteo", r["id"]),
+                )
+                conn.commit()
                 symbol = "W" if pnl > 0 else "L"
-                print(f"  #{r['id']:2d} {r['direction']} {city_cfg.get('display', city_key):15s} "
+                print(f"  #{r['id']:3d} {r['direction']} {display:15s} "
                       f"thresh={r['temp']}{chr(176)}{unit} actual={actual}{chr(176)}{unit} -> {outcome} "
                       f"({symbol}) P&L=${pnl:+.2f}")
                 total_pnl += pnl
@@ -244,34 +485,70 @@ async def resolve_pending(target_date: date | None = None, dry_run: bool = False
                     losses += 1
                 resolved_count += 1
             except Exception as exc:
-                print(f"  #{r['id']:2d} ERROR: {exc}")
+                print(f"  #{r['id']:3d} ERROR: {exc}")
                 skipped += 1
 
     conn.close()
-
-    wr = round(100 * wins / resolved_count, 1) if resolved_count > 0 else 0
-    print(f"\n{'=' * 50}")
-    print(f"RESOLUTION SUMMARY {'(DRY RUN)' if dry_run else ''}")
-    print(f"{'=' * 50}")
-    print(f"Resolved: {resolved_count} | Skipped: {skipped}")
-    print(f"Wins: {wins} | Losses: {losses} | WR: {wr}%")
-    print(f"Total P&L: ${total_pnl:+.2f}")
-
+    _print_summary(resolved_count, skipped, wins, losses, total_pnl, dry_run)
     return {
         "resolved": resolved_count,
         "skipped": skipped,
         "wins": wins,
         "losses": losses,
-        "win_rate": wr,
+        "win_rate": round(100 * wins / resolved_count, 1) if resolved_count > 0 else 0,
         "pnl": round(total_pnl, 2),
+        "source": "open-meteo",
     }
 
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _compute_pnl(row, outcome: str) -> float:
+    """Compute P&L for a paper trade given the outcome."""
+    price = row["market_price"]
+    size = row["hypothetical_size"]
+
+    if row["direction"] == "BUY":
+        shares = size / price if price > 0 else 0
+        fee = 0.05 * price * (1 - price) * shares
+        if outcome == "YES":
+            return shares * (1 - price) - fee
+        else:
+            return -size
+    else:  # SELL (buy NO tokens)
+        no_price = 1.0 - price
+        shares = size / no_price if no_price > 0 else 0
+        fee = 0.05 * no_price * (1 - no_price) * shares
+        if outcome == "NO":
+            return shares * price - fee
+        else:
+            return -size
+
+
+def _print_summary(resolved: int, skipped: int, wins: int, losses: int,
+                   pnl: float, dry_run: bool) -> None:
+    wr = round(100 * wins / resolved, 1) if resolved > 0 else 0
+    print(f"\n{'=' * 50}")
+    print(f"RESOLUTION SUMMARY {'(DRY RUN)' if dry_run else ''}")
+    print(f"{'=' * 50}")
+    print(f"Resolved: {resolved} | Skipped: {skipped}")
+    print(f"Wins: {wins} | Losses: {losses} | WR: {wr}%")
+    print(f"Total P&L: ${pnl:+.2f}")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Auto-resolve weather paper trades")
     parser.add_argument("--date", type=str, default=None,
                         help="Resolve trades for this date (YYYY-MM-DD). Default: all past dates.")
+    parser.add_argument("--source", choices=["polymarket", "open-meteo"], default="polymarket",
+                        help="Resolution source (default: polymarket)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show outcomes without writing to DB")
     parser.add_argument("--log-level", default="WARNING",
@@ -282,7 +559,11 @@ def main():
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     target = date.fromisoformat(args.date) if args.date else None
-    asyncio.run(resolve_pending(target_date=target, dry_run=args.dry_run))
+
+    if args.source == "polymarket":
+        asyncio.run(resolve_via_polymarket(target_date=target, dry_run=args.dry_run))
+    else:
+        asyncio.run(resolve_via_open_meteo(target_date=target, dry_run=args.dry_run))
 
 
 if __name__ == "__main__":

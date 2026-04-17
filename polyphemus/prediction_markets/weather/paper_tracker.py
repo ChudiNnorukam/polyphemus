@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     kelly REAL NOT NULL,
     hypothetical_size REAL NOT NULL DEFAULT 0,
     token_id TEXT,
+    condition_id TEXT,
+    resolution_source TEXT,
     resolved INTEGER DEFAULT 0,
     resolution_outcome TEXT CHECK(resolution_outcome IN ('YES', 'NO', NULL)),
     resolution_price REAL,
@@ -55,7 +57,45 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 
 CREATE INDEX IF NOT EXISTS idx_paper_trades_date ON paper_trades(market_date);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_resolved ON paper_trades(resolved);
+
+CREATE TABLE IF NOT EXISTS historical_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scanned_at TEXT NOT NULL,
+    city TEXT NOT NULL,
+    market_date TEXT NOT NULL,
+    temp INTEGER NOT NULL,
+    unit TEXT NOT NULL DEFAULT 'C',
+    direction TEXT NOT NULL,
+    question_type TEXT NOT NULL DEFAULT 'bucket',
+    question TEXT,
+    midpoint_price REAL NOT NULL,
+    execution_price REAL NOT NULL,
+    forecast_prob REAL NOT NULL,
+    forecast_temp REAL,
+    edge REAL NOT NULL,
+    ev_gross REAL,
+    ev_net REAL NOT NULL,
+    fee REAL,
+    kelly REAL NOT NULL,
+    days_until INTEGER,
+    token_id TEXT,
+    condition_id TEXT,
+    recorded INTEGER DEFAULT 0,
+    skip_reason TEXT,
+    resolved INTEGER DEFAULT 0,
+    resolution_outcome TEXT CHECK(resolution_outcome IN ('YES', 'NO', NULL)),
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_hist_scans_date ON historical_scans(market_date);
+CREATE INDEX IF NOT EXISTS idx_hist_scans_city ON historical_scans(city, market_date);
+CREATE INDEX IF NOT EXISTS idx_hist_scans_resolved ON historical_scans(resolved);
 """
+
+_MIGRATIONS = [
+    "ALTER TABLE paper_trades ADD COLUMN condition_id TEXT",
+    "ALTER TABLE paper_trades ADD COLUMN resolution_source TEXT",
+]
 
 
 def get_db(db_path: Path | None = None) -> sqlite3.Connection:
@@ -65,6 +105,12 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    # Run migrations for existing DBs missing new columns
+    for sql in _MIGRATIONS:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     return conn
 
 
@@ -84,6 +130,7 @@ def record_trade(
     question: str | None = None,
     forecast_temp: float | None = None,
     token_id: str | None = None,
+    condition_id: str | None = None,
     bankroll: float = 200.0,
 ) -> int:
     """Record a paper trade. Returns the trade ID."""
@@ -95,17 +142,55 @@ def record_trade(
         """INSERT INTO paper_trades
         (created_at, city, market_date, temp, unit, direction, question_type,
          question, market_price, forecast_prob, forecast_temp, edge, ev_net,
-         kelly, hypothetical_size, token_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         kelly, hypothetical_size, token_id, condition_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (now, city, market_date, temp, unit, direction, question_type,
          question, market_price, forecast_prob, forecast_temp, edge, ev_net,
-         kelly, size, token_id),
+         kelly, size, token_id, condition_id),
     )
     conn.commit()
     trade_id = cursor.lastrowid
     logger.info("Recorded paper trade #%d: %s %s %d%s %s @ %.3f (size=$%.2f)",
                 trade_id, direction, city, temp, unit, market_date, market_price, size)
     return trade_id
+
+
+def log_scan_result(
+    conn: sqlite3.Connection,
+    opp: dict,
+    recorded: bool = False,
+    skip_reason: str | None = None,
+) -> None:
+    """Log every scan result to historical_scans for backtesting.
+
+    Called for ALL opportunities from the scanner, regardless of whether
+    they pass filters. This builds the historical dataset needed for
+    backtesting, parameter sweeps, and model comparison.
+    """
+    from .detector import classify_question
+
+    now = datetime.now(timezone.utc).isoformat()
+    q_type = classify_question(opp.get("question", ""))
+
+    conn.execute(
+        """INSERT INTO historical_scans
+        (scanned_at, city, market_date, temp, unit, direction, question_type,
+         question, midpoint_price, execution_price, forecast_prob, forecast_temp,
+         edge, ev_gross, ev_net, fee, kelly, days_until,
+         token_id, condition_id, recorded, skip_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (now, opp.get("city", ""), opp.get("date", ""), opp["temp"],
+         opp.get("unit", "C"), opp["direction"], q_type,
+         opp.get("question"), opp.get("midpoint_price", opp["market_price"]),
+         opp["market_price"], opp["forecast_prob"],
+         opp.get("forecast_temp"), opp["edge"],
+         opp.get("ev_gross"), opp["ev_net"],
+         opp.get("fee"), opp.get("kelly", 0.0),
+         opp.get("days_until"),
+         opp.get("token_id"), opp.get("condition_id"),
+         1 if recorded else 0, skip_reason),
+    )
+    # Batch commit handled by caller
 
 
 def record_from_opportunity(conn: sqlite3.Connection, opp: dict, bankroll: float = 200.0) -> int:
@@ -129,6 +214,7 @@ def record_from_opportunity(conn: sqlite3.Connection, opp: dict, bankroll: float
         question=opp.get("question"),
         forecast_temp=opp.get("forecast_temp"),
         token_id=opp.get("token_id"),
+        condition_id=opp.get("condition_id"),
         bankroll=bankroll,
     )
 
@@ -144,16 +230,20 @@ def resolve_trade(conn: sqlite3.Connection, trade_id: int, outcome: str) -> floa
     direction = row["direction"]
     price = row["market_price"]
     size = row["hypothetical_size"]
-    shares = size / price if price > 0 else 0
 
     if direction == "BUY":
+        # BUY YES: pay 'price' per share, receive $1 if YES
+        shares = size / price if price > 0 else 0
         if outcome == "YES":
             pnl = shares * (1.0 - price) - _fee(price, shares)
         else:
             pnl = -size
-    else:  # SELL
+    else:  # SELL (buy NO tokens)
+        # SELL YES = BUY NO: pay '1-price' per NO share, receive $1 if NO
+        no_price = 1.0 - price
+        shares = size / no_price if no_price > 0 else 0
         if outcome == "NO":
-            pnl = shares * price - _fee(price, shares)
+            pnl = shares * price - _fee(no_price, shares)
         else:
             pnl = -size
 
@@ -240,6 +330,58 @@ def print_summary(conn: sqlite3.Connection) -> None:
                   f"(edge={r['edge']:+.3f}, size=${r['hypothetical_size']:.2f})")
 
 
+def print_history(conn: sqlite3.Connection) -> None:
+    """Print historical scan statistics for backtesting readiness."""
+    total = conn.execute("SELECT COUNT(*) FROM historical_scans").fetchone()[0]
+    if total == 0:
+        print("No historical scans yet. Run 'auto-record' to start collecting data.")
+        return
+
+    print(f"\n{'=' * 50}")
+    print("HISTORICAL SCAN DATABASE")
+    print(f"{'=' * 50}")
+    print(f"Total scan results: {total}")
+
+    # Date range
+    row = conn.execute(
+        "SELECT MIN(scanned_at), MAX(scanned_at), COUNT(DISTINCT market_date) FROM historical_scans"
+    ).fetchone()
+    print(f"Date range: {row[0][:10]} to {row[1][:10]} | {row[2]} unique market dates")
+
+    # By skip reason
+    print(f"\n--- Filter Breakdown ---")
+    rows = conn.execute(
+        "SELECT COALESCE(skip_reason, 'RECORDED') as reason, COUNT(*) as n "
+        "FROM historical_scans GROUP BY reason ORDER BY n DESC"
+    ).fetchall()
+    for r in rows:
+        print(f"  {r['reason']:>15}: {r['n']:>5}")
+
+    # By direction
+    print(f"\n--- By Direction ---")
+    rows = conn.execute(
+        "SELECT direction, COUNT(*) as n, "
+        "ROUND(AVG(execution_price), 3) as avg_price, "
+        "ROUND(AVG(edge), 4) as avg_edge "
+        "FROM historical_scans GROUP BY direction"
+    ).fetchall()
+    for r in rows:
+        print(f"  {r['direction']}: {r['n']} scans, avg price ${r['avg_price']}, avg edge {r['avg_edge']:+.4f}")
+
+    # By city (top 10)
+    print(f"\n--- Top 10 Cities ---")
+    rows = conn.execute(
+        "SELECT city, COUNT(*) as n FROM historical_scans GROUP BY city ORDER BY n DESC LIMIT 10"
+    ).fetchall()
+    for r in rows:
+        print(f"  {r['city']:>15}: {r['n']:>5}")
+
+    # Recorded vs total (pass rate)
+    recorded = conn.execute("SELECT COUNT(*) FROM historical_scans WHERE recorded = 1").fetchone()[0]
+    print(f"\nFilter pass rate: {recorded}/{total} ({100*recorded/total:.1f}%)")
+    print(f"Backtest-ready rows: {total} (all scans, regardless of filter)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Weather paper trading tracker")
     sub = parser.add_subparsers(dest="command")
@@ -264,11 +406,26 @@ def main() -> None:
     res.add_argument("--outcome", choices=["YES", "NO"], required=True)
 
     sub.add_parser("summary", help="Show performance summary")
+    sub.add_parser("history", help="Show historical scan statistics")
 
     auto = sub.add_parser("auto-record", help="Run scanner and auto-record qualifying trades")
     auto.add_argument("--threshold", type=float, default=0.10)
     auto.add_argument("--min-ev", type=float, default=0.01)
-    auto.add_argument("--min-kelly", type=float, default=0.05)
+    auto.add_argument("--min-kelly", type=float, default=0.15)
+    auto.add_argument("--max-per-day", type=int, default=30,
+                       help="Max trades to record per market date (default: 30)")
+    auto.add_argument("--cumulative-only", action="store_true", default=True,
+                       help="Only record cumulative markets (or higher/or lower), skip bucket/range (default: true)")
+    auto.add_argument("--all-types", action="store_true",
+                       help="Record all question types including buckets (overrides --cumulative-only)")
+    auto.add_argument("--sell-only", action="store_true", default=True,
+                       help="Only record SELL direction trades (default: true, BUY is 1/11 WR)")
+    auto.add_argument("--allow-buy", action="store_true",
+                       help="Allow BUY trades (overrides --sell-only)")
+    auto.add_argument("--min-price", type=float, default=0.20,
+                       help="Minimum market price to record (default: 0.20; narrowed 2026-04-16 after resolver dry-run: 0.10-0.20 bucket losing money despite high WR)")
+    auto.add_argument("--max-price", type=float, default=0.30,
+                       help="Maximum market price to record (default: 0.30; narrowed 2026-04-16 after resolver dry-run: 0.30-0.40 bucket below break-even)")
     auto.add_argument("--bankroll", type=float, default=200.0)
 
     args = parser.parse_args()
@@ -290,6 +447,9 @@ def main() -> None:
     elif args.command == "summary":
         print_summary(conn)
 
+    elif args.command == "history":
+        print_history(conn)
+
     elif args.command == "auto-record":
         import asyncio
         from .main import run
@@ -302,34 +462,120 @@ def main() -> None:
 
 
 async def _auto_record(conn: sqlite3.Connection, args) -> None:
-    """Run scanner and auto-record qualifying opportunities."""
+    """Run scanner and auto-record qualifying opportunities.
+
+    LOCKED PARAMETERS (Think Tank gate 2026-04-13, do NOT change until n=50 checkpoint):
+      - Direction: SELL only (BUY is 1/11 WR)
+      - Price range: $0.10-$0.50 (execution price, after spread haircut)
+      - Question type: cumulative only (or higher / or lower)
+      - Min Kelly: 0.15
+      - Min edge threshold: 0.10
+      - Min EV: $0.01
+      - Max per day: 30
+      - Stale price filter: skip midpoint $0.48-$0.52
+      - Gaussian model: std_dev=1.5C, horizon scaling sqrt(days)
+      - Fee coefficient: 0.05
+      - Spread haircut: 0.015
+    Kill criteria at n=50: WR <65% = KILL, 65-75% = extend to n=100, >75% = go live $500 max.
+    Break-even WR: 72.4% avg (73.0% with 2% live fill degradation).
+    """
     from .main import run
 
     opps = await run(threshold=args.threshold, min_ev=args.min_ev, verbose=False)
     recorded = 0
+    skipped_kelly = 0
+    skipped_stale = 0
+    skipped_dup = 0
+    skipped_cap = 0
+    skipped_bucket = 0
+    skipped_direction = 0
+    skipped_price_range = 0
+
+    cumulative_only = getattr(args, "cumulative_only", True) and not getattr(args, "all_types", False)
+    sell_only = getattr(args, "sell_only", True) and not getattr(args, "allow_buy", False)
+    min_price = getattr(args, "min_price", 0.0)
+    max_price = getattr(args, "max_price", 1.0)
+
+    # Track per-day counts to enforce cap
+    day_counts: dict[str, int] = {}
+    max_per_day = getattr(args, "max_per_day", 30)
+
+    logged_scans = 0
 
     for opp in opps:
+        # Determine skip reason (first matching filter), then log ALL to historical_scans
+        skip = None
+
         if opp.get("kelly", 0) < args.min_kelly:
-            continue
-        if opp["direction"] != "BUY":
-            continue  # Phase 1: BUY only (simpler execution)
+            skip = "kelly_low"
+            skipped_kelly += 1
+        elif sell_only and opp["direction"] != "SELL":
+            skip = "direction_buy"
+            skipped_direction += 1
+        else:
+            exec_price = opp["market_price"]
+            if exec_price < min_price or exec_price > max_price:
+                skip = "price_range"
+                skipped_price_range += 1
+            elif cumulative_only:
+                from .detector import classify_question
+                q_type = classify_question(opp.get("question", ""))
+                if q_type not in ("cumulative_higher", "cumulative_lower"):
+                    skip = "bucket_type"
+                    skipped_bucket += 1
+            if skip is None:
+                midpoint = opp.get("midpoint_price", opp["market_price"])
+                if 0.48 <= midpoint <= 0.52:
+                    skip = "stale_price"
+                    skipped_stale += 1
 
-        # Check for duplicate
-        existing = conn.execute(
-            "SELECT id FROM paper_trades WHERE city = ? AND market_date = ? AND temp = ? AND resolved = 0",
-            (opp["city"], opp["date"], opp["temp"]),
-        ).fetchone()
-        if existing:
-            print(f"  SKIP duplicate: {opp['city']} {opp['temp']} {opp['date']} (trade #{existing['id']})")
+        if skip is None:
+            market_date = opp.get("date", "")
+            day_counts.setdefault(market_date, 0)
+            if day_counts[market_date] >= max_per_day:
+                skip = "day_cap"
+                skipped_cap += 1
+            else:
+                existing = conn.execute(
+                    "SELECT id FROM paper_trades WHERE city = ? AND market_date = ? AND temp = ? AND direction = ? AND resolved = 0",
+                    (opp["city"], market_date, opp["temp"], opp["direction"]),
+                ).fetchone()
+                if existing:
+                    skip = "duplicate"
+                    skipped_dup += 1
+
+        # Log to historical_scans (ALL opportunities, before/after filtering)
+        log_scan_result(conn, opp, recorded=(skip is None), skip_reason=skip)
+        logged_scans += 1
+
+        if skip is not None:
             continue
 
+        # Record the qualifying trade
         trade_id = record_from_opportunity(conn, opp, bankroll=args.bankroll)
+        day_counts[opp.get("date", "")] += 1
         print(f"  RECORDED #{trade_id}: {opp['direction']} {opp['city']} "
               f"{opp['temp']}{chr(176)}{opp.get('unit','')} {opp['date']} "
               f"@ {opp['market_price']:.3f} (edge={opp['edge']:+.3f}, kelly={opp['kelly']:.1%})")
         recorded += 1
 
-    print(f"\nRecorded {recorded} new paper trades.")
+    conn.commit()  # Batch commit for historical_scans
+
+    print(f"\nRecorded {recorded} new paper trades. Logged {logged_scans} scan results to history.")
+    if skipped_direction:
+        print(f"  Skipped {skipped_direction} (direction filter - SELL only)")
+    if skipped_price_range:
+        print(f"  Skipped {skipped_price_range} (price outside ${min_price:.2f}-${max_price:.2f})")
+    if skipped_bucket:
+        print(f"  Skipped {skipped_bucket} (bucket/range - cumulative only)")
+    if skipped_kelly:
+        print(f"  Skipped {skipped_kelly} (kelly < {args.min_kelly})")
+    if skipped_stale:
+        print(f"  Skipped {skipped_stale} (stale/default price ~$0.50)")
+    if skipped_dup:
+        print(f"  Skipped {skipped_dup} (duplicate)")
+    if skipped_cap:
+        print(f"  Skipped {skipped_cap} (per-day cap of {max_per_day})")
     print_summary(conn)
 
 

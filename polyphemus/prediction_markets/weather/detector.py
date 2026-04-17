@@ -14,6 +14,9 @@ _WEATHER_FEE_COEFF = 0.050
 # Estimated half-spread for weather markets (conservative).
 # Paper trades at midpoint overstate edge; this haircut accounts for
 # the cost of crossing the spread when actually executing.
+# Measured Apr 14 2026: bucket spreads 1-2c, cumulative spreads 0.3-0.5c.
+# 1.5c is 3-5x the real cumulative spread, so paper trade edges are understated.
+# Keep conservative until live execution confirms fill quality.
 _SPREAD_HAIRCUT = 0.015
 
 
@@ -93,11 +96,8 @@ def detect_divergences(
         else:
             execution_price = max(market_price - _SPREAD_HAIRCUT, 0.02)
 
-        # Edge vs execution price for both directions
-        if direction == "BUY":
-            edge = forecast_prob - execution_price
-        else:
-            edge = forecast_prob - execution_price  # negative: forecast_prob < execution_price
+        # Edge vs execution price (positive = BUY edge, negative = SELL edge)
+        edge = forecast_prob - execution_price
 
         # Expected value per share (using execution price, not midpoint)
         if direction == "BUY":
@@ -119,6 +119,7 @@ def detect_divergences(
             "ev_gross": round(ev_gross, 4),
             "ev_net": round(ev_net, 4),
             "token_id": bucket.get("yes_token_id"),
+            "condition_id": bucket.get("condition_id"),
             "question": bucket.get("question"),
         })
 
