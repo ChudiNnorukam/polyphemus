@@ -38,11 +38,22 @@ class PerformanceDB:
 
         Note:
             Caller is responsible for closing the connection in a finally block.
+            WAL init can hit transient 'disk I/O error' on macOS APFS under
+            rapid test-suite connection churn — retry once with a tiny backoff.
         """
-        conn = sqlite3.connect(self.db_path)
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.row_factory = sqlite3.Row
-        return conn
+        import time
+        last_err: Exception | None = None
+        for attempt in range(3):
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.row_factory = sqlite3.Row
+                return conn
+            except sqlite3.OperationalError as e:
+                conn.close()
+                last_err = e
+                time.sleep(0.01 * (attempt + 1))
+        raise last_err  # type: ignore[misc]
 
     def _detect_pnl_column(self) -> str:
         """Detect whether the DB uses 'pnl' (V2) or 'profit_loss' (V1) column name."""
