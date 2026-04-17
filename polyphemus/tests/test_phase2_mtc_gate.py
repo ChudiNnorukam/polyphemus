@@ -20,7 +20,15 @@ import pytest
 
 from polyphemus.accumulator_metrics import AccumulatorMetrics, CycleRecord
 from polyphemus.performance_db import PerformanceDB
-from polyphemus.tools.mtc_pre_deploy_gate import run_gate, _load_cycles, _load_trades
+from polyphemus.tools.mtc_pre_deploy_gate import (
+    find_latest_receipt,
+    run_gate,
+    segment_key,
+    verify_receipt,
+    write_receipt,
+    _load_cycles,
+    _load_trades,
+)
 
 
 DAY = 86400.0
@@ -237,3 +245,121 @@ class TestGateDeterminism:
         # Scrub generated_at (it's the input `now`, so equal, but belt and braces):
         v1["generated_at"] = v2["generated_at"] = 0
         assert v1 == v2
+
+
+class TestReceipts:
+    """Receipts persist the gate verdict so downstream tooling (predeploy.sh,
+    LIFECYCLE enforcement) can verify gate status without re-running the
+    computation. The receipt is the governance artifact."""
+
+    def _fake_verdict(self, *, verdict: str = "PASS", source: str = "trades",
+                      generated_at: float = 1_000_000.0) -> dict:
+        if source == "trades":
+            segment = {"strategy": "signal_bot"}
+        else:
+            segment = {"asset": "btc", "window_duration_secs": 300}
+        return {
+            "verdict": verdict,
+            "passed": verdict == "PASS",
+            "source": source,
+            "db_path": "/tmp/whatever.db",
+            "segment": segment,
+            "lookback_days": 30,
+            "n": 100, "wins": 60,
+            "checks": [],
+            "first_failure": None if verdict == "PASS" else "R2_hypothesis_test_wr",
+            "generated_at": generated_at,
+        }
+
+    def test_segment_key_trades(self):
+        v = self._fake_verdict(source="trades")
+        assert segment_key(v) == "trades_signal_bot"
+
+    def test_segment_key_cycles(self):
+        v = self._fake_verdict(source="cycles")
+        assert segment_key(v) == "cycles_btc_300"
+
+    def test_write_receipt_creates_file(self, tmp_path):
+        v = self._fake_verdict(generated_at=1_000_000)
+        path = write_receipt(v, tmp_path / "evidence")
+        assert path.exists()
+        assert path.name == "trades_signal_bot_1000000.json"
+        import json as _json
+        payload = _json.loads(path.read_text())
+        assert payload["segment_key"] == "trades_signal_bot"
+        assert payload["verdict"] == "PASS"
+
+    def test_write_receipt_creates_directory(self, tmp_path):
+        """Receipt dir is auto-created. This matters because predeploy.sh's
+        first call has no pre-existing evidence/ dir."""
+        nested = tmp_path / "a" / "b" / "c"
+        v = self._fake_verdict()
+        path = write_receipt(v, nested)
+        assert nested.is_dir()
+        assert path.parent == nested
+
+    def test_find_latest_receipt_picks_highest_timestamp(self, tmp_path):
+        """Mtime-independent ordering: we key off the timestamp embedded in
+        the filename, not file system mtime (which is clobbered by scp)."""
+        key = "trades_signal_bot"
+        write_receipt(self._fake_verdict(generated_at=100), tmp_path)
+        write_receipt(self._fake_verdict(generated_at=300), tmp_path)
+        write_receipt(self._fake_verdict(generated_at=200), tmp_path)
+        latest = find_latest_receipt(tmp_path, key)
+        assert latest is not None
+        assert latest.name == f"{key}_300.json"
+
+    def test_find_latest_receipt_returns_none_when_missing(self, tmp_path):
+        assert find_latest_receipt(tmp_path, "no_such_segment") is None
+
+    def test_verify_receipt_fresh_pass(self, tmp_path):
+        now = 1_000_000.0
+        write_receipt(self._fake_verdict(generated_at=now - 86400), tmp_path)
+        result = verify_receipt(tmp_path, "trades_signal_bot",
+                                max_age_days=7, now=now)
+        assert result["ok"] is True
+        assert result["verdict"] == "PASS"
+        assert result["age_days"] == pytest.approx(1.0, rel=0.01)
+
+    def test_verify_receipt_stale_fails(self, tmp_path):
+        """Stale PASS receipts are worse than no receipt: they create the
+        illusion of recent validation. Hard-fail them."""
+        now = 1_000_000.0
+        write_receipt(self._fake_verdict(generated_at=now - 30 * 86400), tmp_path)
+        result = verify_receipt(tmp_path, "trades_signal_bot",
+                                max_age_days=7, now=now)
+        assert result["ok"] is False
+        assert "stale" in result["reason"]
+
+    def test_verify_receipt_fail_verdict_fails(self, tmp_path):
+        """A fresh FAIL receipt must not satisfy verify. The whole point of
+        the receipt is to enforce PASS."""
+        now = 1_000_000.0
+        write_receipt(self._fake_verdict(verdict="FAIL", generated_at=now),
+                      tmp_path)
+        result = verify_receipt(tmp_path, "trades_signal_bot",
+                                max_age_days=7, now=now)
+        assert result["ok"] is False
+        assert "FAIL" in result["reason"]
+
+    def test_verify_receipt_missing_fails(self, tmp_path):
+        result = verify_receipt(tmp_path, "cycles_eth_900",
+                                max_age_days=7, now=1_000_000.0)
+        assert result["ok"] is False
+        assert "no receipt" in result["reason"].lower()
+
+    def test_verify_receipt_chooses_newest_even_if_older_was_pass(self, tmp_path):
+        """If a PASS receipt exists but a newer FAIL receipt also exists,
+        verify must pick the newest — we care about current state, not any
+        historical PASS."""
+        now = 1_000_000.0
+        write_receipt(self._fake_verdict(verdict="PASS",
+                                          generated_at=now - 2 * 86400),
+                      tmp_path)
+        write_receipt(self._fake_verdict(verdict="FAIL",
+                                          generated_at=now - 86400),
+                      tmp_path)
+        result = verify_receipt(tmp_path, "trades_signal_bot",
+                                max_age_days=7, now=now)
+        assert result["ok"] is False
+        assert result["verdict"] == "FAIL"

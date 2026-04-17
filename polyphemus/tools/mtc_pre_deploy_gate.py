@@ -46,6 +46,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # Add project root to path so tools/ can import polyphemus/
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -403,6 +404,93 @@ def run_gate(
 # ---------------------------------------------------------------------------
 
 
+def segment_key(verdict: dict) -> str:
+    """Stable identifier for a gated strategy segment. Used as receipt filename prefix
+    so verify callers can find the receipt for a given strategy without scanning.
+
+    trades_{strategy}       e.g. trades_signal_bot
+    cycles_{asset}_{win}    e.g. cycles_btc_300
+    """
+    seg = verdict["segment"]
+    if verdict["source"] == "trades":
+        return f"trades_{seg.get('strategy', 'unknown')}"
+    return f"cycles_{seg.get('asset', 'unknown')}_{seg.get('window_duration_secs', 0)}"
+
+
+def write_receipt(verdict: dict, receipt_dir: str | Path) -> Path:
+    """Write receipt JSON to {receipt_dir}/{segment_key}_{generated_at}.json.
+    Creates the directory if missing. Returns the path written."""
+    d = Path(receipt_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    key = segment_key(verdict)
+    ts = int(verdict["generated_at"])
+    out = d / f"{key}_{ts}.json"
+    payload = {"segment_key": key, **verdict}
+    out.write_text(json.dumps(payload, indent=2, default=str))
+    return out
+
+
+def find_latest_receipt(receipt_dir: str | Path, seg_key: str) -> Optional[Path]:
+    """Return newest receipt for seg_key in receipt_dir, or None if no match.
+    Ordering is by generated_at (encoded in filename), not file mtime — mtime
+    can be clobbered by scp / cp and we need a deterministic order."""
+    d = Path(receipt_dir)
+    if not d.is_dir():
+        return None
+    candidates = list(d.glob(f"{seg_key}_*.json"))
+    if not candidates:
+        return None
+    def ts_of(p: Path) -> int:
+        stem = p.stem
+        # {seg_key}_{ts}; ts is the trailing integer after the last underscore.
+        try:
+            return int(stem.rsplit("_", 1)[1])
+        except (ValueError, IndexError):
+            return 0
+    return max(candidates, key=ts_of)
+
+
+def verify_receipt(
+    receipt_dir: str | Path,
+    seg_key: str,
+    max_age_days: float,
+    *,
+    now: Optional[float] = None,
+) -> dict:
+    """Read the newest receipt for seg_key and judge whether it's usable.
+
+    Returns dict with `ok: bool` and `reason: str`. `ok=True` requires:
+      - Receipt exists.
+      - Receipt generated within max_age_days.
+      - Receipt verdict is PASS.
+
+    This is the only check callers (predeploy.sh, LIFECYCLE enforcement) need.
+    """
+    ref_now = time.time() if now is None else now
+    path = find_latest_receipt(receipt_dir, seg_key)
+    if path is None:
+        return {"ok": False, "reason": f"no receipt found for {seg_key} in {receipt_dir}",
+                "path": None, "age_days": None, "verdict": None}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return {"ok": False, "reason": f"receipt unreadable: {e}",
+                "path": str(path), "age_days": None, "verdict": None}
+    age_secs = ref_now - float(data.get("generated_at", 0))
+    age_days = age_secs / 86400.0
+    verdict_str = data.get("verdict", "UNKNOWN")
+    if age_days > max_age_days:
+        return {"ok": False,
+                "reason": f"receipt stale: {age_days:.1f}d > {max_age_days}d max",
+                "path": str(path), "age_days": age_days, "verdict": verdict_str}
+    if verdict_str != "PASS":
+        return {"ok": False,
+                "reason": f"receipt verdict is {verdict_str} (needs PASS)",
+                "path": str(path), "age_days": age_days, "verdict": verdict_str}
+    return {"ok": True, "reason": "fresh PASS",
+            "path": str(path), "age_days": age_days, "verdict": "PASS"}
+
+
 def _format_human(verdict: dict) -> str:
     lines = []
     tag = "PASS" if verdict["passed"] else "FAIL"
@@ -423,8 +511,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Polyphemus MTC pre-deploy gate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--source", required=True, choices=["cycles", "trades"])
-    p.add_argument("--db", required=True, help="path to SQLite DB")
+    # Run mode flags (used when --verify-receipt-dir NOT set)
+    p.add_argument("--source", choices=["cycles", "trades"],
+                   help="data source (run mode)")
+    p.add_argument("--db", help="path to SQLite DB (run mode)")
     p.add_argument("--lookback-days", type=int, default=30)
     p.add_argument("--asset", default="", help="(cycles only) e.g. btc, eth, houston")
     p.add_argument("--window-duration", type=int, default=0,
@@ -437,7 +527,46 @@ def main(argv: list[str] | None = None) -> int:
                    help="k params tested (R4 DSR adjustment)")
     p.add_argument("--json", action="store_true",
                    help="emit JSON verdict on stdout (else pretty text on stdout)")
+    p.add_argument("--write-receipt", default=None, metavar="DIR",
+                   help="write verdict receipt JSON into DIR "
+                        "(file name = {segment_key}_{generated_at}.json)")
+    # Verify mode flags (used when --verify-receipt-dir IS set)
+    p.add_argument("--verify-receipt-dir", default=None, metavar="DIR",
+                   help="verify mode: read newest receipt in DIR, exit 0 if fresh PASS "
+                        "else exit 1 with reason. Skips gate computation entirely.")
+    p.add_argument("--segment-key", default=None,
+                   help="(verify mode) segment key to find, e.g. trades_signal_bot or "
+                        "cycles_btc_300")
+    p.add_argument("--max-age-days", type=float, default=7.0,
+                   help="(verify mode) max receipt age in days (default 7)")
     args = p.parse_args(argv)
+
+    # Verify mode: skip gate, just check receipt freshness.
+    if args.verify_receipt_dir is not None:
+        if not args.segment_key:
+            p.error("--verify-receipt-dir requires --segment-key")
+        result = verify_receipt(
+            receipt_dir=args.verify_receipt_dir,
+            seg_key=args.segment_key,
+            max_age_days=args.max_age_days,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            tag = "OK" if result["ok"] else "FAIL"
+            print(f"[MTC verify] {tag} segment={args.segment_key}  {result['reason']}")
+            if result["path"]:
+                print(f"  receipt: {result['path']}")
+                if result["age_days"] is not None:
+                    print(f"  age: {result['age_days']:.2f}d "
+                          f"(max {args.max_age_days}d)")
+                print(f"  verdict: {result['verdict']}")
+        return 0 if result["ok"] else 1
+
+    # Run mode: validate required args that weren't declared required at top
+    # (so verify mode can omit them).
+    if not args.source or not args.db:
+        p.error("run mode requires --source and --db")
 
     verdict = run_gate(
         source=args.source,
@@ -449,6 +578,11 @@ def main(argv: list[str] | None = None) -> int:
         breakeven=args.breakeven,
         dsr_k=args.dsr_k,
     )
+
+    if args.write_receipt:
+        receipt_path = write_receipt(verdict, args.write_receipt)
+        # Stderr so it doesn't pollute --json stdout
+        print(f"[MTC gate] receipt written: {receipt_path}", file=sys.stderr)
 
     if args.json:
         print(json.dumps(verdict, indent=2, default=str))

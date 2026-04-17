@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 FAIL=0
-TOTAL_STEPS=7
+TOTAL_STEPS=8
 
 # ============================================================
 # STEP 0: Config drift check (MEMORY live-config.md vs VPS .env)
@@ -91,9 +91,87 @@ else
 fi
 
 # ============================================================
+# STEP 1.5: MTC gate receipt check (block LIVE deploys w/o fresh PASS)
+# Enforces Phase 4C of LIFECYCLE.md: flipping a DRY_RUN flag to false
+# requires a PASS verdict from tools/mtc_pre_deploy_gate.py within the
+# last 7 days, with the receipt committed to polyphemus/evidence/mtc_gate/.
+# ============================================================
+echo -e "${CYAN}[2/$TOTAL_STEPS] MTC gate receipt check${NC}"
+
+if [[ -n "$DEPLOY_INSTANCE" ]]; then
+    # Re-fetch if drift check skipped (live-config.md missing)
+    if [[ -z "${VPS_ENV:-}" ]]; then
+        INSTANCE_ENV="$VPS_INSTANCES/$DEPLOY_INSTANCE/.env"
+        VPS_ENV=$(ssh root@$VPS "cat $INSTANCE_ENV 2>/dev/null" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$VPS_ENV" ]]; then
+        REQUIRED_SEGMENTS=""
+        get_env() { echo "$VPS_ENV" | grep -E "^${1}=" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true; }
+
+        dry_run_val=$(get_env DRY_RUN)
+        accum_dry_val=$(get_env ACCUM_DRY_RUN)
+        weather_dry_val=$(get_env WEATHER_DRY_RUN)
+        enable_accumulator=$(get_env ENABLE_ACCUMULATOR)
+
+        # signal_bot is always on (no ENABLE flag), so DRY_RUN alone governs it
+        [[ "$dry_run_val" == "false" ]] && REQUIRED_SEGMENTS="$REQUIRED_SEGMENTS trades_signal_bot"
+        # Accumulator: live requires BOTH flags — enabled + not dry-run
+        if [[ "$enable_accumulator" == "true" && "$accum_dry_val" == "false" ]]; then
+            REQUIRED_SEGMENTS="$REQUIRED_SEGMENTS cycles_btc_300"
+        elif [[ "$accum_dry_val" == "false" ]]; then
+            # Latent footgun: flip ENABLE_ACCUMULATOR=true and it's instantly live
+            echo -e "  ${YELLOW}WARN${NC} latent: ACCUM_DRY_RUN=false with ENABLE_ACCUMULATOR=$enable_accumulator (flip to true = live w/o receipt)"
+        fi
+        REQUIRED_SEGMENTS=$(echo "$REQUIRED_SEGMENTS" | xargs)
+
+        # Weather arb has no gate yet — warn but don't block
+        if [[ "$weather_dry_val" == "false" ]]; then
+            echo -e "  ${YELLOW}WARN${NC} WEATHER_DRY_RUN=false but weather gate not wired yet"
+        fi
+
+        if [[ -z "$REQUIRED_SEGMENTS" ]]; then
+            echo -e "  ${GREEN}PASS${NC} All gated modes on $DEPLOY_INSTANCE are dry-run (no receipt required)"
+        else
+            RECEIPT_DIR="$PROJECT_DIR/polyphemus/evidence/mtc_gate"
+            GATE_FAIL=0
+            for seg in $REQUIRED_SEGMENTS; do
+                VERIFY_LOG="/tmp/mtc_verify_$$.log"
+                if (cd "$PROJECT_DIR" && python3 -m polyphemus.tools.mtc_pre_deploy_gate \
+                        --verify-receipt-dir "$RECEIPT_DIR" \
+                        --segment-key "$seg" \
+                        --max-age-days 7) >"$VERIFY_LOG" 2>&1; then
+                    echo -e "  ${GREEN}PASS${NC} $seg (fresh PASS receipt)"
+                else
+                    echo -e "  ${RED}FAIL${NC} $seg"
+                    sed 's/^/    /' "$VERIFY_LOG"
+                    GATE_FAIL=1
+                fi
+                rm -f "$VERIFY_LOG"
+            done
+
+            if [[ $GATE_FAIL -eq 1 ]]; then
+                echo -e "  ${RED}LIVE deploy blocked.${NC} Generate a fresh PASS receipt before retry:"
+                echo -e "    ${CYAN}python3 -m polyphemus.tools.mtc_pre_deploy_gate \\${NC}"
+                echo -e "    ${CYAN}  --source trades --db polyphemus/data/performance.db \\${NC}"
+                echo -e "    ${CYAN}  --strategy signal_bot --lookback-days 30 \\${NC}"
+                echo -e "    ${CYAN}  --write-receipt polyphemus/evidence/mtc_gate${NC}"
+                FAIL=1
+            fi
+        fi
+    else
+        # No VPS .env readable — conservative block on live-bound deploys
+        echo -e "  ${RED}FAIL${NC} Could not read VPS .env for $DEPLOY_INSTANCE (can't verify live/dry-run state)"
+        FAIL=1
+    fi
+else
+    echo -e "  ${YELLOW}SKIP${NC} No --deploy flag (gate check runs on deploy only)"
+fi
+
+# ============================================================
 # STEP 1: py_compile all .py files (excluding tests)
 # ============================================================
-echo -e "${CYAN}[2/$TOTAL_STEPS] py_compile all source files${NC}"
+echo -e "${CYAN}[3/$TOTAL_STEPS] py_compile all source files${NC}"
 COMPILE_FAIL=0
 for f in "$LOCAL_DIR"/*.py; do
     fname="$(basename "$f")"
@@ -116,9 +194,9 @@ fi
 # STEP 2: Run pytest
 # ============================================================
 if [[ "$SKIP_TESTS" == true ]]; then
-    echo -e "${CYAN}[3/$TOTAL_STEPS] pytest ${YELLOW}SKIPPED${NC}"
+    echo -e "${CYAN}[4/$TOTAL_STEPS] pytest ${YELLOW}SKIPPED${NC}"
 else
-    echo -e "${CYAN}[3/$TOTAL_STEPS] pytest${NC}"
+    echo -e "${CYAN}[4/$TOTAL_STEPS] pytest${NC}"
     cd "$PROJECT_DIR"
     TEST_OUTPUT=$(python3 -m pytest polyphemus/test_smoke.py polyphemus/test_chainlink.py -q 2>&1) || true
     PASSED=$(echo "$TEST_OUTPUT" | grep -oE '[0-9]+ passed' | head -1 || echo "0 passed")
@@ -135,7 +213,7 @@ fi
 # ============================================================
 # STEP 4: Anti-pattern scan on changed files
 # ============================================================
-echo -e "${CYAN}[4/$TOTAL_STEPS] Anti-pattern scan${NC}"
+echo -e "${CYAN}[5/$TOTAL_STEPS] Anti-pattern scan${NC}"
 
 # Build list of locally changed .py files (git diff against HEAD)
 CHANGED_PY=$(cd "$PROJECT_DIR" && git diff --name-only HEAD -- 'polyphemus/*.py' 2>/dev/null | grep -v test_ || echo "")
@@ -197,7 +275,7 @@ fi
 # ============================================================
 # STEP 5: Checksum diff (local vs VPS)
 # ============================================================
-echo -e "${CYAN}[5/$TOTAL_STEPS] Checksum diff (local vs VPS)${NC}"
+echo -e "${CYAN}[6/$TOTAL_STEPS] Checksum diff (local vs VPS)${NC}"
 
 # Get list of files to check
 if [[ -n "$SPECIFIC_FILES" ]]; then
@@ -238,8 +316,8 @@ fi
 # STEP 6: Deploy (if --deploy)
 # ============================================================
 if [[ -z "$DEPLOY_INSTANCE" ]]; then
-    echo -e "${CYAN}[6/$TOTAL_STEPS] Deploy ${YELLOW}SKIPPED${NC} (no --deploy flag)"
-    echo -e "${CYAN}[7/$TOTAL_STEPS] Post-deploy ${YELLOW}SKIPPED${NC}"
+    echo -e "${CYAN}[7/$TOTAL_STEPS] Deploy ${YELLOW}SKIPPED${NC} (no --deploy flag)"
+    echo -e "${CYAN}[8/$TOTAL_STEPS] Post-deploy ${YELLOW}SKIPPED${NC}"
 
     if [[ $FAIL -eq 1 ]]; then
         echo -e "\n${RED}PRE-CHECK FAILED - do not deploy${NC}"
@@ -265,7 +343,7 @@ if [[ $TOTAL_CHANGED -eq 0 ]]; then
     exit 0
 fi
 
-echo -e "${CYAN}[6/$TOTAL_STEPS] Deploying to ${DEPLOY_INSTANCE}${NC}"
+echo -e "${CYAN}[7/$TOTAL_STEPS] Deploying to ${DEPLOY_INSTANCE}${NC}"
 
 # 4a: Graceful stop (drain open positions before killing)
 OPEN_POS=$(ssh root@$VPS "sqlite3 $VPS_INSTANCES/${DEPLOY_INSTANCE}/data/performance.db 'SELECT COUNT(*) FROM trades WHERE exit_time IS NULL' 2>/dev/null" 2>/dev/null || echo "0")
@@ -390,7 +468,7 @@ sleep 2
 # ============================================================
 # STEP 7: Post-deploy verification
 # ============================================================
-echo -e "${CYAN}[7/$TOTAL_STEPS] Post-deploy verification${NC}"
+echo -e "${CYAN}[8/$TOTAL_STEPS] Post-deploy verification${NC}"
 
 # Service status
 STATUS=$(ssh root@$VPS "systemctl is-active lagbot@${DEPLOY_INSTANCE}" 2>/dev/null || echo "unknown")
@@ -415,5 +493,5 @@ else
     echo -e "  ${GREEN}No errors in first 10s${NC}"
 fi
 
-echo -e "\n${GREEN}DEPLOY COMPLETE${NC} [7/$TOTAL_STEPS]: $TOTAL_CHANGED file(s) to lagbot@${DEPLOY_INSTANCE}"
+echo -e "\n${GREEN}DEPLOY COMPLETE${NC} [8/$TOTAL_STEPS]: $TOTAL_CHANGED file(s) to lagbot@${DEPLOY_INSTANCE}"
 echo -e "Monitor: ${CYAN}ssh root@$VPS 'journalctl -u lagbot@${DEPLOY_INSTANCE} -f'${NC}"

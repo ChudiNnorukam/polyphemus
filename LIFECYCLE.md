@@ -132,11 +132,20 @@ Evidence required:
 - [ ] P&L simulated: expected $[X]/trade at current balance and sizing
 - [ ] Position size reality check (R11): balance * bet_pct = $[X]/position
 - [ ] Edge cases identified: worst loss, max consecutive losses, drawdown
+- [ ] **MTC gate receipt generated and PASS** (commit at `polyphemus/evidence/mtc_gate/`)
 
 **Hard blocks:**
 - WR < 70% on n >= 30: NO-GO. Do not proceed to Phase 5.
 - n < 30: [ANECDOTAL]. Extend observation period. Do not proceed.
 - Simulated max drawdown > MAX_DAILY_LOSS: NO-GO. Reduce sizing first.
+- **MTC gate receipt missing, stale (>7d), or FAIL**: NO-GO. The gate's five checks (sample size, Wilson CI WR, walk-forward consistency, Deflated Sharpe, alpha decay) catch statistically-invalid backtests that slip past the WR threshold. `predeploy.sh` enforces this at deploy time; Phase 4C enforces it at go/no-go review time. Generate the receipt with:
+
+```bash
+python3 -m polyphemus.tools.mtc_pre_deploy_gate \
+  --source trades --db polyphemus/data/performance.db \
+  --strategy <name> --lookback-days 30 \
+  --write-receipt polyphemus/evidence/mtc_gate
+```
 
 ### 4D: Config Drift Verification
 
@@ -172,6 +181,7 @@ Run all GLG checks from DARIO Phase 0.9:
 - [ ] GLG-6: Dry-run signals observed (Phase 4B evidence)
 - [ ] GLG-7: Observability stack active (Slack, context feed, cron)
 - [ ] GLG-8: Paper trade gate passed (Phase 4C evidence)
+- [ ] GLG-9: MTC gate receipt PASS + fresh (< 7 days) at `polyphemus/evidence/mtc_gate/{segment_key}_*.json` — verify with `python3 -m polyphemus.tools.mtc_pre_deploy_gate --verify-receipt-dir polyphemus/evidence/mtc_gate --segment-key <key> --max-age-days 7`
 
 ### Gate 5: Review Complete
 
