@@ -1399,16 +1399,36 @@ class AccumulatorEngine:
 
         pos.pnl = pnl
 
-        # Credit simulated balance in dry-run mode
+        # Reconcile simulated balance in dry-run mode.
+        # Entry cost (qty * avg_price) was already deducted via sim_deduct
+        # in _apply_fill at fill time. Settlement ties balance to pos.pnl:
+        #   (a) credit $1.00/share for winning shares (resolved in our favor);
+        #   (b) deduct total fees paid across both legs — fees are tracked on
+        #       the position but NOT subtracted at fill time, so settlement is
+        #       the single point where they hit the sim balance;
+        #   (c) losing shares get zero credit — their entry cost stays lost.
+        # After this block: sim_balance delta equals pos.pnl, matching live.
         if self._dry_run and pnl is not None:
             if is_hedged:
-                # Hedged: one side pays $1.00 per matched share
-                self._balance.sim_credit(min(pos.up_qty, pos.down_qty) * 1.00)
+                # Matched pair pays $1.00 per share (one side wins, the other
+                # resolves to $0). Unmatched excess (imbalance) gets no credit;
+                # its entry cost stays as a loss, which pnl already reflects.
+                matched = min(pos.up_qty, pos.down_qty)
+                self._balance.sim_credit(matched * 1.00)
             elif is_orphaned:
                 qty = pos.up_qty if pos.up_qty > 0 else pos.down_qty
-                avg = pos.up_avg_price if pos.up_qty > 0 else pos.down_avg_price
                 if pnl > 0:
-                    self._balance.sim_credit(qty * 1.00)  # Won: full payout
+                    # Winning orphan: resolved in our favor, $1.00/share.
+                    self._balance.sim_credit(qty * 1.00)
+                else:
+                    # Losing orphan: resolved against us, $0.00/share. No
+                    # credit needed; the entry cost was already deducted at
+                    # fill time and stays lost. Explicit no-op so the branch
+                    # reads as intentional rather than a silent bug.
+                    pass
+            total_fees = pos.up_fee_paid + pos.down_fee_paid
+            if total_fees > 0:
+                self._balance.sim_deduct(total_fees)
 
         # Record settlement for dashboard
         if pnl is not None:
