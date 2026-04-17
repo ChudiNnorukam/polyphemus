@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Debug {{ trade_id }} - Polyphemus{% endblock %}
+
+{% block content %}
+<div class="pt-4">
+    <a href="/" class="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-300 mb-4">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        Back
+    </a>
+
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <h1 class="text-2xl font-bold mb-1">Trade Debug</h1>
+        <p class="text-sm text-gray-500 font-mono break-all">{{ trade_id }}</p>
+        <p class="text-xs text-gray-600 mt-2">db: <span class="font-mono">{{ db_path }}</span></p>
+    </div>
+
+    {% if db_missing %}
+    <div class="bg-red-900/20 border border-red-800 rounded-lg p-4 text-red-300">
+        <p class="font-semibold">performance.db not found</p>
+        <p class="text-sm text-red-400 mt-1">
+            Set <code class="bg-gray-900 px-1 rounded">LAGBOT_DATA_DIR</code> or
+            <code class="bg-gray-900 px-1 rounded">POLYPHEMUS_PERFORMANCE_DB</code>,
+            or create one at <code class="bg-gray-900 px-1 rounded">{{ db_path }}</code>.
+        </p>
+    </div>
+    {% elif not trade %}
+    <div class="bg-yellow-900/20 border border-yellow-800 rounded-lg p-4 text-yellow-300">
+        <p class="font-semibold">Trade not found</p>
+        <p class="text-sm text-yellow-400 mt-1">
+            The DB at <code class="bg-gray-900 px-1 rounded">{{ db_path }}</code> has no
+            trade with <code class="bg-gray-900 px-1 rounded">trade_id = {{ trade_id }}</code>.
+            Wrong instance? Re-check <code class="bg-gray-900 px-1 rounded">LAGBOT_DATA_DIR</code>.
+        </p>
+    </div>
+    {% else %}
+    <!-- Attribution summary -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4">
+            <p class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">signal_source</p>
+            <p class="text-lg font-semibold font-mono">{{ trade.get('signal_source') or '-' }}</p>
+        </div>
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4">
+            <p class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">fill_model</p>
+            <p class="text-lg font-semibold font-mono">{{ trade.get('fill_model') or '-' }}</p>
+            {% if trade.get('fill_model_reason') %}
+            <p class="text-xs text-gray-500 mt-1">{{ trade.get('fill_model_reason') }}</p>
+            {% endif %}
+        </div>
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4">
+            <p class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">entry_band</p>
+            <p class="text-lg font-semibold font-mono">{{ (attribution or {}).get('entry_band') or '-' }}</p>
+            {% if trade.get('entry_price') is not none %}
+            <p class="text-xs text-gray-500 mt-1">@ ${{ '%.3f' % trade.get('entry_price') }}</p>
+            {% endif %}
+        </div>
+        <div class="bg-gray-900 rounded-xl border border-gray-800 p-4">
+            <p class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">outcome</p>
+            {% if trade.get('pnl') is not none %}
+            {% set pnl = trade.get('pnl') %}
+            <p class="text-lg font-semibold {% if pnl > 0 %}text-buy{% elif pnl < 0 %}text-sell{% else %}text-gray-400{% endif %}">
+                {% if pnl > 0 %}+{% endif %}${{ '%.2f' % pnl }}
+            </p>
+            <p class="text-xs text-gray-500 mt-1">
+                {% if trade.get('is_dry_run') %}DRY RUN{% else %}LIVE{% endif %}
+                &middot; {{ trade.get('exit_reason') or 'open' }}
+            </p>
+            {% else %}
+            <p class="text-lg font-semibold text-gray-400">open</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Book & fill diagnostics -->
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-400 mb-3">Book &amp; Fill State</h2>
+        <dl class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">entry_mode</dt>
+                <dd class="font-mono">{{ trade.get('entry_mode') or '-' }}</dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">fill_latency_ms</dt>
+                <dd class="font-mono">{{ trade.get('fill_latency_ms') if trade.get('fill_latency_ms') is not none else '-' }}</dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">book_spread</dt>
+                <dd class="font-mono">
+                    {% if trade.get('book_spread_at_entry') is not none %}
+                    {{ '%.4f' % trade.get('book_spread_at_entry') }}
+                    {% else %}-{% endif %}
+                </dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">book_depth_bid</dt>
+                <dd class="font-mono">{{ trade.get('book_depth_bid') if trade.get('book_depth_bid') is not none else '-' }}</dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">book_depth_ask</dt>
+                <dd class="font-mono">{{ trade.get('book_depth_ask') if trade.get('book_depth_ask') is not none else '-' }}</dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">signal_id</dt>
+                <dd class="font-mono">{{ trade.get('signal_id') if trade.get('signal_id') is not none else '-' }}</dd>
+            </div>
+        </dl>
+    </div>
+
+    <!-- Adverse selection context -->
+    {% if adverse_context %}
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-400 mb-3">Adverse Selection — Peer Group</h2>
+        <p class="text-xs text-gray-500 mb-3">
+            Rollup across all trades with same signal_source / entry_mode / fill_model.
+            {% if trade.get('adverse_fill_bps') is not none %}
+            This trade: <span class="font-mono">{{ '%+.1f' % trade.get('adverse_fill_bps') }}</span> bps.
+            {% endif %}
+        </p>
+        <dl class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">n</dt>
+                <dd class="font-mono">{{ adverse_context.n }}</dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">adv_rate</dt>
+                <dd class="font-mono">{{ '%.1f%%' % (adverse_context.adv_rate * 100) if adverse_context.adv_rate is not none else '-' }}</dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">avg_adv_bps</dt>
+                <dd class="font-mono">{{ adverse_context.avg_adv_bps if adverse_context.avg_adv_bps is not none else '-' }}</dd>
+            </div>
+            <div>
+                <dt class="text-[10px] uppercase text-gray-500">avg_latency_ms</dt>
+                <dd class="font-mono">{{ adverse_context.avg_latency_ms if adverse_context.avg_latency_ms is not none else '-' }}</dd>
+            </div>
+        </dl>
+    </div>
+    {% endif %}
+
+    <!-- Timeline -->
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-400">Timeline</h2>
+            <span class="text-xs text-gray-500">{{ timeline|length }} event{% if timeline|length != 1 %}s{% endif %}</span>
+        </div>
+        {% if not timeline %}
+        <p class="text-sm text-gray-500">
+            No trade_events recorded for this trade. Either the tracer wasn't enabled
+            (<code class="bg-gray-950 px-1 rounded">POLYPHEMUS_TRACER_ENABLED</code>) or the trade pre-dates Phase 3.
+        </p>
+        {% else %}
+        <ol class="relative border-l border-gray-700 ml-3 space-y-4">
+            {% for ev in timeline %}
+            <li class="ml-4">
+                <div class="absolute w-2 h-2 bg-gray-600 rounded-full -left-1 mt-2"></div>
+                <div class="flex items-baseline gap-3">
+                    <span class="text-xs text-gray-500 font-mono shrink-0">
+                        {{ '%.3f' % ev.ts }}
+                    </span>
+                    <span class="text-sm font-semibold text-blue-300">{{ ev.event_type }}</span>
+                </div>
+                {% if ev.payload %}
+                <pre class="mt-1 text-xs text-gray-400 bg-gray-950 p-2 rounded overflow-x-auto">{{ ev.payload | tojson(indent=2) }}</pre>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ol>
+        {% endif %}
+    </div>
+
+    <!-- Raw trade row (collapsible) -->
+    <details class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+        <summary class="text-sm font-semibold uppercase tracking-wider text-gray-400 cursor-pointer">
+            Raw trade row
+        </summary>
+        <pre class="mt-3 text-xs text-gray-400 bg-gray-950 p-3 rounded overflow-x-auto">{{ trade | tojson(indent=2) }}</pre>
+    </details>
+    {% endif %}
+</div>
+{% endblock %}

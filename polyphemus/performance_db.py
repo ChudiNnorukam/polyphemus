@@ -7,6 +7,7 @@ Each operation creates a fresh connection to ensure ACID compliance and prevent 
 
 import json
 import sqlite3
+from pathlib import Path
 from typing import List, Dict, Optional
 from .config import setup_logger
 
@@ -180,6 +181,7 @@ class PerformanceDB:
 
             self._migrate_v4_trade_observability(cursor)
             self._init_trade_events(cursor)
+            self._init_attribution_views(cursor)
 
             conn.commit()
             self.logger.info('Database schema initialized')
@@ -279,6 +281,35 @@ class PerformanceDB:
             'CREATE INDEX IF NOT EXISTS idx_trade_events_type_ts '
             'ON trade_events(event_type, ts)'
         )
+
+    def _init_attribution_views(self, cursor: sqlite3.Cursor) -> None:
+        """Phase 4 — load SQL views from polyphemus/sql_views/.
+
+        Views are stored as .sql files so analysts can grep them, version
+        them, and open them in an editor without excavating Python source.
+        Loader is idempotent (each file uses DROP VIEW IF EXISTS + CREATE)
+        so bumping a view definition is a file edit + restart, not a
+        migration dance.
+
+        Skips silently if a view depends on a column that isn't present
+        yet — a fresh DB before the v4 migration doesn't need to fail
+        schema init just because the view references ``fill_model``.
+        """
+        views_dir = Path(__file__).resolve().parent / 'sql_views'
+        if not views_dir.is_dir():
+            self.logger.warning(f'sql_views dir missing at {views_dir}; skipping view load')
+            return
+        for sql_path in sorted(views_dir.glob('vw_*.sql')):
+            try:
+                sql = sql_path.read_text(encoding='utf-8')
+                cursor.executescript(sql)
+            except sqlite3.OperationalError as e:
+                # Most common on an older DB missing a column the view
+                # references. Keep schema init alive — fresh writes will
+                # populate, then the next init will pick up the view.
+                self.logger.warning(
+                    f'sql_views: failed to load {sql_path.name} ({e}) — continuing'
+                )
 
     def _get_existing_columns(self) -> set:
         """Return set of column names in trades table."""

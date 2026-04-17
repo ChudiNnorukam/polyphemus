@@ -122,7 +122,14 @@ def _load_trades(
     strategy: str,
     lookback_days: int,
 ) -> list[dict]:
-    """Pull dry-run trades for a given strategy. Returns per-row dicts."""
+    """Pull dry-run trades for a given strategy. Returns per-row dicts.
+
+    v4 attribution columns (``signal_source``, ``fill_model``) are
+    surfaced when present so ``--segment-by`` and ``--filter-*`` don't
+    need a second query. Missing columns are returned as ``None`` so
+    older DBs still load without error — Phase 5 is what guarantees
+    populated values.
+    """
     cutoff = time.time() - lookback_days * 86400
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -137,8 +144,13 @@ def _load_trades(
         # Detect pnl column (V1 'profit_loss' vs V2 'pnl'), matching
         # PerformanceDB._detect_pnl_column semantics.
         pnl_col = "pnl" if "pnl" in cols else "profit_loss"
+        # Emit NULL placeholders for v4 columns missing on older DBs so
+        # the returned row shape is stable regardless of migration state.
+        sig_src_expr = "signal_source" if "signal_source" in cols else "NULL AS signal_source"
+        fill_model_expr = "fill_model" if "fill_model" in cols else "NULL AS fill_model"
         rows = conn.execute(
-            f"SELECT {pnl_col} AS pnl, exit_time, exit_reason, entry_price, entry_size "
+            f"SELECT {pnl_col} AS pnl, exit_time, exit_reason, entry_price, entry_size, "
+            f"       {sig_src_expr}, {fill_model_expr} "
             f"FROM trades WHERE strategy = ? AND is_dry_run = 1 "
             f"AND exit_time IS NOT NULL AND exit_time > ? "
             f"ORDER BY exit_time ASC",
@@ -195,6 +207,81 @@ def _cycle_timestamps(rows: list[dict]) -> list[float]:
 
 def _trade_timestamps(rows: list[dict]) -> list[float]:
     return [r["exit_time"] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Attribution segmenting (Phase 4). These helpers let --segment-by and
+# --filter-* slice a single trades query by columns that were added in
+# the Phase 1 schema migration (signal_source, fill_model) plus the
+# derived entry_band bucket. They live here, next to the row shape they
+# operate on, rather than in a separate module.
+# ---------------------------------------------------------------------------
+
+
+# Bucket boundaries — must match polyphemus/sql_views/vw_trade_attribution.sql.
+# If the SQL changes, this tuple MUST change in lockstep or the gate
+# and dashboard will disagree on which trades live in which band.
+_ENTRY_BAND_CUTS: tuple[tuple[float, str], ...] = (
+    (0.55, "00-55"),
+    (0.70, "55-70"),
+    (0.85, "70-85"),
+    (0.93, "85-93"),
+    (0.97, "93-97"),
+)
+
+
+def _derive_entry_band(price: float | None) -> str:
+    """Bucket an entry_price into the same bands as vw_trade_attribution.
+
+    Matches the SQL CASE exactly so MTC segment-by results can be cross-
+    checked against ``SELECT entry_band, COUNT(*) FROM vw_trade_attribution``.
+    ``None`` prices (pre-migration rows) bucket to 'unknown'.
+    """
+    if price is None:
+        return "unknown"
+    for upper, label in _ENTRY_BAND_CUTS:
+        if price < upper:
+            return label
+    return "97+"
+
+
+def _segment_value(row: dict, column: str) -> str:
+    """Compute the segment label for one row.
+
+    Supported columns: ``signal_source``, ``fill_model``, ``entry_band``.
+    NULL / empty values collapse to the sentinel 'unknown' so the gate
+    still produces a verdict. A large 'unknown' slice is itself a signal
+    that the Phase-1 migration hasn't finished on this DB.
+    """
+    if column == "entry_band":
+        return _derive_entry_band(row.get("entry_price"))
+    val = row.get(column)
+    if val is None or val == "":
+        return "unknown"
+    return str(val)
+
+
+def _apply_trade_filters(
+    rows: list[dict],
+    *,
+    filter_signal_source: str = "",
+    filter_fill_model: str = "",
+    filter_entry_band: str = "",
+) -> list[dict]:
+    """Drop rows that don't match any non-empty filter. Applied uniformly
+    by both ``run_gate`` (filters-only mode) and ``run_segmented_gate``
+    (filters-then-segment mode)."""
+    out = rows
+    if filter_signal_source:
+        out = [r for r in out if r.get("signal_source") == filter_signal_source]
+    if filter_fill_model:
+        out = [r for r in out if r.get("fill_model") == filter_fill_model]
+    if filter_entry_band:
+        out = [
+            r for r in out
+            if _derive_entry_band(r.get("entry_price")) == filter_entry_band
+        ]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -331,46 +418,34 @@ def _check_alpha_decay(timestamps: list[float], returns: list[float], now: float
 # ---------------------------------------------------------------------------
 
 
-def run_gate(
+def _gate_from_rows(
     source: str,
+    rows: list[dict],
+    segment: dict,
+    *,
+    breakeven: float,
+    dsr_k: int,
+    ref_now: float,
     db_path: str,
     lookback_days: int,
-    *,
-    asset: str = "",
-    window_duration_secs: int = 0,
-    strategy: str = "",
-    breakeven: float = WR_BREAKEVEN_DEFAULT,
-    dsr_k: int = DSR_K_DEFAULT,
-    now: float | None = None,
 ) -> dict:
-    """Run all five checks and return the combined verdict dict.
+    """Compute the 5-check verdict over an already-loaded row set.
 
-    The caller decides what to do with the verdict (print, exit, post to a
-    deploy pipeline). This function performs no I/O beyond the SQL reads
-    and returns a pure dict.
+    Split out of ``run_gate`` so ``run_segmented_gate`` can reuse the
+    exact same check sequence per partition. Keeping the verdict shape
+    identical matters: receipt consumers and webapp parsers don't need
+    to branch on segmented vs global.
     """
     if source == "cycles":
-        if not asset:
-            raise ValueError("source=cycles requires --asset")
-        if window_duration_secs <= 0:
-            raise ValueError("source=cycles requires --window-duration > 0")
-        rows = _load_cycles(db_path, asset, window_duration_secs, lookback_days)
         returns = _cycle_returns(rows)
         wins, total = _cycle_win_count(rows)
         timestamps = _cycle_timestamps(rows)
-        segment = {"asset": asset, "window_duration_secs": window_duration_secs}
     elif source == "trades":
-        if not strategy:
-            raise ValueError("source=trades requires --strategy")
-        rows = _load_trades(db_path, strategy, lookback_days)
         returns = _trade_returns(rows)
         wins, total = _trade_win_count(rows)
         timestamps = _trade_timestamps(rows)
-        segment = {"strategy": strategy}
     else:
         raise ValueError(f"source must be 'cycles' or 'trades', got {source!r}")
-
-    ref_now = now if now is not None else time.time()
 
     checks = [
         _check_sample_size(total),
@@ -380,7 +455,6 @@ def run_gate(
         _check_alpha_decay(timestamps, returns, now=ref_now),
     ]
     passed = all(c["passed"] for c in checks)
-
     first_fail = next((c for c in checks if not c["passed"]), None)
     verdict = "PASS" if passed else "FAIL"
 
@@ -399,6 +473,188 @@ def run_gate(
     }
 
 
+def run_gate(
+    source: str,
+    db_path: str,
+    lookback_days: int,
+    *,
+    asset: str = "",
+    window_duration_secs: int = 0,
+    strategy: str = "",
+    breakeven: float = WR_BREAKEVEN_DEFAULT,
+    dsr_k: int = DSR_K_DEFAULT,
+    filter_signal_source: str = "",
+    filter_fill_model: str = "",
+    filter_entry_band: str = "",
+    now: float | None = None,
+) -> dict:
+    """Run all five checks and return the combined verdict dict.
+
+    The caller decides what to do with the verdict (print, exit, post to a
+    deploy pipeline). This function performs no I/O beyond the SQL reads
+    and returns a pure dict.
+
+    ``filter_*`` keyword args (Phase 4) accept trades-source attribution
+    filters. Empty string means "no filter". Filters are applied after
+    the SQL pull so the same query plan serves both global and narrowed
+    runs. ``cycles`` source ignores them — accum_metrics.db does not yet
+    carry signal_source / fill_model.
+    """
+    if source == "cycles":
+        if not asset:
+            raise ValueError("source=cycles requires --asset")
+        if window_duration_secs <= 0:
+            raise ValueError("source=cycles requires --window-duration > 0")
+        rows = _load_cycles(db_path, asset, window_duration_secs, lookback_days)
+        segment = {"asset": asset, "window_duration_secs": window_duration_secs}
+    elif source == "trades":
+        if not strategy:
+            raise ValueError("source=trades requires --strategy")
+        rows = _load_trades(db_path, strategy, lookback_days)
+        rows = _apply_trade_filters(
+            rows,
+            filter_signal_source=filter_signal_source,
+            filter_fill_model=filter_fill_model,
+            filter_entry_band=filter_entry_band,
+        )
+        segment = {"strategy": strategy}
+        # Surface active filters inside the segment dict so the receipt
+        # records *what was gated*, not just the strategy name. A PASS
+        # verdict on signal_bot ∩ v2_probabilistic is very different from
+        # a PASS on the whole strategy.
+        if filter_signal_source:
+            segment["signal_source"] = filter_signal_source
+        if filter_fill_model:
+            segment["fill_model"] = filter_fill_model
+        if filter_entry_band:
+            segment["entry_band"] = filter_entry_band
+    else:
+        raise ValueError(f"source must be 'cycles' or 'trades', got {source!r}")
+
+    ref_now = now if now is not None else time.time()
+    return _gate_from_rows(
+        source=source,
+        rows=rows,
+        segment=segment,
+        breakeven=breakeven,
+        dsr_k=dsr_k,
+        ref_now=ref_now,
+        db_path=db_path,
+        lookback_days=lookback_days,
+    )
+
+
+def run_segmented_gate(
+    db_path: str,
+    strategy: str,
+    lookback_days: int,
+    segment_by: str,
+    *,
+    breakeven: float = WR_BREAKEVEN_DEFAULT,
+    dsr_k: int = DSR_K_DEFAULT,
+    filter_signal_source: str = "",
+    filter_fill_model: str = "",
+    filter_entry_band: str = "",
+    now: float | None = None,
+) -> dict:
+    """Load trades once, partition by ``segment_by`` column, gate each partition.
+
+    Returns an envelope verdict:
+
+        {
+            "verdict": "PASS" if every partition passes else "FAIL",
+            "passed": bool,
+            "source": "trades",
+            "strategy": <name>,
+            "segmented_by": <column>,
+            "filters": {...},
+            "segments": {<label>: <per-partition verdict>, ...},
+            ...
+        }
+
+    Only ``source=trades`` is supported — ``accum_metrics.db`` does not yet
+    carry the attribution columns needed to segment cycles. Callers who
+    want per-asset × per-window cycle verdicts should invoke ``run_gate``
+    multiple times with distinct ``--asset`` / ``--window-duration``.
+    """
+    if segment_by not in {"signal_source", "fill_model", "entry_band"}:
+        raise ValueError(
+            "segment_by must be one of signal_source, fill_model, entry_band; "
+            f"got {segment_by!r}"
+        )
+    if not strategy:
+        raise ValueError("run_segmented_gate requires strategy (trades source only)")
+
+    rows = _load_trades(db_path, strategy, lookback_days)
+    rows = _apply_trade_filters(
+        rows,
+        filter_signal_source=filter_signal_source,
+        filter_fill_model=filter_fill_model,
+        filter_entry_band=filter_entry_band,
+    )
+
+    ref_now = now if now is not None else time.time()
+
+    partitions: dict[str, list[dict]] = {}
+    for r in rows:
+        label = _segment_value(r, segment_by)
+        partitions.setdefault(label, []).append(r)
+
+    segments: dict[str, dict] = {}
+    for label in sorted(partitions.keys()):
+        seg_meta = {"strategy": strategy, segment_by: label}
+        segments[label] = _gate_from_rows(
+            source="trades",
+            rows=partitions[label],
+            segment=seg_meta,
+            breakeven=breakeven,
+            dsr_k=dsr_k,
+            ref_now=ref_now,
+            db_path=db_path,
+            lookback_days=lookback_days,
+        )
+
+    # Empty-segments case: load returned no rows (e.g. filters cleared
+    # everything, or strategy has no dry-run trades in the window). Don't
+    # silently pass — a gate with no data is by construction unsafe.
+    if not segments:
+        return {
+            "verdict": "FAIL",
+            "passed": False,
+            "source": "trades",
+            "db_path": db_path,
+            "strategy": strategy,
+            "segmented_by": segment_by,
+            "lookback_days": lookback_days,
+            "filters": {
+                "signal_source": filter_signal_source,
+                "fill_model": filter_fill_model,
+                "entry_band": filter_entry_band,
+            },
+            "segments": {},
+            "reason": "no rows after loading + filtering",
+            "generated_at": ref_now,
+        }
+
+    all_pass = all(v["passed"] for v in segments.values())
+    return {
+        "verdict": "PASS" if all_pass else "FAIL",
+        "passed": all_pass,
+        "source": "trades",
+        "db_path": db_path,
+        "strategy": strategy,
+        "segmented_by": segment_by,
+        "lookback_days": lookback_days,
+        "filters": {
+            "signal_source": filter_signal_source,
+            "fill_model": filter_fill_model,
+            "entry_band": filter_entry_band,
+        },
+        "segments": segments,
+        "generated_at": ref_now,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -408,12 +664,27 @@ def segment_key(verdict: dict) -> str:
     """Stable identifier for a gated strategy segment. Used as receipt filename prefix
     so verify callers can find the receipt for a given strategy without scanning.
 
-    trades_{strategy}       e.g. trades_signal_bot
-    cycles_{asset}_{win}    e.g. cycles_btc_300
+    Base:
+        trades_{strategy}             e.g. trades_signal_bot
+        cycles_{asset}_{win}          e.g. cycles_btc_300
+
+    Attribution suffix (trades only, Phase 4) — appended in a stable
+    column order whenever the segment carries one of the new keys so
+    segmented receipts don't collide in the same output dir:
+        trades_signal_bot__signal_source=pair_arb
+        trades_signal_bot__signal_source=pair_arb__entry_band=93-97
     """
     seg = verdict["segment"]
     if verdict["source"] == "trades":
-        return f"trades_{seg.get('strategy', 'unknown')}"
+        base = f"trades_{seg.get('strategy', 'unknown')}"
+        parts = []
+        for col in ("signal_source", "fill_model", "entry_band"):
+            val = seg.get(col)
+            if val:
+                parts.append(f"{col}={val}")
+        if parts:
+            base = base + "__" + "__".join(parts)
+        return base
     return f"cycles_{seg.get('asset', 'unknown')}_{seg.get('window_duration_secs', 0)}"
 
 
@@ -506,6 +777,40 @@ def _format_human(verdict: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_human_segmented(envelope: dict) -> str:
+    """One-line summary per segment, then an overall tag. The per-segment
+    block is the same shape as ``_format_human`` so operators can read a
+    segmented verdict without learning a new format."""
+    lines = []
+    overall = "PASS" if envelope["passed"] else "FAIL"
+    lines.append(
+        f"[MTC gate] segmented verdict={overall}  "
+        f"strategy={envelope['strategy']}  "
+        f"segmented_by={envelope['segmented_by']}  "
+        f"lookback={envelope['lookback_days']}d  "
+        f"segments={len(envelope['segments'])}"
+    )
+    filters = envelope.get("filters") or {}
+    active = {k: v for k, v in filters.items() if v}
+    if active:
+        lines.append(f"  filters: {active}")
+    if not envelope["segments"]:
+        lines.append(f"  (no segments -- {envelope.get('reason', 'empty after load')})")
+        return "\n".join(lines)
+    for label in sorted(envelope["segments"].keys()):
+        seg_verdict = envelope["segments"][label]
+        tag = "PASS" if seg_verdict["passed"] else "FAIL"
+        lines.append(
+            f"  [{tag}] {envelope['segmented_by']}={label}  "
+            f"n={seg_verdict['n']} wins={seg_verdict['wins']}  "
+            f"first_failure={seg_verdict['first_failure']}"
+        )
+        for c in seg_verdict["checks"]:
+            mark = "PASS" if c["passed"] else "FAIL"
+            lines.append(f"      {mark} {c['check']}: {c['reason']}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Polyphemus MTC pre-deploy gate",
@@ -525,6 +830,19 @@ def main(argv: list[str] | None = None) -> int:
                    help="null-hypothesis WR for R2 (default 0.50; fee-adjust per strategy)")
     p.add_argument("--dsr-k", type=int, default=DSR_K_DEFAULT,
                    help="k params tested (R4 DSR adjustment)")
+    # Phase 4 attribution segmenting. Only meaningful for --source trades; the
+    # cycles DB doesn't carry these columns yet.
+    p.add_argument("--segment-by", default="",
+                   choices=["", "signal_source", "fill_model", "entry_band"],
+                   help="(trades only) partition rows by a column and emit a "
+                        "verdict per partition (e.g. one per signal_source)")
+    p.add_argument("--filter-signal-source", default="",
+                   help="(trades only) restrict rows to this signal_source value")
+    p.add_argument("--filter-fill-model", default="",
+                   help="(trades only) restrict rows to this fill_model value")
+    p.add_argument("--filter-entry-band", default="",
+                   help="(trades only) restrict rows to this entry_band label "
+                        "(00-55, 55-70, 70-85, 85-93, 93-97, 97+)")
     p.add_argument("--json", action="store_true",
                    help="emit JSON verdict on stdout (else pretty text on stdout)")
     p.add_argument("--write-receipt", default=None, metavar="DIR",
@@ -568,6 +886,49 @@ def main(argv: list[str] | None = None) -> int:
     if not args.source or not args.db:
         p.error("run mode requires --source and --db")
 
+    # Attribution flags are trades-only. Catch this at CLI parse time rather
+    # than letting run_gate/run_segmented_gate fail deeper in the stack.
+    attribution_args_used = bool(
+        args.segment_by
+        or args.filter_signal_source
+        or args.filter_fill_model
+        or args.filter_entry_band
+    )
+    if attribution_args_used and args.source != "trades":
+        p.error("--segment-by and --filter-* flags require --source trades")
+
+    if args.segment_by:
+        envelope = run_segmented_gate(
+            db_path=args.db,
+            strategy=args.strategy,
+            lookback_days=args.lookback_days,
+            segment_by=args.segment_by,
+            breakeven=args.breakeven,
+            dsr_k=args.dsr_k,
+            filter_signal_source=args.filter_signal_source,
+            filter_fill_model=args.filter_fill_model,
+            filter_entry_band=args.filter_entry_band,
+        )
+        if args.write_receipt:
+            # Segmented receipts: one file per partition, so verify-mode
+            # consumers (predeploy, LIFECYCLE) can target a specific
+            # segment by key. Overall envelope is NOT receipted; a
+            # `trades_signal_bot__signal_source=btc_momentum` style key
+            # maps 1:1 to the `segment_key()` convention.
+            for label, seg_verdict in envelope["segments"].items():
+                receipt_path = write_receipt(seg_verdict, args.write_receipt)
+                print(
+                    f"[MTC gate] receipt written: {receipt_path}",
+                    file=sys.stderr,
+                )
+
+        if args.json:
+            print(json.dumps(envelope, indent=2, default=str))
+        else:
+            print(_format_human_segmented(envelope))
+
+        return 0 if envelope["passed"] else 1
+
     verdict = run_gate(
         source=args.source,
         db_path=args.db,
@@ -577,6 +938,9 @@ def main(argv: list[str] | None = None) -> int:
         strategy=args.strategy,
         breakeven=args.breakeven,
         dsr_k=args.dsr_k,
+        filter_signal_source=args.filter_signal_source,
+        filter_fill_model=args.filter_fill_model,
+        filter_entry_band=args.filter_entry_band,
     )
 
     if args.write_receipt:

@@ -107,11 +107,16 @@ def create_app() -> FastAPI:
     from .routes.portfolio import router as portfolio_router
     from .routes.settings import router as settings_router
     from .routes.api import router as api_router
+    from .routes.debug import router as debug_router  # Phase 4 trade inspector
 
     app.include_router(dashboard_router)
     app.include_router(opportunity_router)
     app.include_router(portfolio_router)
     app.include_router(settings_router)
     app.include_router(api_router, prefix="/api")
+    # debug_router provides BOTH /debug/{trade_id} (HTML) and /api/attribution
+    # (JSON). Mounting without a prefix keeps /debug at the root (matches plan
+    # spec) while the /api/* path inside the router still nests under /api.
+    app.include_router(debug_router)
 
     return app
