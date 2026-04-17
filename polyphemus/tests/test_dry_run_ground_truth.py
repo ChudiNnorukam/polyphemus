@@ -18,12 +18,20 @@ every expected number against the cycle that produced it.
 """
 
 import sqlite3
+import sys
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 
 import pytest
+
+# Ensure the top-level ``polyphemus`` package is importable regardless of
+# pytest's cwd. Mirrors the sys.path insert used in test_evidence_verdict.py.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
 
 from polyphemus.accumulator_metrics import (
     EXIT_REASONS_CAPITAL_COMMITTED,

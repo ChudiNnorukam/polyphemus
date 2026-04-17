@@ -7,7 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKTESTER = ROOT / "tools" / "backtester.py"
-REPORTER = ROOT / "tools" / "dario_btc5m_report.py"
+# dario_btc5m_report.py was removed in commit 5c22201 ("chore: remove
+# stale one-shot tools"). The corresponding generation test is deleted
+# below; the backtester test survives and still uses the seed helpers.
 
 
 def build_signals_db(path: Path) -> None:
@@ -246,74 +248,6 @@ def build_performance_db(path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
-
-
-def test_dario_btc5m_report_generation(tmp_path: Path) -> None:
-    signals_db = tmp_path / "signals.db"
-    performance_db = tmp_path / "performance.db"
-    config_path = tmp_path / ".env"
-    market_context_path = tmp_path / "lagbot_context.json"
-    dario_dir = tmp_path / "dario_output"
-    output_path = tmp_path / "report.md"
-
-    build_signals_db(signals_db)
-    build_performance_db(performance_db)
-    config_path.write_text(
-        "ASSET_FILTER=BTC\nMARKET_WINDOW_SECS=300\nENTRY_MODE=maker\nDRY_RUN=false\n",
-        encoding="utf-8",
-    )
-    market_context_path.write_text(
-        json.dumps(
-            {
-                "updated_at": "2026-03-10T01:00:00Z",
-                "fear_greed": 42,
-                "BTC": {"oi_trend": "rising"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    dario_dir.mkdir()
-    (dario_dir / "dario_test_20260310.md").write_text(
-        "# Test Report\n\n**Verdict:** Hold BTC 5m only.\n",
-        encoding="utf-8",
-    )
-
-    subprocess.run(
-        [
-            sys.executable,
-            str(REPORTER),
-            "--instance",
-            "emmanuel",
-            "--signals-db",
-            str(signals_db),
-            "--performance-db",
-            str(performance_db),
-            "--config-path",
-            str(config_path),
-            "--market-context-path",
-            str(market_context_path),
-            "--dario-dir",
-            str(dario_dir),
-            "--output",
-            str(output_path),
-            "--report-title",
-            "Synthetic BTC 5m Report",
-        ],
-        check=True,
-        cwd=ROOT,
-    )
-
-    report = output_path.read_text(encoding="utf-8")
-    assert "# Synthetic BTC 5m Report" in report
-    assert "Config snapshot hash" in report
-    assert "0.60-0.79" in report
-    assert "not_buy_signal" in report
-    assert "Epochs with no signal" in report
-    assert "ANECDOTAL n=1" in report
-    assert "Runtime Evidence Verdicts" in report
-    assert "negative_expectancy avg_pnl=-0.0300" in report
-    assert "block" in report
-    assert "dario_test_20260310.md" in report
 
 
 def test_backtester_filters_and_json_output(tmp_path: Path) -> None:

@@ -903,13 +903,13 @@ class SignalBot:
                 signal["oi_trend"] = asset_ctx.get("oi_trend")
 
         regime = None
-        if self._regime_detector:
+        if getattr(self, "_regime_detector", None):
             regime = self._regime_detector.get_regime(signal.get("asset", "BTC"))
             signal["regime"] = getattr(regime, "regime", "")
             signal["volatility_1h"] = getattr(regime, "volatility_1h", None)
             signal["trend_1h"] = getattr(regime, "trend_1h", None)
 
-        if self._momentum_feed:
+        if getattr(self, "_momentum_feed", None):
             asset = signal.get("asset", "BTC")
             binance_symbol = ASSET_TO_BINANCE.get(asset)
             if binance_symbol:
@@ -1073,8 +1073,10 @@ class SignalBot:
                 )
 
             result = self._guard.check(signal)
-            # Inject Markov state into signal for downstream Kelly sizing
-            if self._config.markov_kelly_enabled and result.context:
+            # Inject Markov state into signal for downstream Kelly sizing.
+            # getattr keeps minimal test fixtures working — any production
+            # Settings instance has this attribute via config.Settings.
+            if getattr(self._config, 'markov_kelly_enabled', False) and result.context:
                 signal['markov_consec_w'] = result.context.get('markov_consec_w', 0)
                 signal['markov_consec_l'] = result.context.get('markov_consec_l', 0)
             signal_id = -1

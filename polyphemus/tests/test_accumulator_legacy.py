@@ -39,6 +39,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+# Ensure the top-level ``polyphemus`` package is importable regardless of
+# pytest's cwd. Mirrors the sys.path insert used in test_evidence_verdict.py.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+
 def _install_py_clob_stub():
     if "py_clob_client" in sys.modules:
         return
