@@ -303,7 +303,14 @@ class PerformanceDB:
         finally:
             conn.close()
 
-    def force_close_trade(self, slug: str, exit_reason: str, exit_price: float = 0.0) -> bool:
+    def force_close_trade(
+        self,
+        slug: str,
+        exit_reason: str,
+        exit_price: float = 0.0,
+        book_snapshot: Optional[dict] = None,
+        worthless_threshold: float = 0.05,
+    ) -> bool:
         """
         Force-close a trade by slug, bypassing PerformanceTracker lookup.
 
@@ -314,10 +321,33 @@ class PerformanceDB:
             slug: Market slug to close (e.g., 'btc-updown-5m-1770944400')
             exit_reason: Reason for closing (e.g., 'market_resolved', 'ghost_cleanup')
             exit_price: Exit price (default 0.0 for expired markets)
+            book_snapshot: Optional CLOB book dict ({"bids": [{price, size}, ...]}).
+                When exit_price <= 0 and a book is provided, confirm the position
+                is truly worthless (bid_value < worthless_threshold) before writing
+                a total-loss P&L. If the bid side could have absorbed the position,
+                estimate exit via top bid and tag exit_reason with '_unconfirmed'.
+                Omit to preserve legacy total-loss behavior.
+            worthless_threshold: Dollar cutoff below which a position is dust
+                (default $0.05 per Phase 1.5 plan).
 
         Returns:
             True if a trade was updated, False if no matching open trade found
         """
+        effective_exit_price = exit_price
+        effective_reason = exit_reason
+        if exit_price <= 0 and book_snapshot is not None:
+            from .force_close_confirmation import is_position_worthless, top_bid_price
+            worthless, bid_value = is_position_worthless(book_snapshot, worthless_threshold)
+            if not worthless:
+                estimated = top_bid_price(book_snapshot)
+                if estimated > 0:
+                    effective_exit_price = estimated
+                    effective_reason = f"{exit_reason}_unconfirmed"
+                    self.logger.warning(
+                        f"Force-close of {slug} not confirmed dust "
+                        f"(bid value ${bid_value:.2f} >= ${worthless_threshold:.2f}); "
+                        f"estimating exit at top bid ${estimated:.4f} and tagging '_unconfirmed'"
+                    )
         conn = self._get_conn()
         try:
             import time as _time
@@ -343,15 +373,18 @@ class PerformanceDB:
                     END,
                     hold_seconds = CAST(? - entry_time AS INTEGER)
                 WHERE slug = ? AND exit_time IS NULL""",
-                (now, exit_price, exit_reason,
-                 exit_price, exit_price,
-                 exit_price, exit_price,
+                (now, effective_exit_price, effective_reason,
+                 effective_exit_price, effective_exit_price,
+                 effective_exit_price, effective_exit_price,
                  now, slug)
             )
             updated = cursor.rowcount > 0
             conn.commit()
             if updated:
-                self.logger.info(f'Force-closed trade: {slug} | reason={exit_reason} exit_price={exit_price:.4f}')
+                self.logger.info(
+                    f'Force-closed trade: {slug} | reason={effective_reason} '
+                    f'exit_price={effective_exit_price:.4f}'
+                )
             else:
                 self.logger.debug(f'No open trade found for slug: {slug}')
             return updated
