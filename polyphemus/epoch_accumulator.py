@@ -249,6 +249,13 @@ class EpochAccumulator:
                                 outcome=outcome,
                                 market_title=slug,
                                 entry_time=time.time(),
+                                # Phase 2 observability: epoch_accumulator
+                                # always places FAK (taker) orders, so
+                                # entry_mode is fixed. signal_source is the
+                                # denormalized attribution column used by
+                                # vw_strategy_perf / vw_adverse_selection.
+                                entry_mode="fak",
+                                signal_source="epoch_accumulator",
                                 metadata={
                                     "source": "epoch_accumulator",
                                     "asset": asset,

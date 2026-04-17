@@ -1400,12 +1400,25 @@ class SignalBot:
                 _effective_entry_mode = signal.get("entry_mode_override") or self._config.entry_mode
 
                 if _effective_entry_mode == "maker":
+                    # V2 is a decay-over-time model: at elapsed=0, p_fill=0
+                    # (see MakerFillModel.evaluate). The phantom path is a
+                    # one-shot eval, not a poll loop, so we have to pass a
+                    # representative rest duration. Cap at 30s to stay
+                    # pessimistic — a maker order that hasn't filled in 30s
+                    # on Polymarket is usually stale anyway. Use the signal's
+                    # remaining market time as the ceiling so we never
+                    # simulate resting past market close.
+                    try:
+                        _time_left = float(signal.get("time_remaining_secs") or 30.0)
+                    except (TypeError, ValueError):
+                        _time_left = 30.0
+                    _sim_elapsed = min(max(_time_left, 0.0), 30.0)
                     _fr = route_dry_run_fill(
                         our_price=price,
                         best_bid=float(signal.get("best_bid") or 0),
                         best_ask=float(signal.get("best_ask") or 0),
                         qty=size,
-                        elapsed_secs=0.0,
+                        elapsed_secs=_sim_elapsed,
                     )
                     if not _fr.filled:
                         _trace_emit(phantom_id, _ET.SIGNAL_FIRED, {

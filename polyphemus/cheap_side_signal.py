@@ -235,8 +235,16 @@ class CheapSideSignal:
                 if not outcome:
                     continue
 
-                # Book imbalance: always compute for logging; filter only if min_imbalance > 0
+                # Book imbalance + Phase 2 attribution: fetch once, extract
+                # everything downstream needs. best_bid / best_ask / spread and
+                # depth feed the record_entry observability columns so each
+                # cheap_side trade is self-describing in performance.db.
                 book_imbalance = None
+                best_bid: Optional[float] = None
+                best_ask: Optional[float] = None
+                book_spread: Optional[float] = None
+                book_depth_bid: Optional[float] = None
+                book_depth_ask: Optional[float] = None
                 if self._clob:
                     try:
                         book = await asyncio.wait_for(
@@ -250,6 +258,22 @@ class CheapSideSignal:
                             ask_depth = sum(float(a.get("size", 0)) for a in asks[:5])
                             total = bid_depth + ask_depth
                             book_imbalance = bid_depth / total if total > 0 else 0.5
+                            book_depth_bid = bid_depth
+                            book_depth_ask = ask_depth
+                            # Top-of-book prices. Orderbook rows are sorted
+                            # best-first by the Gamma CLOB — index [0] is TOB.
+                            if bids:
+                                try:
+                                    best_bid = float(bids[0].get("price", 0)) or None
+                                except (TypeError, ValueError):
+                                    best_bid = None
+                            if asks:
+                                try:
+                                    best_ask = float(asks[0].get("price", 0)) or None
+                                except (TypeError, ValueError):
+                                    best_ask = None
+                            if best_bid and best_ask and best_ask > best_bid:
+                                book_spread = best_ask - best_bid
                     except Exception:
                         pass  # proceed without imbalance data on error
 
@@ -292,6 +316,15 @@ class CheapSideSignal:
                         "entry_mode_override": "fak",
                         "book_imbalance": book_imbalance,
                         "other_mid": other_mid,
+                        # Phase 2 attribution — populated from the same book
+                        # fetch above. Consumed by signal_bot.record_entry to
+                        # fill book_spread_at_entry / book_depth_*. Optional;
+                        # downstream honors None when the fetch failed.
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "spread": book_spread,
+                        "book_depth_bid": book_depth_bid,
+                        "book_depth_ask": book_depth_ask,
                     }
                     await self._on_signal(signal)
 

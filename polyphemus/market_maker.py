@@ -487,6 +487,12 @@ class MarketMaker:
                     outcome=side_label,
                     market_title=market_info.get("market_title", slug),
                     entry_time=now,
+                    # Phase 2 observability: stale_quote is a taker entry
+                    # on a stale ask, fires a FAK against the book. Keeping
+                    # entry_mode explicit so vw_adverse_selection can group
+                    # stale-quote fills separately from maker / pair_arb.
+                    entry_mode="fak",
+                    signal_source="stale_quote",
                     metadata=metadata,
                 )
                 self._logger.info(f"[STALE] Recorded entry in perf DB: {slug}")
@@ -1174,6 +1180,12 @@ class MarketMaker:
             outcome=outcome,
             market_title=state.get("title", slug),
             entry_time=time.time(),
+            # Phase 2 observability: pair_arb limit fills are maker-only
+            # by design (both legs rest as limit orders below mid). The
+            # attribution pipeline needs entry_mode to separate these
+            # from FAK fills in the same strategy family.
+            entry_mode="maker",
+            signal_source="pair_arb",
             metadata=metadata,
         )
 
