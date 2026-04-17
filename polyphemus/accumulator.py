@@ -91,6 +91,8 @@ class AccumulatorEngine:
         self._orders_filled: int = 0
         self._orders_timed_out: int = 0
         self._best_bid_pair: float = 0.0
+        # Phase 1.4: lazy-init maker fill model for DRY_RUN_V2
+        self._maker_fill_model = None
 
         # Auto-redeemer (injected by signal_bot)
         self._redeemer = None
@@ -743,8 +745,11 @@ class AccumulatorEngine:
         # --- Dual-resting phase: BOTH orders placed, neither filled yet ---
         # _get_resting_order() only returns one side; we need to check both.
         if pos.up_order_id and pos.down_order_id and pos.up_qty == 0 and pos.down_qty == 0:
+            up_bid_v, up_ask_v = self._top_of_book(up_book)
+            down_bid_v, down_ask_v = self._top_of_book(down_book)
             up_result = await self._check_and_handle_order(
-                pos, "UP", pos.up_order_id, pos.up_order_time
+                pos, "UP", pos.up_order_id, pos.up_order_time,
+                best_bid=up_bid_v, best_ask=up_ask_v,
             )
             if up_result == "abandoned":
                 await self._cancel_resting_orders(pos)
@@ -754,7 +759,8 @@ class AccumulatorEngine:
             # Also check DOWN in same cycle (both can fill simultaneously)
             if pos.down_order_id:
                 down_result = await self._check_and_handle_order(
-                    pos, "DOWN", pos.down_order_id, pos.down_order_time
+                    pos, "DOWN", pos.down_order_id, pos.down_order_time,
+                    best_bid=down_bid_v, best_ask=down_ask_v,
                 )
                 if down_result == "abandoned":
                     await self._cancel_resting_orders(pos)
@@ -832,7 +838,14 @@ class AccumulatorEngine:
         # Check for existing resting order
         side, order_id, order_time = self._get_resting_order(pos)
         if order_id:
-            result = await self._check_and_handle_order(pos, side, order_id, order_time)
+            if side == "UP":
+                rest_bid, rest_ask = self._top_of_book(up_book)
+            else:
+                rest_bid, rest_ask = self._top_of_book(down_book)
+            result = await self._check_and_handle_order(
+                pos, side, order_id, order_time,
+                best_bid=rest_bid, best_ask=rest_ask,
+            )
             if result == "filled":
                 # Check if now fully hedged
                 if pos.up_qty > 0 and pos.down_qty > 0:
@@ -1149,6 +1162,8 @@ class AccumulatorEngine:
 
         if qty < 5:
             self._logger.warning(f"Sellback skip: {filled_side} qty={qty:.0f} below minimum")
+            sunk_loss = avg_price * qty + entry_fee_paid
+            self._emit_cycle(pos, -sunk_loss, "sellback_skipped_below_min")
             self._store.remove(token_id)
             self._drop_position(pos, "sellback_skipped_below_min")
             return
@@ -1166,6 +1181,7 @@ class AccumulatorEngine:
             self._consecutive_unwinds += 1
             self._accum_orphaned_count += 1
             self._save_circuit_breaker_state()
+            self._emit_cycle(pos, -forced_loss, "forced_hold_expired")
             self._drop_position(pos, "forced_hold_market_expired")
             self._record_db_trade(pos, -forced_loss, "forced_hold_expired")
             return
@@ -1215,6 +1231,7 @@ class AccumulatorEngine:
                 self._consecutive_unwinds += 1
                 self._accum_orphaned_count += 1
                 self._save_circuit_breaker_state()
+                self._emit_cycle(pos, -forced_loss, "forced_hold_clob_unindexed")
                 self._drop_position(pos, "forced_hold_clob_unindexed")
                 self._record_db_trade(pos, -forced_loss, "forced_hold_clob_unindexed")
                 return
@@ -1290,6 +1307,7 @@ class AccumulatorEngine:
             self._accum_total_pnl -= unwind_loss
             self._accum_unwound_count += 1
             self._save_circuit_breaker_state()
+            self._emit_cycle(pos, -unwind_loss, "sellback")
             self._record_db_trade(pos, -unwind_loss, "sellback")
         else:
             # All sell attempts failed — forced hold (CRITICAL, should be rare)
@@ -1301,6 +1319,7 @@ class AccumulatorEngine:
             )
             self._accum_total_pnl -= forced_hold_loss
             self._consecutive_unwinds += 1
+            self._emit_cycle(pos, -forced_hold_loss, "forced_hold_sell_failed")
             self._record_db_trade(pos, -forced_hold_loss, "forced_hold_sell_failed")
             self._accum_orphaned_count += 1
             self._save_circuit_breaker_state()
@@ -1380,16 +1399,36 @@ class AccumulatorEngine:
 
         pos.pnl = pnl
 
-        # Credit simulated balance in dry-run mode
+        # Reconcile simulated balance in dry-run mode.
+        # Entry cost (qty * avg_price) was already deducted via sim_deduct
+        # in _apply_fill at fill time. Settlement ties balance to pos.pnl:
+        #   (a) credit $1.00/share for winning shares (resolved in our favor);
+        #   (b) deduct total fees paid across both legs — fees are tracked on
+        #       the position but NOT subtracted at fill time, so settlement is
+        #       the single point where they hit the sim balance;
+        #   (c) losing shares get zero credit — their entry cost stays lost.
+        # After this block: sim_balance delta equals pos.pnl, matching live.
         if self._dry_run and pnl is not None:
             if is_hedged:
-                # Hedged: one side pays $1.00 per matched share
-                self._balance.sim_credit(min(pos.up_qty, pos.down_qty) * 1.00)
+                # Matched pair pays $1.00 per share (one side wins, the other
+                # resolves to $0). Unmatched excess (imbalance) gets no credit;
+                # its entry cost stays as a loss, which pnl already reflects.
+                matched = min(pos.up_qty, pos.down_qty)
+                self._balance.sim_credit(matched * 1.00)
             elif is_orphaned:
                 qty = pos.up_qty if pos.up_qty > 0 else pos.down_qty
-                avg = pos.up_avg_price if pos.up_qty > 0 else pos.down_avg_price
                 if pnl > 0:
-                    self._balance.sim_credit(qty * 1.00)  # Won: full payout
+                    # Winning orphan: resolved in our favor, $1.00/share.
+                    self._balance.sim_credit(qty * 1.00)
+                else:
+                    # Losing orphan: resolved against us, $0.00/share. No
+                    # credit needed; the entry cost was already deducted at
+                    # fill time and stays lost. Explicit no-op so the branch
+                    # reads as intentional rather than a silent bug.
+                    pass
+            total_fees = pos.up_fee_paid + pos.down_fee_paid
+            if total_fees > 0:
+                self._balance.sim_deduct(total_fees)
 
         # Record settlement for dashboard
         if pnl is not None:
@@ -1417,25 +1456,9 @@ class AccumulatorEngine:
             self._save_circuit_breaker_state()
 
         # Record cycle to metrics DB for adaptive tuner
-        if self._metrics and pnl is not None:
-            from .accumulator_metrics import CycleRecord
-            entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 60
-            self._metrics.record_cycle(CycleRecord(
-                slug=pos.slug,
-                started_at=entry_ts,
-                ended_at=time.time(),
-                up_qty=pos.up_qty,
-                down_qty=pos.down_qty,
-                up_avg_price=pos.up_avg_price,
-                down_avg_price=pos.down_avg_price,
-                pair_cost=pos.pair_cost,
-                pnl=pnl,
-                exit_reason=pos.exit_reason or "unknown",
-                reprices_used=pos.reprice_count,
-                fill_time_secs=time.time() - entry_ts,
-                hedge_time_secs=time.time() - entry_ts if is_hedged else 0.0,
-                spread_at_entry=self._best_bid_pair,
-            ))
+        if pnl is not None:
+            self._emit_cycle(pos, pnl, pos.exit_reason or "unknown",
+                             hedge_time_if_hedged=is_hedged)
 
         # === AUTO-REDEMPTION: queue winning tokens for on-chain redemption ===
         if self._redeemer and pos.exit_reason == "hedged_settlement" and pos.condition_id:
@@ -1491,6 +1514,49 @@ class AccumulatorEngine:
             self._logger.info(f"Position removed: {pos.slug} | reason={reason}")
         self._positions.pop(pos.slug, None)
 
+    def _emit_cycle(
+        self,
+        pos: AccumulatorPosition,
+        pnl: float,
+        exit_reason: str,
+        *,
+        hedge_time_if_hedged: bool = False,
+    ) -> None:
+        """Write one CycleRecord to accum_metrics.db for adaptive tuner / MTC gate.
+
+        Called from every terminal path (hedged settlement, orphaned settlement,
+        sellback, forced-hold). Before this existed, sellback cycles were silently
+        dropped — the Apr 10 2026 bug class.
+        """
+        if not self._metrics or pnl is None:
+            return
+        from .accumulator_metrics import CycleRecord
+        from .models import parse_asset_from_slug
+        entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 60
+        ended = time.time()
+        try:
+            self._metrics.record_cycle(CycleRecord(
+                slug=pos.slug,
+                started_at=entry_ts,
+                ended_at=ended,
+                up_qty=pos.up_qty,
+                down_qty=pos.down_qty,
+                up_avg_price=pos.up_avg_price,
+                down_avg_price=pos.down_avg_price,
+                pair_cost=pos.pair_cost,
+                pnl=pnl,
+                exit_reason=exit_reason,
+                reprices_used=pos.reprice_count,
+                fill_time_secs=max(0.0, ended - entry_ts),
+                hedge_time_secs=(ended - entry_ts) if hedge_time_if_hedged else 0.0,
+                spread_at_entry=self._best_bid_pair,
+                is_dry_run=bool(self._dry_run),
+                asset=parse_asset_from_slug(pos.slug),
+                window_duration_secs=int(pos.window_secs or 0),
+            ))
+        except Exception as e:
+            self._logger.warning(f"emit_cycle failed for {pos.slug} ({exit_reason}): {e}")
+
     def _record_db_trade(self, pos: AccumulatorPosition, pnl: float, exit_reason: str):
         """Record a completed pair arb cycle (entry+exit) to performance.db."""
         if not self._perf_db or pnl is None:
@@ -1512,6 +1578,7 @@ class AccumulatorEngine:
                 outcome="PAIR" if pos.is_fully_hedged else "ORPHAN",
                 market_title=pos.slug,
                 strategy="pair_arb",
+                is_dry_run=bool(self._dry_run),
                 metadata={
                     "up_price": round(pos.up_avg_price, 4),
                     "down_price": round(pos.down_avg_price, 4),
@@ -1747,6 +1814,19 @@ class AccumulatorEngine:
             )
             self._last_eval_log_ts = now
 
+    def _top_of_book(self, book: dict) -> tuple[float, float]:
+        """Return (best_bid, best_ask) from a CLOB order-book snapshot.
+
+        Empty sides return 0.0 — the maker fill model treats zero as invalid
+        (crossed_book) and reports no-fill. Keeps the dry-run path safe when
+        books momentarily disappear.
+        """
+        bids = book.get("bids", []) if book else []
+        asks = book.get("asks", []) if book else []
+        best_bid = float(bids[0]["price"]) if bids else 0.0
+        best_ask = float(asks[0]["price"]) if asks else 0.0
+        return best_bid, best_ask
+
     def _get_resting_order(self, pos: AccumulatorPosition):
         """Return (side, order_id, order_time) for any resting order."""
         if pos.up_order_id:
@@ -1784,14 +1864,52 @@ class AccumulatorEngine:
         pos.reprice_count = max(pos.up_reprice_count, pos.down_reprice_count)
 
     async def _check_and_handle_order(
-        self, pos: AccumulatorPosition, side: str, order_id: str, order_time: Optional[datetime]
+        self,
+        pos: AccumulatorPosition,
+        side: str,
+        order_id: str,
+        order_time: Optional[datetime],
+        *,
+        best_bid: float = 0.0,
+        best_ask: float = 0.0,
     ) -> str:
         """Check resting order status and handle appropriately.
 
         Returns: "filled", "waiting", "repriced", "abandoned", "error"
+
+        `best_bid` and `best_ask` are the top-of-book for the given `side`.
+        They're read by the Phase 1.4 probabilistic maker fill model under
+        POLYPHEMUS_DRY_RUN_V2. When the flag is off (default), they are
+        ignored and the legacy taker-optimistic "always fill" path runs.
         """
         price = self._side_price(pos, side)
         if self._dry_run:
+            from .dry_run_fill_model import dry_run_v2_enabled
+            if dry_run_v2_enabled() and best_bid > 0 and best_ask > 0:
+                elapsed = 0.0
+                if order_time:
+                    elapsed = (datetime.now(tz=timezone.utc) - order_time).total_seconds()
+                if self._maker_fill_model is None:
+                    from .dry_run_fill_model import MakerFillModel
+                    self._maker_fill_model = MakerFillModel()
+                decision = self._maker_fill_model.evaluate(
+                    our_price=price,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                    qty=pos.target_shares,
+                    elapsed_secs=elapsed,
+                )
+                if decision.filled:
+                    self._apply_fill(pos, side, decision.fill_price, decision.fill_qty, order_id)
+                    self._clear_order(pos, side)
+                    self._orders_filled += 1
+                    return "filled"
+                self._logger.debug(
+                    f"[DRY RUN V2] maker miss {pos.slug} {side} | "
+                    f"price=${price:.3f} bid=${best_bid:.3f} ask=${best_ask:.3f} "
+                    f"elapsed={elapsed:.1f}s reason={decision.reason}"
+                )
+                return "waiting"
             self._apply_fill(pos, side, price, pos.target_shares, order_id)
             self._clear_order(pos, side)
             self._orders_filled += 1
