@@ -1531,6 +1531,7 @@ class AccumulatorEngine:
         if not self._metrics or pnl is None:
             return
         from .accumulator_metrics import CycleRecord
+        from .models import parse_asset_from_slug
         entry_ts = pos.entry_time.timestamp() if pos.entry_time else time.time() - 60
         ended = time.time()
         try:
@@ -1550,6 +1551,8 @@ class AccumulatorEngine:
                 hedge_time_secs=(ended - entry_ts) if hedge_time_if_hedged else 0.0,
                 spread_at_entry=self._best_bid_pair,
                 is_dry_run=bool(self._dry_run),
+                asset=parse_asset_from_slug(pos.slug),
+                window_duration_secs=int(pos.window_secs or 0),
             ))
         except Exception as e:
             self._logger.warning(f"emit_cycle failed for {pos.slug} ({exit_reason}): {e}")

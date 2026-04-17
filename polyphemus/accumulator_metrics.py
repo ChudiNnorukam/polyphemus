@@ -48,6 +48,8 @@ class CycleRecord:
     hedge_time_secs: float     # time to fill second leg (0 if orphaned)
     spread_at_entry: float     # up_bid + down_bid when scanning
     is_dry_run: bool = False   # True when cycle ran under DRY_RUN/ACCUM_DRY_RUN; required for live/dry segregation
+    asset: str = ""            # e.g. "btc", "eth", "houston" — derived from slug at _emit_cycle
+    window_duration_secs: int = 0  # market window length (300 = 5m, 900 = 15m, ...) for per-window analysis
 
 
 @dataclass
@@ -105,12 +107,36 @@ class AccumulatorMetrics:
                 fill_time_secs REAL,
                 hedge_time_secs REAL,
                 spread_at_entry REAL,
-                is_dry_run INTEGER NOT NULL DEFAULT 0
+                is_dry_run INTEGER NOT NULL DEFAULT 0,
+                asset TEXT NOT NULL DEFAULT '',
+                window_duration_secs INTEGER NOT NULL DEFAULT 0
             )
         """)
         self._migrate_is_dry_run(conn)
+        self._migrate_segmentation(conn)
         conn.commit()
         conn.close()
+
+    def _migrate_segmentation(self, conn: sqlite3.Connection) -> None:
+        """Add asset + window_duration_secs columns for per-asset / per-window analysis.
+
+        Legacy rows backfill to empty asset and 0 duration; callers that query
+        these cycles for segmented rates must treat those as an "unsegmented"
+        bucket rather than aggregating them with real assets.
+        """
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cycles)").fetchall()}
+        if "asset" not in cols:
+            try:
+                conn.execute("ALTER TABLE cycles ADD COLUMN asset TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError as e:
+                self._logger.error(f"asset column migration failed: {e}")
+        if "window_duration_secs" not in cols:
+            try:
+                conn.execute(
+                    "ALTER TABLE cycles ADD COLUMN window_duration_secs INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError as e:
+                self._logger.error(f"window_duration_secs column migration failed: {e}")
 
     def _migrate_is_dry_run(self, conn: sqlite3.Connection) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(cycles)").fetchall()}
@@ -146,8 +172,9 @@ class AccumulatorMetrics:
                    (slug, started_at, ended_at, up_qty, down_qty,
                     up_avg_price, down_avg_price, pair_cost, pnl,
                     exit_reason, reprices_used, fill_time_secs,
-                    hedge_time_secs, spread_at_entry, is_dry_run)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    hedge_time_secs, spread_at_entry, is_dry_run,
+                    asset, window_duration_secs)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     cycle.slug, cycle.started_at, cycle.ended_at,
                     cycle.up_qty, cycle.down_qty,
@@ -156,6 +183,7 @@ class AccumulatorMetrics:
                     cycle.reprices_used, cycle.fill_time_secs,
                     cycle.hedge_time_secs, cycle.spread_at_entry,
                     1 if cycle.is_dry_run else 0,
+                    cycle.asset, cycle.window_duration_secs,
                 ),
             )
             conn.commit()

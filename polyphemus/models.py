@@ -320,3 +320,25 @@ def parse_window_from_slug(slug: str) -> int:
         if part.endswith('m') and part[:-1].isdigit():
             return int(part[:-1]) * 60
     return 900
+
+
+def parse_asset_from_slug(slug: str) -> str:
+    """Parse asset identifier from market slug for per-asset segmentation.
+
+    e.g., "btc-updown-5m-1770937500" -> "btc"
+          "eth-updown-15m-1770937200" -> "eth"
+          "highest-temperature-in-houston-on-april-10-2026" -> "houston"
+    Returns empty string if slug is empty or unparseable; caller should treat
+    that as an "unsegmented" bucket rather than bundling it with real assets.
+    """
+    if not slug:
+        return ""
+    parts = slug.split('-')
+    if (
+        len(parts) >= 4
+        and parts[0] == "highest"
+        and parts[1] == "temperature"
+        and parts[2] == "in"
+    ):
+        return parts[3]
+    return parts[0] if parts[0] else ""
