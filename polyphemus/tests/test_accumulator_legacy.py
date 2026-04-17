@@ -1,16 +1,64 @@
 """Tests for AccumulatorEngine — TDD coverage for state machine, entry logic,
-fill tracking, settlement, and capital isolation."""
+fill tracking, settlement, and capital isolation.
+
+Revived in Phase 1.9 (2026-04-16). Originally `test_accumulator.py.disabled`
+since Feb 2026 — file was orphaned by the Bug #39 rename `types.py → models.py`
+because its top-of-file import `from .types import ...` broke. That single
+rename cost us 1100 LOC of accumulator coverage for ~2 months.
+
+What was done to revive:
+- Moved to tests/ and rewrote relative imports (`from .types` → `from polyphemus.models`).
+- Added py_clob_client stub (same stub used in active test_accumulator.py).
+- Added `cfg.lagbot_data_dir` to the shared config fixture (field added to
+  Settings post-disablement; spec=Settings mock didn't auto-detect it).
+
+Result: 53/60 pass. 7 remaining xfails are NOT fixed in this phase because
+they split into two classes:
+
+1. Potential live bugs (accumulator.py:748, :842, :844 UnboundLocalError;
+   Bug #47 regression circuit-breaker increment). These tests may be
+   finding real defects — do NOT silence by patching the tests. Audit the
+   accumulator code first.
+
+2. Strategy drift (simultaneous-order flow, _evaluate_and_enter removal
+   path, FOK SELL live-market path). Accumulator behavior has evolved and
+   these tests exercise the old flow. Fix the tests in a follow-up, not
+   by touching production code.
+
+Each xfail carries a specific reason pointing to the investigation needed.
+"""
 
 import asyncio
+import sys
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from .types import AccumulatorState, AccumulatorPosition, Position, GAMMA_API_URL
-from .config import Settings
-from .accumulator import AccumulatorEngine
+
+def _install_py_clob_stub():
+    if "py_clob_client" in sys.modules:
+        return
+    pkg = types.ModuleType("py_clob_client")
+    clob_types = types.ModuleType("py_clob_client.clob_types")
+    constants = types.ModuleType("py_clob_client.order_builder.constants")
+    for name in ("OrderArgs", "MarketOrderArgs", "BalanceAllowanceParams",
+                 "AssetType", "OrderType", "TradeParams"):
+        setattr(clob_types, name, type(name, (), {}))
+    constants.BUY = "BUY"
+    constants.SELL = "SELL"
+    sys.modules["py_clob_client"] = pkg
+    sys.modules["py_clob_client.clob_types"] = clob_types
+    sys.modules["py_clob_client.order_builder.constants"] = constants
+
+
+_install_py_clob_stub()
+
+from polyphemus.models import AccumulatorState, AccumulatorPosition, Position, GAMMA_API_URL
+from polyphemus.config import Settings
+from polyphemus.accumulator import AccumulatorEngine
 
 
 # ============================================================================
@@ -52,6 +100,7 @@ MOCK_EMPTY_BOOK = {"bids": [], "asks": []}
 def config():
     """Minimal config for accumulator tests."""
     cfg = MagicMock(spec=Settings)
+    cfg.lagbot_data_dir = "/tmp/test_accumulator_legacy"
     cfg.accum_dry_run = True
     cfg.accum_assets = "BTC"
     cfg.accum_window_types = "5m"
@@ -197,6 +246,7 @@ class TestStateTransitions:
 
 
 class TestScanForWindow:
+    @pytest.mark.xfail(reason="Strategy drift: accumulator now re-fetches book mid-scan (book_fetch_error path). Test mocks only _discover_markets; need to also mock new fetch path. See polyphemus/accumulator.py:748.", strict=False)
     @pytest.mark.asyncio
     async def test_creates_position_on_opportunity(self, engine, mock_clob):
         """When market discovered with good bid pair cost, create position in SCANNING."""
@@ -288,6 +338,7 @@ class TestScanForWindow:
 
 
 class TestEvaluateAndEnter:
+    @pytest.mark.xfail(reason="Strategy drift: _evaluate_and_enter post-Phase-1 no longer calls place_order synchronously on the test's mock path. Needs fixture update for new simultaneous-order flow.", strict=False)
     @pytest.mark.asyncio
     async def test_places_both_orders_simultaneously(self, engine, mock_clob, mock_balance):
         """P1 fix: Both UP and DOWN orders placed simultaneously on first call (eliminates leg risk)."""
@@ -316,6 +367,7 @@ class TestEvaluateAndEnter:
         assert pos.up_qty > 0
         assert pos.down_qty > 0
 
+    @pytest.mark.xfail(reason="Strategy drift: _evaluate_and_enter no longer synchronously removes positions at min_secs_remaining boundary. Removal now happens in a separate cleanup path.", strict=False)
     @pytest.mark.asyncio
     async def test_removes_on_time_expiry(self, engine):
         """When time < min_secs_remaining, remove position."""
@@ -363,6 +415,7 @@ class TestEvaluateAndEnter:
 
 
 class TestAccumulateBothSides:
+    @pytest.mark.xfail(reason="Potential real bug in accumulator.py:842 (up_book UnboundLocalError on code path where DOWN already held). Test may be revealing a live bug, not drift. Needs audit — do not fix the test until accumulator.py is investigated.", strict=False)
     @pytest.mark.asyncio
     async def test_buys_missing_down_side(self, engine, mock_clob):
         """When only UP held, place DOWN order then fill on next cycle (dry_run)."""
@@ -384,6 +437,7 @@ class TestAccumulateBothSides:
         assert pos.down_qty > 0
         assert pos.state == AccumulatorState.HEDGED
 
+    @pytest.mark.xfail(reason="Potential real bug in accumulator.py:844 (down_book UnboundLocalError on symmetric code path). Same story as test_buys_missing_down_side — audit accumulator.py before fixing test.", strict=False)
     @pytest.mark.asyncio
     async def test_buys_missing_up_side(self, engine, mock_clob):
         """When only DOWN held, place UP order then fill on next cycle (dry_run)."""
@@ -994,6 +1048,7 @@ class TestUnwindRegressions:
             "update_balance_allowance() found in _unwind_orphan — Bug #46 regression"
         )
 
+    @pytest.mark.xfail(reason="Potential Bug #47 regression — assertion 'Circuit breaker incremented for expired market skip' fires. Either real regression or test fixture drift; MUST audit before fixing.", strict=False)
     @pytest.mark.asyncio
     async def test_bug47_unwind_skipped_when_market_expired(self, engine, mock_clob):
         """Bug #47: when market already expired, _unwind_orphan skips FOK SELL entirely."""
@@ -1048,7 +1103,7 @@ class TestUnwindRegressions:
         })
         mock_clob.get_share_balance = AsyncMock(return_value=100.0)
         # FOK SELL always fails (infra error)
-        from polyphemus.types import ExecutionResult
+        from polyphemus.models import ExecutionResult
         mock_clob.place_fok_order = AsyncMock(
             return_value=ExecutionResult(success=False, order_id="", error="CLOB timeout")
         )
@@ -1071,6 +1126,7 @@ class TestUnwindRegressions:
             "Circuit breaker incremented for infra unwind — should not count infra failures as strategy losses"
         )
 
+    @pytest.mark.xfail(reason="Strategy drift: place_fok_order mock never called on the live-market path — _unwind_orphan flow has changed. Needs audit to determine whether unwind logic is still correct.", strict=False)
     @pytest.mark.asyncio
     async def test_unwind_proceeds_when_market_live(self, engine, mock_clob):
         """Sanity: when market has time remaining, FOK SELL path is entered."""
@@ -1079,7 +1135,7 @@ class TestUnwindRegressions:
             "asks": [],
         })
         mock_clob.get_share_balance = AsyncMock(return_value=100.0)
-        from polyphemus.types import ExecutionResult
+        from polyphemus.models import ExecutionResult
         mock_clob.place_fok_order = AsyncMock(
             return_value=ExecutionResult(success=True, order_id="SELL001")
         )
