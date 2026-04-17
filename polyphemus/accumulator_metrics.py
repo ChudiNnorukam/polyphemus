@@ -12,6 +12,24 @@ from typing import Optional
 from .config import setup_logger
 
 
+EXIT_REASONS_HEDGED = frozenset({"hedged_settlement"})
+EXIT_REASONS_ORPHANED = frozenset({"orphaned_settlement"})
+EXIT_REASONS_SELLBACK = frozenset({"sellback"})
+EXIT_REASONS_FORCED_HOLD = frozenset({
+    "forced_hold_expired",
+    "forced_hold_clob_unindexed",
+    "forced_hold_sell_failed",
+    "sellback_skipped_below_min",
+})
+EXIT_REASONS_NEUTRAL = frozenset({"empty_settlement", "unknown"})
+EXIT_REASONS_CAPITAL_COMMITTED = (
+    EXIT_REASONS_HEDGED
+    | EXIT_REASONS_ORPHANED
+    | EXIT_REASONS_SELLBACK
+    | EXIT_REASONS_FORCED_HOLD
+)
+
+
 @dataclass
 class CycleRecord:
     """One complete accumulator cycle (entry → settlement/unwind)."""
@@ -34,19 +52,28 @@ class CycleRecord:
 
 @dataclass
 class MetricsSnapshot:
-    """Aggregated metrics over a time window."""
-    total_cycles: int
-    hedged_count: int
-    orphan_count: int
-    unwind_count: int
-    hedge_rate: float          # hedged / total (0-1)
-    orphan_rate: float         # (orphan + unwind) / total
-    avg_pair_cost: float
-    avg_pnl_per_hedged: float
-    avg_fill_time: float
-    avg_reprices: float
-    total_pnl: float
-    orphan_loss_total: float
+    """Aggregated metrics over a time window.
+
+    Counts: every row in the query window, split by exit category.
+    Rates: use `capital_committed_cycles` (excludes empty/unknown) as denominator
+    so idle scans do not dilute the signal the adaptive tuner acts on.
+    """
+    total_cycles: int              # raw row count; includes empty_settlement
+    hedged_count: int              # hedged_settlement
+    orphan_count: int              # orphaned_settlement (resolved orphan)
+    unwind_count: int              # sellback (the standard unwind path)
+    sellback_count: int            # alias of unwind_count for call-site clarity
+    forced_hold_count: int         # forced_hold_* + sellback_skipped_below_min
+    empty_count: int               # empty_settlement (no fills)
+    capital_committed_cycles: int  # hedged + orphan + sellback + forced_hold
+    hedge_rate: float              # hedged / capital_committed_cycles
+    orphan_rate: float             # (orphan + sellback + forced_hold) / capital_committed_cycles
+    avg_pair_cost: float           # mean pair_cost of hedged rows
+    avg_pnl_per_hedged: float      # mean pnl of hedged rows
+    avg_fill_time: float           # mean over all rows
+    avg_reprices: float            # mean over all rows
+    total_pnl: float               # sum over all rows
+    orphan_loss_total: float       # sum pnl of every non-hedged non-neutral row
 
 
 class AccumulatorMetrics:
@@ -138,16 +165,37 @@ class AccumulatorMetrics:
         except Exception as e:
             self._logger.error(f"Failed to record cycle: {e}")
 
-    def get_stats(self, window_mins: int = 60) -> MetricsSnapshot:
-        """Get aggregated metrics for the last N minutes."""
+    def get_stats(
+        self,
+        window_mins: int = 60,
+        dry_run_only: Optional[bool] = None,
+    ) -> MetricsSnapshot:
+        """Get aggregated metrics for the last N minutes.
+
+        dry_run_only:
+            None (default) — all rows
+            True — only is_dry_run=1 rows
+            False — only is_dry_run=0 rows (live)
+
+        Rates (hedge_rate, orphan_rate) use capital_committed_cycles as the
+        denominator. Before Phase 1.1, sellback and forced_hold rows were
+        silently dropped before they reached this function; the Apr 10 bug
+        was the result. Now that every terminal path writes a row, the
+        denominator here is the full capital-committed count, and the rates
+        reflect reality.
+        """
         cutoff = time.time() - (window_mins * 60)
+        query = "SELECT * FROM cycles WHERE ended_at > ?"
+        params: tuple = (cutoff,)
+        if dry_run_only is True:
+            query += " AND is_dry_run = 1"
+        elif dry_run_only is False:
+            query += " AND is_dry_run = 0"
+        query += " ORDER BY ended_at DESC"
         try:
             conn = sqlite3.connect(self._db_path)
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM cycles WHERE ended_at > ? ORDER BY ended_at DESC",
-                (cutoff,),
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
             conn.close()
         except Exception as e:
             self._logger.error(f"Failed to query metrics: {e}")
@@ -157,35 +205,54 @@ class AccumulatorMetrics:
             return self._empty_snapshot()
 
         total = len(rows)
-        hedged = sum(1 for r in rows if r["exit_reason"] == "hedged_settlement")
-        orphaned = sum(1 for r in rows if r["exit_reason"] == "orphaned_settlement")
-        unwound = sum(1 for r in rows if r["exit_reason"] == "unwound")
+        hedged_rows = [r for r in rows if r["exit_reason"] in EXIT_REASONS_HEDGED]
+        orphaned_rows = [r for r in rows if r["exit_reason"] in EXIT_REASONS_ORPHANED]
+        sellback_rows = [r for r in rows if r["exit_reason"] in EXIT_REASONS_SELLBACK]
+        forced_hold_rows = [r for r in rows if r["exit_reason"] in EXIT_REASONS_FORCED_HOLD]
+        empty_rows = [r for r in rows if r["exit_reason"] in EXIT_REASONS_NEUTRAL]
 
-        hedged_rows = [r for r in rows if r["exit_reason"] == "hedged_settlement"]
-        loss_rows = [r for r in rows if r["exit_reason"] in ("orphaned_settlement", "unwound")]
+        capital_rows = [
+            r for r in rows if r["exit_reason"] in EXIT_REASONS_CAPITAL_COMMITTED
+        ]
+        capital_total = len(capital_rows)
+        orphaned_any_count = (
+            len(orphaned_rows) + len(sellback_rows) + len(forced_hold_rows)
+        )
+        non_hedged_capital_rows = [
+            r for r in capital_rows if r["exit_reason"] not in EXIT_REASONS_HEDGED
+        ]
 
         return MetricsSnapshot(
             total_cycles=total,
-            hedged_count=hedged,
-            orphan_count=orphaned,
-            unwind_count=unwound,
-            hedge_rate=hedged / total if total > 0 else 0.0,
-            orphan_rate=(orphaned + unwound) / total if total > 0 else 0.0,
+            hedged_count=len(hedged_rows),
+            orphan_count=len(orphaned_rows),
+            unwind_count=len(sellback_rows),
+            sellback_count=len(sellback_rows),
+            forced_hold_count=len(forced_hold_rows),
+            empty_count=len(empty_rows),
+            capital_committed_cycles=capital_total,
+            hedge_rate=len(hedged_rows) / capital_total if capital_total > 0 else 0.0,
+            orphan_rate=orphaned_any_count / capital_total if capital_total > 0 else 0.0,
             avg_pair_cost=sum(r["pair_cost"] for r in hedged_rows) / len(hedged_rows) if hedged_rows else 0.0,
             avg_pnl_per_hedged=sum(r["pnl"] for r in hedged_rows) / len(hedged_rows) if hedged_rows else 0.0,
             avg_fill_time=sum(r["fill_time_secs"] for r in rows) / total,
             avg_reprices=sum(r["reprices_used"] for r in rows) / total,
             total_pnl=sum(r["pnl"] for r in rows),
-            orphan_loss_total=sum(r["pnl"] for r in loss_rows),
+            orphan_loss_total=sum(r["pnl"] for r in non_hedged_capital_rows),
         )
 
-    def get_all_stats(self) -> MetricsSnapshot:
+    def get_all_stats(
+        self,
+        dry_run_only: Optional[bool] = None,
+    ) -> MetricsSnapshot:
         """Get all-time aggregated metrics."""
-        return self.get_stats(window_mins=525600)  # 1 year
+        return self.get_stats(window_mins=525600, dry_run_only=dry_run_only)
 
     def _empty_snapshot(self) -> MetricsSnapshot:
         return MetricsSnapshot(
             total_cycles=0, hedged_count=0, orphan_count=0, unwind_count=0,
+            sellback_count=0, forced_hold_count=0, empty_count=0,
+            capital_committed_cycles=0,
             hedge_rate=0.0, orphan_rate=0.0, avg_pair_cost=0.0,
             avg_pnl_per_hedged=0.0, avg_fill_time=0.0, avg_reprices=0.0,
             total_pnl=0.0, orphan_loss_total=0.0,
