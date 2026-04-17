@@ -24,11 +24,12 @@ class CycleRecord:
     down_avg_price: float
     pair_cost: float
     pnl: float
-    exit_reason: str           # hedged_settlement, orphaned_settlement, unwound
+    exit_reason: str           # hedged_settlement, orphaned_settlement, unwound, sellback
     reprices_used: int
     fill_time_secs: float      # time to fill first leg
     hedge_time_secs: float     # time to fill second leg (0 if orphaned)
     spread_at_entry: float     # up_bid + down_bid when scanning
+    is_dry_run: bool = False   # True when cycle ran under DRY_RUN/ACCUM_DRY_RUN; required for live/dry segregation
 
 
 @dataclass
@@ -76,11 +77,38 @@ class AccumulatorMetrics:
                 reprices_used INTEGER,
                 fill_time_secs REAL,
                 hedge_time_secs REAL,
-                spread_at_entry REAL
+                spread_at_entry REAL,
+                is_dry_run INTEGER NOT NULL DEFAULT 0
             )
         """)
+        self._migrate_is_dry_run(conn)
         conn.commit()
         conn.close()
+
+    def _migrate_is_dry_run(self, conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cycles)").fetchall()}
+        if "is_dry_run" in cols:
+            pre_existing = conn.execute(
+                "SELECT COUNT(*) FROM cycles WHERE is_dry_run IS NULL"
+            ).fetchone()[0]
+            if pre_existing > 0:
+                conn.execute("UPDATE cycles SET is_dry_run = 1 WHERE is_dry_run IS NULL")
+                self._logger.warning(
+                    f"Migration: backfilled {pre_existing} cycles to is_dry_run=1. "
+                    "Historical cycles assumed dry-run; update manually if any live cycles pre-migration."
+                )
+            return
+        try:
+            conn.execute("ALTER TABLE cycles ADD COLUMN is_dry_run INTEGER NOT NULL DEFAULT 0")
+            pre_existing = conn.execute("SELECT COUNT(*) FROM cycles").fetchone()[0]
+            if pre_existing > 0:
+                conn.execute("UPDATE cycles SET is_dry_run = 1")
+                self._logger.warning(
+                    f"Migration: added is_dry_run column and backfilled {pre_existing} cycles to 1. "
+                    "Historical cycles assumed dry-run; update manually if any live cycles pre-migration."
+                )
+        except sqlite3.OperationalError as e:
+            self._logger.error(f"is_dry_run migration failed: {e}")
 
     def record_cycle(self, cycle: CycleRecord):
         """Record a completed accumulator cycle."""
@@ -91,8 +119,8 @@ class AccumulatorMetrics:
                    (slug, started_at, ended_at, up_qty, down_qty,
                     up_avg_price, down_avg_price, pair_cost, pnl,
                     exit_reason, reprices_used, fill_time_secs,
-                    hedge_time_secs, spread_at_entry)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    hedge_time_secs, spread_at_entry, is_dry_run)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     cycle.slug, cycle.started_at, cycle.ended_at,
                     cycle.up_qty, cycle.down_qty,
@@ -100,11 +128,13 @@ class AccumulatorMetrics:
                     cycle.pair_cost, cycle.pnl, cycle.exit_reason,
                     cycle.reprices_used, cycle.fill_time_secs,
                     cycle.hedge_time_secs, cycle.spread_at_entry,
+                    1 if cycle.is_dry_run else 0,
                 ),
             )
             conn.commit()
             conn.close()
-            self._logger.debug(f"Recorded cycle: {cycle.slug} | {cycle.exit_reason} | pnl=${cycle.pnl:.2f}")
+            tag = " [DRY]" if cycle.is_dry_run else ""
+            self._logger.debug(f"Recorded cycle{tag}: {cycle.slug} | {cycle.exit_reason} | pnl=${cycle.pnl:.2f}")
         except Exception as e:
             self._logger.error(f"Failed to record cycle: {e}")
 

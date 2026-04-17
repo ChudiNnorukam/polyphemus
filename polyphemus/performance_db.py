@@ -121,6 +121,9 @@ class PerformanceDB:
                 ('check_window_secs', 'INTEGER'),
             ]
 
+            cursor.execute('PRAGMA table_info(trades)')
+            pre_migration_cols = {row[1] for row in cursor.fetchall()}
+
             for col_name, col_def in columns_to_add:
                 try:
                     cursor.execute(f'ALTER TABLE trades ADD COLUMN {col_name} {col_def}')
@@ -128,6 +131,24 @@ class PerformanceDB:
                 except sqlite3.OperationalError:
                     # Column already exists, skip
                     pass
+
+            # is_dry_run: added 2026-04-16 for dry/live segregation. Separate from columns_to_add
+            # because it requires explicit backfill of existing rows (historical data is dry-run).
+            if 'is_dry_run' not in pre_migration_cols:
+                try:
+                    cursor.execute('ALTER TABLE trades ADD COLUMN is_dry_run INTEGER DEFAULT 0')
+                    cursor.execute('SELECT COUNT(*) FROM trades')
+                    pre_existing = cursor.fetchone()[0]
+                    if pre_existing > 0:
+                        cursor.execute('UPDATE trades SET is_dry_run = 1')
+                        self.logger.warning(
+                            f'Migration: added is_dry_run column and backfilled {pre_existing} trades to 1. '
+                            'Historical trades assumed dry-run; update manually if any live trades pre-migration.'
+                        )
+                    else:
+                        self.logger.info('Migration: added is_dry_run column (no pre-existing rows)')
+                except sqlite3.OperationalError as e:
+                    self.logger.error(f'is_dry_run migration failed: {e}')
 
             conn.commit()
             self.logger.info('Database schema initialized')
@@ -433,9 +454,14 @@ class PerformanceDB:
         finally:
             conn.close()
 
-    def get_stats(self) -> Dict:
+    def get_stats(self, dry_run_only: Optional[bool] = None) -> Dict:
         """
         Compute comprehensive trade statistics.
+
+        Args:
+            dry_run_only: If True, include only dry-run trades (is_dry_run=1).
+                If False, include only live trades (is_dry_run=0).
+                If None (default), include all trades regardless of flag.
 
         Returns:
             Dictionary with keys:
@@ -450,6 +476,12 @@ class PerformanceDB:
             - resolution_wr: Win rate for market_resolved exits (0.0 - 1.0)
         """
         pnl_col = self._detect_pnl_column()
+        if dry_run_only is True:
+            dry_filter = ' AND is_dry_run = 1'
+        elif dry_run_only is False:
+            dry_filter = ' AND is_dry_run = 0'
+        else:
+            dry_filter = ''
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
@@ -463,7 +495,7 @@ class PerformanceDB:
                     SUM({pnl_col}) as total_pnl,
                     AVG({pnl_col}) as avg_pnl
                 FROM trades
-                WHERE exit_time IS NOT NULL
+                WHERE exit_time IS NOT NULL{dry_filter}
             ''')
             result = cursor.fetchone()
 
@@ -482,7 +514,7 @@ class PerformanceDB:
                     SUM(CASE WHEN {pnl_col} > 0 THEN 1 ELSE 0 END) as resolution_wins,
                     SUM(CASE WHEN {pnl_col} < 0 THEN 1 ELSE 0 END) as resolution_losses
                 FROM trades
-                WHERE exit_reason = 'market_resolved' AND exit_time IS NOT NULL
+                WHERE exit_reason = 'market_resolved' AND exit_time IS NOT NULL{dry_filter}
             ''')
             res_result = cursor.fetchone()
 
