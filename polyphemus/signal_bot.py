@@ -92,6 +92,40 @@ def _format_guard_context(context: dict) -> str:
     return ", ".join(parts)
 
 
+def _parse_market_end_epoch(slug: str) -> int | None:
+    """Parse a market-end unix epoch from a polymarket slug.
+
+    Used by the phantom-reaper loop to decide when a DRY_RUN trade's
+    market has closed. Returns ``None`` when the slug isn't the
+    ``<asset>-updown-<Nm>-<epoch>`` shape (or a pair_arb ``:side``
+    suffix over that shape) — the reaper must skip those markets
+    (accumulator / weather / other machinery owns their exits).
+
+    Examples::
+
+        _parse_market_end_epoch("btc-updown-5m-1776570600")     -> 1776570600
+        _parse_market_end_epoch("eth-updown-5m-1776571500:up")  -> 1776571500
+        _parse_market_end_epoch("highest-temp-houston-2026-04")  -> None
+        _parse_market_end_epoch("")                              -> None
+    """
+    if not slug:
+        return None
+    # Strip pair_arb direction suffix ("...-TS:up"  -> "...-TS")
+    base = slug.split(":", 1)[0]
+    # Last hyphen-delimited segment should be the epoch
+    tail = base.rsplit("-", 1)
+    if len(tail) < 2:
+        return None
+    try:
+        epoch = int(tail[-1])
+    except ValueError:
+        return None
+    # Sanity bounds: plausible unix epoch between 2020-01-01 and 2040-01-01
+    if epoch < 1_577_836_800 or epoch > 2_208_988_800:
+        return None
+    return epoch
+
+
 class SignalBot:
     """Main orchestrator for Polyphemus Polymarket Trading Bot."""
 
@@ -243,6 +277,11 @@ class SignalBot:
         # 11. Signal feed (created last so health monitor is ready)
         self._feed = None
         self._momentum_feed = None
+        # Strong refs for fire-and-forget phantom adverse-check tasks.
+        # asyncio.create_task() return values MUST be held or the event loop
+        # can GC the task mid-sleep — observed as silent zero-write adverse
+        # coverage (Ultrareview finding #1, 2026-04-19).
+        self._pending_phantom_adverse_tasks: set[asyncio.Task] = set()
         if config.signal_mode == "binance_momentum":
             # Momentum mode: Binance prices are the PRIMARY signal source
             self._momentum_feed = BinanceMomentumFeed(
@@ -518,6 +557,64 @@ class SignalBot:
         )
 
         self._logger.info("SignalBot initialized successfully")
+
+    async def _run_phantom_adverse_check(
+        self,
+        trade_id: str,
+        entry_binance: float,
+        fill_dir: str,
+        fill_asset: str,
+        epoch_end_time: datetime,
+    ) -> None:
+        """Adverse-selection check for DRY_RUN phantom entries.
+
+        Mirror of ``PositionExecutor._run_adverse_check`` scoped to signal_bot's
+        phantom dry-run path, which otherwise bypasses every adverse-selection
+        code path (the live path sets ``_pending_entry_binance_price`` in
+        position_executor and never runs when DRY_RUN=true). Without this,
+        ``binance_price_at_fill`` is NULL for 100% of phantom trades.
+
+        Window is capped at ``min(30s, epoch_time_remaining - 5s)`` so we never
+        read a price after the market closes. NULL is written on Binance
+        timeout to distinguish a measurement miss from a missing record.
+        Fire-and-forget via ``asyncio.create_task``; zero impact on the trade
+        path regardless of outcome.
+        """
+        try:
+            secs_to_end = (epoch_end_time - datetime.now(timezone.utc)).total_seconds()
+            check_window = max(1, min(30, int(secs_to_end) - 5))
+            await asyncio.sleep(check_window)
+
+            check_price = None
+            try:
+                loop = asyncio.get_event_loop()
+                check_price = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, self._momentum_feed.get_latest_price, fill_asset
+                    ),
+                    timeout=5.0,
+                )
+            except Exception:
+                # asyncio.TimeoutError subclasses Exception in 3.11+, so the
+                # prior tuple `(asyncio.TimeoutError, Exception)` was
+                # redundant. CancelledError still propagates (BaseException).
+                check_price = None
+
+            if self._tracker and getattr(self._tracker, "db", None):
+                self._tracker.db.update_adverse_selection(
+                    trade_id=trade_id,
+                    binance_at_fill=entry_binance,
+                    binance_at_check=check_price,
+                    direction=fill_dir,
+                    check_window_secs=check_window,
+                )
+                self._logger.info(
+                    f"ADVERSE_SELECTION | {fill_asset} {fill_dir} | "
+                    f"entry={entry_binance:.2f} check={check_price} "
+                    f"window={check_window}s | trade={trade_id}"
+                )
+        except Exception as e:
+            self._logger.warning(f"ADVERSE_CHECK_ERROR | phantom={trade_id} | {e}")
 
     async def _run_preflight(self) -> None:
         """API connectivity and sanity checks before entering the trading loop.
@@ -807,6 +904,16 @@ class SignalBot:
                 tasks.append(self._safe_task(self._redeemer.start(), "redeemer"))
             if self._signal_scorer:
                 tasks.append(self._safe_task(self._scorer_retrain_loop(), "scorer_retrain"))
+            # Phantom-exit reaper: DRY_RUN-only safety net that writes exit_time
+            # on zombie phantom rows (restart orphans). Without this,
+            # max_open_positions saturates and the signal pipeline goes silent.
+            # Task #4 in docs/plans/trade-observability-overhaul.md.
+            self._logger.info(
+                f"[PHANTOM_REAPER] registration check: self._dry_run={self._dry_run!r}"
+            )
+            if self._dry_run:
+                tasks.append(self._safe_task(self._phantom_reaper_loop(), "phantom_reaper"))
+                self._logger.info("[PHANTOM_REAPER] task registered in gather list")
             if self._gabagool_tracker:
                 tasks.append(self._safe_task(self._gabagool_tracker.start(), "gabagool_tracker"))
             if self._adaptive_tuner:
@@ -1500,6 +1607,104 @@ class SignalBot:
                     "fill_model": _phantom_fill_model, "reason": _phantom_fill_reason,
                 })
 
+                # Phase 3: schedule adverse-selection check on DRY_RUN phantoms.
+                # Without this, phantom fills never populate
+                # binance_price_at_fill / binance_price_30s — observed 2026-04-11
+                # onward when emmanuel flipped DRY_RUN=true and adverse-selection
+                # coverage collapsed to 0%. Mirrors the live path in
+                # position_executor._run_adverse_check. Fire-and-forget; any
+                # failure stays in the logs and never blocks the phantom return.
+                if not (self._momentum_feed and self._tracker and asset):
+                    # Silent skip → observability gap. Log what's missing so
+                    # a drop in adverse-check coverage is traceable rather
+                    # than invisible (Ultrareview finding #4, 2026-04-19).
+                    _missing = []
+                    if not self._momentum_feed: _missing.append("momentum_feed")
+                    if not self._tracker: _missing.append("tracker")
+                    if not asset: _missing.append("asset")
+                    self._logger.warning(
+                        f"ADVERSE_CHECK_SKIPPED | missing={','.join(_missing)} "
+                        f"| phantom={phantom_id} | slug={signal.get('slug', '?')}"
+                    )
+                elif self._momentum_feed and self._tracker and asset:
+                    try:
+                        _phantom_asset = asset.upper()
+                        _phantom_dir = (signal.get("outcome", "") or "").lower()
+                        _phantom_entry_binance = (
+                            self._momentum_feed.get_latest_price(_phantom_asset) or 0
+                        )
+                        if _phantom_entry_binance > 0:
+                            # Derive epoch-end via ISO first, slug fallback if
+                            # ISO is missing OR unparseable. If both fail, SKIP
+                            # with a warning rather than degrade to a 1s check
+                            # window (Ultrareview finding #2, 2026-04-19).
+                            _phantom_epoch_end: datetime | None = None
+                            _mei = signal.get("market_end_time_iso")
+                            if _mei:
+                                try:
+                                    _s = str(_mei).replace("Z", "+00:00")
+                                    _parsed = datetime.fromisoformat(_s)
+                                    if _parsed.tzinfo is None:
+                                        _parsed = _parsed.replace(tzinfo=timezone.utc)
+                                    _phantom_epoch_end = _parsed
+                                except (ValueError, OSError):
+                                    _phantom_epoch_end = None
+                            if _phantom_epoch_end is None:
+                                _slug = signal.get("slug", "")
+                                _parts = _slug.rsplit("-", 1)
+                                if len(_parts) == 2 and _parts[1].isdigit():
+                                    try:
+                                        from .models import parse_window_from_slug
+                                        _epoch = int(_parts[1])
+                                        _phantom_epoch_end = datetime.fromtimestamp(
+                                            _epoch + parse_window_from_slug(_slug),
+                                            tz=timezone.utc,
+                                        )
+                                    except (ValueError, OSError):
+                                        _phantom_epoch_end = None
+
+                            if _phantom_epoch_end is None:
+                                self._logger.warning(
+                                    f"ADVERSE_CHECK_SKIPPED | epoch_end "
+                                    f"unparseable | phantom={phantom_id} | "
+                                    f"slug={signal.get('slug', '?')} | "
+                                    f"mei={_mei}"
+                                )
+                            else:
+                                # Hold a strong ref so the event loop can't GC
+                                # the task during its sleep (Ultrareview
+                                # finding #1). discard() on completion keeps
+                                # the set bounded.
+                                _adv_task = asyncio.create_task(
+                                    self._run_phantom_adverse_check(
+                                        trade_id=phantom_id,
+                                        entry_binance=_phantom_entry_binance,
+                                        fill_dir=_phantom_dir,
+                                        fill_asset=_phantom_asset,
+                                        epoch_end_time=_phantom_epoch_end,
+                                    )
+                                )
+                                self._pending_phantom_adverse_tasks.add(_adv_task)
+                                _adv_task.add_done_callback(
+                                    self._pending_phantom_adverse_tasks.discard
+                                )
+                                self._logger.info(
+                                    f"ADVERSE_CHECK_SCHEDULED | {_phantom_asset} "
+                                    f"{_phantom_dir} | entry_binance="
+                                    f"{_phantom_entry_binance:.2f} | "
+                                    f"trade={phantom_id}"
+                                )
+                        else:
+                            self._logger.warning(
+                                f"ADVERSE_CHECK_SKIPPED | entry_binance=0 | "
+                                f"phantom={phantom_id} | momentum_feed data "
+                                f"missing at fill time"
+                            )
+                    except Exception as _adv_err:
+                        self._logger.warning(
+                            f"Phantom adverse check schedule error: {_adv_err}"
+                        )
+
                 # Update signal logger
                 if self._signal_logger and signal_id > 0:
                     self._signal_logger.update_signal(signal_id, {
@@ -1732,6 +1937,139 @@ class SignalBot:
                 self._signal_scorer.maybe_retrain()
             except Exception as e:
                 self._logger.warning(f"Scorer retrain error: {e}")
+
+    async def _phantom_reaper_loop(self) -> None:
+        """Reap orphaned DRY_RUN zombie trades on a 60s cadence.
+
+        A phantom trade becomes a zombie when its in-memory ``Position`` is
+        lost (typically across a bot restart) before ``_handle_exit`` has a
+        chance to write ``exit_time``. The row sits in ``trades`` with
+        ``exit_time IS NULL`` forever. ``SignalGuard.max_positions`` counts
+        open rows via ``self._store`` reflection of the DB, so unbounded
+        zombies saturate the cap and reject every new signal — the pipeline
+        goes silent even though signals are firing. This loop is the belt
+        to the ``_handle_exit`` suspenders.
+
+        The actual reap logic lives in :py:meth:`_phantom_reaper_once` so
+        unit tests can exercise a single pass without sleeping.
+
+        Task #4 in docs/plans/trade-observability-overhaul.md.
+        """
+        REAPER_INTERVAL_SECS = 60.0
+        self._logger.info(
+            f"[PHANTOM_REAPER] loop entered; will tick every {REAPER_INTERVAL_SECS}s"
+        )
+        while True:
+            await asyncio.sleep(REAPER_INTERVAL_SECS)
+            try:
+                await self._phantom_reaper_once()
+            except Exception as e:
+                # Belt-and-suspenders: never let a reaper bug kill the loop.
+                # ``_safe_task`` already catches, but preserve the cadence.
+                self._logger.exception(f"[PHANTOM_REAPER] iteration crashed: {e}")
+
+    async def _phantom_reaper_once(self, now_ts: float | None = None) -> dict:
+        """Single reap pass — the testable core of ``_phantom_reaper_loop``.
+
+        Behavior
+        --------
+        * Only runs when ``self._dry_run`` is True. Defense in depth against
+          a config flip promoting the instance to live mid-session.
+        * Scans ``get_open_trades()`` for phantom rows (``is_dry_run=1`` or
+          ``entry_tx_hash`` prefixed ``dry_``) whose slug is an
+          ``*-updown-*-<epoch>`` market at least 30s past end.
+        * Writes a neutral close: ``exit_price=entry_price``, ``pnl=0``,
+          ``exit_reason="phantom_orphaned"``. Outcome-aware resolution
+          (``1.0 if correct else 0.0``) is intentionally out of scope — the
+          reaper's only job is clearing ``exit_time`` so the position cap
+          cannot deadlock the pipeline. MTC queries filter this reason
+          out of any verdict window.
+        * Idempotent via ``force_close_trade``'s ``WHERE exit_time IS NULL``
+          clause; safe to re-run.
+
+        Explicitly skipped
+        ------------------
+        * Accumulator / weather / pair_arb rows — different exit machinery.
+        * Slugs whose market-end epoch can't be parsed — unknown market shape.
+        * Live (non-dry-run) rows — defense in depth.
+
+        Parameters
+        ----------
+        now_ts:
+            Optional epoch used for the past-end cutoff; defaults to
+            ``time.time()``. Tests inject a fixed value.
+
+        Returns
+        -------
+        dict with keys ``reaped``, ``skipped_unparseable``,
+        ``skipped_not_past_end`` — always non-negative ints.
+        """
+        RESOLUTION_GRACE_SECS = 30
+        result = {"reaped": 0, "skipped_unparseable": 0, "skipped_not_past_end": 0, "rows_scanned": 0}
+        if not self._dry_run:
+            return result
+        try:
+            rows = self._tracker.db.get_open_trades()
+        except Exception as e:
+            self._logger.warning(f"[PHANTOM_REAPER] get_open_trades failed: {e}")
+            return result
+        result["rows_scanned"] = len(rows)
+
+        if now_ts is None:
+            now_ts = time.time()
+        for row in rows:
+            # Phantom filter: prefer the is_dry_run column when migrated,
+            # fall back to the "dry_" tx_hash prefix that every phantom
+            # entry writes (see record_entry path around line 1540).
+            is_dry = row.get("is_dry_run") == 1
+            if not is_dry:
+                tx = row.get("entry_tx_hash") or ""
+                if not tx.startswith("dry_"):
+                    continue
+
+            slug = row.get("slug") or ""
+            md_raw = row.get("metadata")
+            try:
+                md = json.loads(md_raw) if isinstance(md_raw, str) and md_raw else {}
+            except Exception:
+                md = {}
+            # These owners have their own resolution machinery.
+            if md.get("is_accumulator") or md.get("is_weather"):
+                continue
+            if md.get("source") == "pair_arb":
+                continue
+
+            market_end = _parse_market_end_epoch(slug)
+            if market_end is None:
+                result["skipped_unparseable"] += 1
+                continue
+            if now_ts < market_end + RESOLUTION_GRACE_SECS:
+                result["skipped_not_past_end"] += 1
+                continue
+
+            entry_price = row.get("entry_price") or 0.0
+            try:
+                closed = self._tracker.db.force_close_trade(
+                    slug=slug,
+                    exit_reason="phantom_orphaned",
+                    exit_price=entry_price,  # neutral -> pnl = 0
+                )
+                if closed:
+                    result["reaped"] += 1
+            except Exception as e:
+                self._logger.warning(
+                    f"[PHANTOM_REAPER] close failed slug={slug}: {e}"
+                )
+
+        # Tick log: always emit so a silent reaper is never observationally
+        # indistinguishable from a working one. P1 observability-at-write-time.
+        self._logger.info(
+            f"[PHANTOM_REAPER] tick rows={result['rows_scanned']} "
+            f"reaped={result['reaped']} "
+            f"skipped_unparseable={result['skipped_unparseable']} "
+            f"skipped_not_past_end={result['skipped_not_past_end']}"
+        )
+        return result
 
     async def _safe_task(self, coro, name: str):
         """Wrap a non-critical async task with error handling.
