@@ -1,0 +1,85 @@
+# Polyphemus domain taxonomy.
+#
+# Mirrors the 16 top-level sections in docs/GLOSSARY.md. Each node's
+# `domain:` field MUST be one of these keys. Add a key here BEFORE
+# authoring the first node in a new domain.
+
+prediction-markets:
+  title: "Prediction Markets (Polymarket / CLOB)"
+  glossary_section: "§1"
+  owns: ["order book", "CLOB", "maker/taker", "slug", "epoch", "resolution"]
+
+trading-strategies:
+  title: "Trading Strategies"
+  glossary_section: "§2"
+  owns: ["binance_momentum", "snipe", "sharp_move", "pair_arb", "accumulator", "weather", "cheap_side"]
+
+fill-models:
+  title: "Fill Models"
+  glossary_section: "§3"
+  owns: ["v1_taker_optimistic", "v2_probabilistic", "live", "phantom fill"]
+
+adverse-selection:
+  title: "Adverse Selection"
+  glossary_section: "§4"
+  owns: ["binance_price_at_fill", "adverse_fill", "adverse_fill_bps", "check_window_secs"]
+
+sizing-gating:
+  title: "Sizing & Gating"
+  glossary_section: "§5"
+  owns: ["markov gate", "outcome gate", "kelly sizing", "kelly haircut", "circuit breaker"]
+
+statistical-methods:
+  title: "Statistical Methods"
+  glossary_section: "§6"
+  owns: ["wilson lower bound", "walk-forward", "deflated sharpe", "MTC rules R1-R5"]
+
+observability:
+  title: "Observability"
+  glossary_section: "§7"
+  owns: ["trade_events", "trade_tracer", "debug_trade", "journalctl", "health_log"]
+
+data-model:
+  title: "Data Model"
+  glossary_section: "§8"
+  owns: ["trades table", "signals table", "entry_band", "fill_model column", "signal_source column"]
+
+async-pitfalls:
+  title: "Async Python Pitfalls"
+  glossary_section: "§9"
+  owns: ["asyncio.create_task GC", "fire-and-forget", "CancelledError"]
+
+sqlite-schema:
+  title: "SQLite / Schema"
+  glossary_section: "§10"
+  owns: ["ALTER TABLE", "view reload", "json_extract", "migrate_v4"]
+
+infrastructure:
+  title: "Infrastructure / Deploy"
+  glossary_section: "§11"
+  owns: ["systemd", "scp", "py_compile", "LIFECYCLE", "predeploy", "pre_deploy_check"]
+
+signals-feeds:
+  title: "Signals / Feeds"
+  glossary_section: "§12"
+  owns: ["binance_feed", "momentum_feed", "weather_feed", "gamma api"]
+
+accumulator-state:
+  title: "Accumulator State Machine"
+  glossary_section: "§13"
+  owns: ["IDLE", "SCANNING", "ACCUMULATING", "HEDGED", "SETTLING"]
+
+git-ops-hygiene:
+  title: "Git / Ops Hygiene"
+  glossary_section: "§14"
+  owns: ["deploy freeze", "position-check before restart", "partial deploy"]
+
+testing:
+  title: "Testing"
+  glossary_section: "§15"
+  owns: ["pytest", "smoke test", "integration test", "test fixtures"]
+
+claude-harness:
+  title: "Claude / Harness"
+  glossary_section: "§16"
+  owns: ["skill", "rule file", "chudi-frame", "librarian-frame", "codex"]

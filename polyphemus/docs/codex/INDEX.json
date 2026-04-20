@@ -1,0 +1,321 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-04-20T05:01:51Z",
+  "nodes": {
+    "accumulator-state": {
+      "file": "nodes/accumulator-state.md",
+      "domain": "accumulator-state",
+      "name": "Accumulator State Machine",
+      "aliases": [
+        "AccumulatorState",
+        "SCANNING",
+        "ACCUMULATING",
+        "HEDGED",
+        "SETTLING",
+        "_transition",
+        "paired accumulation"
+      ],
+      "related": [
+        "circuit-breaker",
+        "fill-models",
+        "trade-tracer"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T00:02:18Z"
+    },
+    "adverse-selection": {
+      "file": "nodes/adverse-selection.md",
+      "domain": "adverse-selection",
+      "name": "Adverse Selection",
+      "aliases": [
+        "adverse fill",
+        "adverse bps",
+        "binance drift check",
+        "phantom adverse-check",
+        "binance_price_at_fill",
+        "adverse_fill_bps"
+      ],
+      "related": [
+        "fill-models",
+        "entry-band",
+        "mtc-gate",
+        "trade-tracer"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-20T04:27:38Z"
+    },
+    "circuit-breaker": {
+      "file": "nodes/circuit-breaker.md",
+      "domain": "sizing-gating",
+      "name": "Circuit Breaker",
+      "aliases": [
+        "_circuit_tripped",
+        "_consecutive_unwinds",
+        "circuit_breaker.json",
+        "max_daily_loss",
+        "max_consecutive_unwinds"
+      ],
+      "related": [
+        "markov-gate",
+        "outcome-gate",
+        "accumulator-state"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T00:02:18Z"
+    },
+    "deploy-lifecycle": {
+      "file": "nodes/deploy-lifecycle.md",
+      "domain": "infrastructure",
+      "name": "Deploy Lifecycle",
+      "aliases": [
+        "LIFECYCLE",
+        "predeploy",
+        "pre-deploy check",
+        "systemd restart",
+        "scp deploy",
+        "open positions check"
+      ],
+      "related": [
+        "mtc-gate",
+        "infrastructure"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-20T04:56:39Z"
+    },
+    "entry-band": {
+      "file": "nodes/entry-band.md",
+      "domain": "data-model",
+      "name": "Entry Band",
+      "aliases": [
+        "entry price band",
+        "price bucket",
+        "deep favorite",
+        "0.93-0.97",
+        "entry_band"
+      ],
+      "related": [
+        "mtc-gate",
+        "adverse-selection",
+        "trading-strategies"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-20T04:27:38Z"
+    },
+    "fill-models": {
+      "file": "nodes/fill-models.md",
+      "domain": "fill-models",
+      "name": "Fill Models",
+      "aliases": [
+        "v1_taker",
+        "v2_probabilistic",
+        "MakerFillModel",
+        "fill_router",
+        "dry_run_v2",
+        "POLYPHEMUS_DRY_RUN_V2",
+        "prob_hit",
+        "prob_miss",
+        "buried",
+        "crossed_book"
+      ],
+      "related": [
+        "adverse-selection",
+        "entry-band",
+        "trade-tracer"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T00:02:18Z"
+    },
+    "kelly-haircut": {
+      "file": "nodes/kelly-haircut.md",
+      "domain": "sizing-gating",
+      "name": "Kelly & Haircut",
+      "aliases": [
+        "kelly_fraction",
+        "half_kelly",
+        "fractional_kelly",
+        "MARKOV_KELLY_HAIRCUT",
+        "MARKOV_KELLY_MAX_BET_PCT",
+        "kelly sizing",
+        "fractional kelly"
+      ],
+      "related": [
+        "markov-gate",
+        "circuit-breaker",
+        "mtc-gate"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T00:02:18Z"
+    },
+    "markov-gate": {
+      "file": "nodes/markov-gate.md",
+      "domain": "sizing-gating",
+      "name": "Markov Gate",
+      "aliases": [
+        "markov",
+        "cold-regime gate",
+        "loss-streak breaker",
+        "MARKOV_GATE_MAX_LOSSES",
+        "markov_cold_regime"
+      ],
+      "related": [
+        "adverse-selection",
+        "entry-band",
+        "mtc-gate",
+        "outcome-gate",
+        "circuit-breaker",
+        "kelly-haircut"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-20T00:02:18Z"
+    },
+    "mtc-gate": {
+      "file": "nodes/mtc-gate.md",
+      "domain": "statistical-methods",
+      "name": "MTC Pre-Deploy Gate",
+      "aliases": [
+        "MTC gate",
+        "pre-deploy gate",
+        "R1 R2 R3 R4 R5",
+        "Wilson lower bound check",
+        "deflated sharpe",
+        "walk-forward",
+        "alpha decay"
+      ],
+      "related": [
+        "entry-band",
+        "adverse-selection",
+        "deploy-lifecycle"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-20T04:27:39Z"
+    },
+    "outcome-gate": {
+      "file": "nodes/outcome-gate.md",
+      "domain": "sizing-gating",
+      "name": "Outcome Gate",
+      "aliases": [
+        "rolling WR gate",
+        "outcome_gate_regime",
+        "outcome_gate_blocked",
+        "OUTCOME_GATE_ENABLED",
+        "hysteresis gate"
+      ],
+      "related": [
+        "markov-gate",
+        "circuit-breaker",
+        "mtc-gate"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T00:02:18Z"
+    },
+    "phantom-exit-zombies": {
+      "file": "nodes/phantom-exit-zombies.md",
+      "domain": "observability",
+      "name": "Phantom Exit Zombies",
+      "aliases": [
+        "phantom_orphaned",
+        "phantom_orphaned_backfill",
+        "phantom_reaper",
+        "zombie trade",
+        "zombie rows",
+        "exit_time NULL",
+        "max_positions saturation",
+        "signal silence",
+        "Loaded N positions from DB",
+        "Purging stale LOSS",
+        "_phantom_reaper_loop",
+        "_phantom_reaper_once",
+        "_parse_market_end_epoch"
+      ],
+      "related": [
+        "fill-models",
+        "trade-tracer",
+        "shadow-mode",
+        "deploy-lifecycle"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T05:01:51Z"
+    },
+    "shadow-mode": {
+      "file": "nodes/shadow-mode.md",
+      "domain": "trading-strategies",
+      "name": "Shadow Mode",
+      "aliases": [
+        "shadow",
+        "shadow_assets",
+        "sharp_move_shadow",
+        "window_delta_shadow",
+        "tugao9_shadow",
+        "igoc_shadow_only",
+        "flat_regime_rtds_shadow",
+        "snipe_15m_dry_run",
+        "signal_score_mode shadow",
+        "log-only mode",
+        "shadow-only",
+        "shadow testing"
+      ],
+      "related": [
+        "fill-models",
+        "trade-tracer",
+        "adverse-selection",
+        "deploy-lifecycle"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T00:02:18Z"
+    },
+    "trade-tracer": {
+      "file": "nodes/trade-tracer.md",
+      "domain": "observability",
+      "name": "Trade Tracer",
+      "aliases": [
+        "trade_events",
+        "_trace_emit",
+        "ADVERSE_CHECK_SCHEDULED",
+        "ORDER_FILLED",
+        "ADVERSE_CHECK_RUN",
+        "timeline",
+        "POLYPHEMUS_TRACER_JSONL"
+      ],
+      "related": [
+        "adverse-selection",
+        "fill-models",
+        "deploy-lifecycle"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-20T00:02:18Z"
+    }
+  },
+  "domains": {
+    "accumulator-state": [
+      "accumulator-state"
+    ],
+    "adverse-selection": [
+      "adverse-selection"
+    ],
+    "sizing-gating": [
+      "circuit-breaker",
+      "kelly-haircut",
+      "markov-gate",
+      "outcome-gate"
+    ],
+    "infrastructure": [
+      "deploy-lifecycle"
+    ],
+    "data-model": [
+      "entry-band"
+    ],
+    "fill-models": [
+      "fill-models"
+    ],
+    "statistical-methods": [
+      "mtc-gate"
+    ],
+    "observability": [
+      "phantom-exit-zombies",
+      "trade-tracer"
+    ],
+    "trading-strategies": [
+      "shadow-mode"
+    ]
+  }
+}
