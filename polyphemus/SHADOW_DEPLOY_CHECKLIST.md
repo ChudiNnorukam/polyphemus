@@ -1,3 +1,7 @@
+> **SUPERSEDED** by `projects/.../memory/project_mtc_gate_verdicts.md` on 2026-04-23. Reason: pair_arb NO-GO (DSR fail, 2026-04-17 MTC verdicts) and accumulator STOPPED since 2026-02-23. This checklist's target strategies are both gated off. Preserved for future revival context. Do NOT treat as a live promotion path. If either strategy is re-entered, re-gate via `/preflight` + `/domain-entry-audit` rather than running this checklist as-is.
+
+---
+
 # Pair-Arb FAK Shadow Deploy Checklist
 
 This checklist is for the accumulator FAK-first patch only. It is a shadow or dry-run deployment checklist, not a live promotion checklist.
