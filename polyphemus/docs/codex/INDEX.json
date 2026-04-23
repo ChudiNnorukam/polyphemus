@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-04-20T05:01:51Z",
+  "generated_at": "2026-04-23T07:11:23Z",
   "nodes": {
     "accumulator-state": {
       "file": "nodes/accumulator-state.md",
@@ -21,7 +21,7 @@
         "trade-tracer"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "adverse-selection": {
       "file": "nodes/adverse-selection.md",
@@ -42,7 +42,169 @@
         "trade-tracer"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-20T04:27:38Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "alpha-decay": {
+      "file": "nodes/alpha-decay.md",
+      "domain": "statistical-methods",
+      "name": "Alpha Decay Detector (Rolling Sharpe Drift)",
+      "aliases": [
+        "alpha_decay",
+        "alpha decay",
+        "rolling_sharpe",
+        "sharpe drift",
+        "edge decay",
+        "drop_threshold",
+        "window_days",
+        "tripwire",
+        "_sharpe",
+        "edge erosion"
+      ],
+      "related": [
+        "mtc-gate",
+        "mtc-pre-deploy-gate-tool",
+        "backtest-harness"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "attribution-views": {
+      "file": "nodes/attribution-views.md",
+      "domain": "attribution",
+      "name": "Attribution SQL Views (vw_trade_attribution / strategy_perf / adverse_selection)",
+      "aliases": [
+        "vw_trade_attribution",
+        "vw_strategy_perf",
+        "vw_adverse_selection",
+        "sql views",
+        "attribution view",
+        "is_win",
+        "entry_band SQL",
+        "bug_010",
+        "phantom dilution",
+        "signal_source NULL"
+      ],
+      "related": [
+        "mtc-pre-deploy-gate-tool",
+        "entry-band",
+        "adverse-selection",
+        "trade-tracer",
+        "signal-pipeline"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "backtest-harness": {
+      "file": "nodes/backtest-harness.md",
+      "domain": "statistical-methods",
+      "name": "Backtest Harness (Filter Search + Walk-Forward)",
+      "aliases": [
+        "filter_search",
+        "walk_forward",
+        "Scenario D",
+        "Scenario D prime",
+        "backtest",
+        "filter candidates",
+        "Wilson lower",
+        "wl_ratio",
+        "breakeven_ratio",
+        "compute_metrics",
+        "FILTER_CANDIDATES",
+        "Pareto",
+        "wilson_lower",
+        "Metrics dataclass",
+        "entry filter"
+      ],
+      "related": [
+        "mtc-gate",
+        "mtc-pre-deploy-gate-tool",
+        "entry-band",
+        "alpha-decay"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "binance-momentum": {
+      "file": "nodes/binance-momentum.md",
+      "domain": "trading-strategies",
+      "name": "Binance Momentum Signal",
+      "aliases": [
+        "binance_momentum",
+        "BTC momentum",
+        "latency arb",
+        "SIGNAL_MODE",
+        "MOMENTUM_TRIGGER_PCT",
+        "MOMENTUM_WINDOW_SECS",
+        "momentum signal",
+        "momentum silent",
+        "_check_momentum",
+        "BinanceMomentumFeed"
+      ],
+      "related": [
+        "signal-pipeline",
+        "signal-guard",
+        "adverse-selection",
+        "shadow-mode"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "btc-5m-snipe-strategy": {
+      "file": "nodes/btc-5m-snipe-strategy.md",
+      "domain": "trading-strategies",
+      "name": "BTC 5m Deep-Favorite Snipe Strategy (Target)",
+      "aliases": [
+        "btc-5m-snipe",
+        "5m BTC snipe strategy",
+        "deep-favorite snipe strategy",
+        "93-97 snipe strategy",
+        "EV_net gate",
+        "quant strat",
+        "5m quant formula",
+        "target strategy",
+        "snipe-v2",
+        "ev-gated snipe"
+      ],
+      "related": [
+        "entry-band",
+        "fill-model-v2",
+        "adverse-selection",
+        "mtc-gate",
+        "kelly-haircut",
+        "triple-barrier",
+        "alpha-decay",
+        "markov-gate",
+        "regime-detector",
+        "resolution-snipe",
+        "pwin-estimator-binance"
+      ],
+      "confidence": "target",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "cheap-side-signal": {
+      "file": "nodes/cheap-side-signal.md",
+      "domain": "strategy",
+      "name": "Cheap Side Signal (KILLED 2026-04-19)",
+      "aliases": [
+        "cheap_side",
+        "cheap-side",
+        "CheapSideSignal",
+        "CHEAP_SIDE_ENABLED",
+        "cheap_side_max_price",
+        "cheap_side_min_price",
+        "cheap_side_scan_interval",
+        "cheap_side_windows",
+        "ugag",
+        "86% below 0.50",
+        "cheap side kill"
+      ],
+      "related": [
+        "deploy-lifecycle",
+        "adverse-selection",
+        "mtc-gate"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "circuit-breaker": {
       "file": "nodes/circuit-breaker.md",
@@ -61,7 +223,64 @@
         "accumulator-state"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "clob-wrapper": {
+      "file": "nodes/clob-wrapper.md",
+      "domain": "execution-plumbing",
+      "name": "CLOB Wrapper (Async py_clob_client Facade)",
+      "aliases": [
+        "clob_wrapper",
+        "ClobWrapper",
+        "place_order",
+        "place_fok_order",
+        "post_only",
+        "create_and_post_order",
+        "ExecutionResult",
+        "ORDER_TIMEOUT",
+        "py_clob_client",
+        "OrderArgs",
+        "OrderType.GTC",
+        "asyncio.wait_for"
+      ],
+      "related": [
+        "wallet-architecture",
+        "accumulator-state",
+        "deploy-lifecycle",
+        "exit-manager"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "config-governance": {
+      "file": "nodes/config-governance.md",
+      "domain": "infrastructure",
+      "name": "Config Governance (.env / systemd / Doppler precedence)",
+      "aliases": [
+        "config precedence",
+        "env loading",
+        "systemd drop-in",
+        "doppler",
+        "load_dotenv",
+        "ENV_PATH",
+        "package .env contamination",
+        "startup_check",
+        "RANGE_CHECKS",
+        "observability at startup",
+        "config drift",
+        "LAGBOT_DATA_DIR",
+        "INSTANCE_PATH_KEYS",
+        "MOMENTUM_TRIGGER_PCT=1.0",
+        "CHEAP_SIDE_ENABLED"
+      ],
+      "related": [
+        "deploy-lifecycle",
+        "binance-momentum",
+        "circuit-breaker",
+        "accumulator-state"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "deploy-lifecycle": {
       "file": "nodes/deploy-lifecycle.md",
@@ -76,11 +295,10 @@
         "open positions check"
       ],
       "related": [
-        "mtc-gate",
-        "infrastructure"
+        "mtc-gate"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-20T04:56:39Z"
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "entry-band": {
       "file": "nodes/entry-band.md",
@@ -96,10 +314,98 @@
       "related": [
         "mtc-gate",
         "adverse-selection",
-        "trading-strategies"
+        "resolution-snipe",
+        "btc-5m-snipe-strategy",
+        "pwin-estimator-binance"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-20T04:27:38Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "exit-manager": {
+      "file": "nodes/exit-manager.md",
+      "domain": "trading-strategies",
+      "name": "Exit Manager (Position Lifecycle)",
+      "aliases": [
+        "exit manager",
+        "ExitManager",
+        "check_all",
+        "_evaluate",
+        "hold_to_resolution",
+        "HOLD_TO_RESOLUTION",
+        "max_hold",
+        "time_exit",
+        "market_resolved",
+        "ExitReason",
+        "ExitSignal",
+        "exit_reason",
+        "bug",
+        "orderbook-removed exit"
+      ],
+      "related": [
+        "phantom-exit-zombies",
+        "resolution-snipe",
+        "sharp-move",
+        "adverse-selection"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "external-datasets": {
+      "file": "nodes/external-datasets.md",
+      "domain": "signals-feeds",
+      "name": "External Datasets",
+      "aliases": [
+        "external data",
+        "academic datasets",
+        "polymarket dataset",
+        "sii polymarket",
+        "sii-wangzj",
+        "shanghai polymarket",
+        "historical polymarket parquet",
+        "polygon orderfilled events",
+        "third-party data",
+        "external repo",
+        "third-party repo"
+      ],
+      "related": [
+        "mtc-gate",
+        "entry-band",
+        "fill-models",
+        "adverse-selection"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "fill-model-v2": {
+      "file": "nodes/fill-model-v2.md",
+      "domain": "fill-realism",
+      "name": "Fill Model V2 (Probabilistic Maker Fills)",
+      "aliases": [
+        "fill-model",
+        "MakerFillModel",
+        "MakerFillDecision",
+        "dry_run_fill_model",
+        "v2_probabilistic",
+        "POLYPHEMUS_DRY_RUN_V2",
+        "probabilistic fill",
+        "aggression",
+        "BASE_RATE_PER_SEC",
+        "RATE_SPAN",
+        "MAX_CUMULATIVE",
+        "prob_hit",
+        "prob_miss",
+        "crossed_book",
+        "buried",
+        "dry_run_v2_enabled"
+      ],
+      "related": [
+        "fill-router",
+        "accumulator-state",
+        "adverse-selection",
+        "trade-tracer"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "fill-models": {
       "file": "nodes/fill-models.md",
@@ -123,7 +429,32 @@
         "trade-tracer"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "fill-router": {
+      "file": "nodes/fill-router.md",
+      "domain": "fill-realism",
+      "name": "Fill Router (V1/V2 Dry-Run Dispatch)",
+      "aliases": [
+        "fill_router",
+        "route_dry_run_fill",
+        "FillRecord",
+        "v1_taker",
+        "v1_instant",
+        "v2_probabilistic",
+        "fill dispatch",
+        "fill routing",
+        "_get_model",
+        "_shared_model"
+      ],
+      "related": [
+        "fill-model-v2",
+        "accumulator-state",
+        "adverse-selection",
+        "config-governance"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "kelly-haircut": {
       "file": "nodes/kelly-haircut.md",
@@ -144,7 +475,7 @@
         "mtc-gate"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "markov-gate": {
       "file": "nodes/markov-gate.md",
@@ -166,7 +497,7 @@
         "kelly-haircut"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "mtc-gate": {
       "file": "nodes/mtc-gate.md",
@@ -187,7 +518,41 @@
         "deploy-lifecycle"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-20T04:27:39Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "mtc-pre-deploy-gate-tool": {
+      "file": "nodes/mtc-pre-deploy-gate-tool.md",
+      "domain": "statistical-methods",
+      "name": "MTC Pre-Deploy Gate CLI",
+      "aliases": [
+        "mtc_pre_deploy_gate",
+        "mtc_pre_deploy_gate.py",
+        "mtc-gate CLI",
+        "mtc gate CLI",
+        "mtc gate tool",
+        "MTC command",
+        "--segment-by",
+        "--filter-signal-source",
+        "--filter-fill-model",
+        "--filter-entry-band",
+        "segment-by entry_band",
+        "R3 walk-forward",
+        "WF_MIN_SPLITS",
+        "WF_MIN_CONSISTENCY",
+        "_ENTRY_BAND_CUTS",
+        "_derive_entry_band",
+        "_apply_trade_filters",
+        "run_gate",
+        "run_segmented_gate"
+      ],
+      "related": [
+        "mtc-gate",
+        "entry-band",
+        "adverse-selection",
+        "trade-tracer"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "outcome-gate": {
       "file": "nodes/outcome-gate.md",
@@ -206,7 +571,7 @@
         "mtc-gate"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "phantom-exit-zombies": {
       "file": "nodes/phantom-exit-zombies.md",
@@ -215,6 +580,7 @@
       "aliases": [
         "phantom_orphaned",
         "phantom_orphaned_backfill",
+        "phantom_resolved",
         "phantom_reaper",
         "zombie trade",
         "zombie rows",
@@ -225,7 +591,15 @@
         "Purging stale LOSS",
         "_phantom_reaper_loop",
         "_phantom_reaper_once",
-        "_parse_market_end_epoch"
+        "_parse_market_end_epoch",
+        "resolve_direction",
+        "parse_asset_from_slug",
+        "parse_window_secs_from_slug",
+        "binance_kline proxy",
+        "outcome-aware reap",
+        "resolved_win",
+        "resolved_loss",
+        "resolved_fallback"
       ],
       "related": [
         "fill-models",
@@ -234,7 +608,87 @@
         "deploy-lifecycle"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T05:01:51Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "pwin-estimator-binance": {
+      "file": "nodes/pwin-estimator-binance.md",
+      "domain": "statistical-methods",
+      "name": "p\u0302_win Estimator from Binance Feeds (Target)",
+      "aliases": [
+        "pwin estimator",
+        "pwin_estimator",
+        "p_win estimator",
+        "probability estimator",
+        "calibrated pwin",
+        "binance pwin",
+        "binance probability model",
+        "signal-to-pwin model"
+      ],
+      "related": [
+        "entry-band",
+        "btc-5m-snipe-strategy",
+        "mtc-gate",
+        "adverse-selection",
+        "backtest-harness",
+        "alpha-decay"
+      ],
+      "confidence": "target",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "regime-detector": {
+      "file": "nodes/regime-detector.md",
+      "domain": "signal-pipeline",
+      "name": "Regime Detector (TRENDING / VOLATILE / FLAT / SHOCK)",
+      "aliases": [
+        "regime",
+        "regime_detector",
+        "RegimeDetector",
+        "RegimeState",
+        "trending",
+        "volatile",
+        "flat",
+        "shock",
+        "volatility_1h",
+        "trend_1h",
+        "trend_5m",
+        "SHOCK_THRESHOLD_5M",
+        "TRENDING_THRESHOLD_1H",
+        "VOLATILE_THRESHOLD_1H",
+        "FLAT_THRESHOLD_1H",
+        "market regime"
+      ],
+      "related": [
+        "signal-pipeline",
+        "adverse-selection",
+        "alpha-decay"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "resolution-snipe": {
+      "file": "nodes/resolution-snipe.md",
+      "domain": "trading-strategies",
+      "name": "Resolution Snipe",
+      "aliases": [
+        "snipe",
+        "resolution_snipe",
+        "ENABLE_RESOLUTION_SNIPE",
+        "SNIPE_MAX_ENTRY_PRICE",
+        "SNIPE_MIN_ENTRY_PRICE",
+        "deep-favorite snipe",
+        "late-epoch snipe",
+        "_snipe_loop",
+        "_generate_snipe_signal",
+        "0.93-0.97 snipe"
+      ],
+      "related": [
+        "entry-band",
+        "signal-guard",
+        "adverse-selection",
+        "mtc-gate"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "shadow-mode": {
       "file": "nodes/shadow-mode.md",
@@ -261,7 +715,76 @@
         "deploy-lifecycle"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "sharp-move": {
+      "file": "nodes/sharp-move.md",
+      "domain": "trading-strategies",
+      "name": "Sharp Move Signal",
+      "aliases": [
+        "sharp_move",
+        "SHARP_MOVE_MAX_ENTRY_PRICE",
+        "ENABLE_SHARP_MOVE",
+        "enable_sharp_move",
+        "_check_sharp_move",
+        "sharp_move_shadow",
+        "sharp-move ceiling"
+      ],
+      "related": [
+        "signal-guard",
+        "entry-band",
+        "adverse-selection",
+        "shadow-mode"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "signal-guard": {
+      "file": "nodes/signal-guard.md",
+      "domain": "signals-feeds",
+      "name": "Signal Guard (Rejection Layer)",
+      "aliases": [
+        "signal guard",
+        "SignalGuard",
+        "signal filter",
+        "price_out_of_range",
+        "whipsaw_regime",
+        "rejections",
+        "signal rejected",
+        "guard_passed",
+        "FilterResult"
+      ],
+      "related": [
+        "signal-pipeline",
+        "entry-band",
+        "shadow-mode",
+        "circuit-breaker"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "signal-pipeline": {
+      "file": "nodes/signal-pipeline.md",
+      "domain": "signals-feeds",
+      "name": "Signal Pipeline (Metadata Stamping)",
+      "aliases": [
+        "signal pipeline",
+        "build_entry_metadata",
+        "signal metadata",
+        "source tagging",
+        "signal source",
+        "signal_source",
+        "signal_id denormalization",
+        "metadata.source"
+      ],
+      "related": [
+        "signal-guard",
+        "trade-tracer",
+        "adverse-selection",
+        "entry-band"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
     },
     "trade-tracer": {
       "file": "nodes/trade-tracer.md",
@@ -282,7 +805,96 @@
         "deploy-lifecycle"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-20T00:02:18Z"
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "triple-barrier": {
+      "file": "nodes/triple-barrier.md",
+      "domain": "backtest-methodology",
+      "name": "Triple-Barrier Labeling (Lopez de Prado AFML Ch. 3)",
+      "aliases": [
+        "triple_barrier",
+        "triple-barrier",
+        "apply_triple_barrier",
+        "label_events",
+        "label_summary",
+        "first-touch labeling",
+        "AFML",
+        "Lopez de Prado",
+        "pt_threshold",
+        "sl_threshold",
+        "horizon_secs",
+        "upper barrier",
+        "lower barrier",
+        "time barrier"
+      ],
+      "related": [
+        "backtest-harness",
+        "mtc-gate",
+        "entry-band"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "wallet-architecture": {
+      "file": "nodes/wallet-architecture.md",
+      "domain": "wallet-onchain",
+      "name": "Wallet Architecture (Sig Types 0/1/2)",
+      "aliases": [
+        "sig_type",
+        "signature_type",
+        "EOA",
+        "POLY_PROXY",
+        "POLY_GNOSIS_SAFE",
+        "MagicLink",
+        "Gnosis Safe",
+        "proxy wallet",
+        "gasless relay",
+        "_redeem_proxy_relay",
+        "_redeem_safe_relay",
+        "_redeem_onchain",
+        "RELAYER_URL",
+        "PROXY_FACTORY",
+        "CTF_ADDRESS",
+        "CTF_EXCHANGE",
+        "NEG_RISK_CTF_EXCHANGE",
+        "builder_passphrase"
+      ],
+      "related": [
+        "clob-wrapper",
+        "config-governance",
+        "deploy-lifecycle"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
+    },
+    "weather-arb": {
+      "file": "nodes/weather-arb.md",
+      "domain": "strategy",
+      "name": "Weather Arb (NOAA / Open-Meteo Divergence Scanner)",
+      "aliases": [
+        "weather",
+        "weather arb",
+        "weather-arb",
+        "temperature market",
+        "NOAA",
+        "Open-Meteo",
+        "divergence detector",
+        "detect_divergences",
+        "forecast_to_distribution",
+        "WEATHER_DRY_RUN",
+        "WEATHER_NOAA_MIN_PROB",
+        "WEATHER_MIN_EDGE",
+        "weather_max_spend",
+        "_WEATHER_FEE_COEFF",
+        "_SPREAD_HAIRCUT"
+      ],
+      "related": [
+        "external-datasets",
+        "kelly-haircut",
+        "deploy-lifecycle"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-23T07:11:23Z"
     }
   },
   "domains": {
@@ -292,30 +904,68 @@
     "adverse-selection": [
       "adverse-selection"
     ],
+    "statistical-methods": [
+      "alpha-decay",
+      "backtest-harness",
+      "mtc-gate",
+      "mtc-pre-deploy-gate-tool",
+      "pwin-estimator-binance"
+    ],
+    "attribution": [
+      "attribution-views"
+    ],
+    "trading-strategies": [
+      "binance-momentum",
+      "btc-5m-snipe-strategy",
+      "exit-manager",
+      "resolution-snipe",
+      "shadow-mode",
+      "sharp-move"
+    ],
+    "strategy": [
+      "cheap-side-signal",
+      "weather-arb"
+    ],
     "sizing-gating": [
       "circuit-breaker",
       "kelly-haircut",
       "markov-gate",
       "outcome-gate"
     ],
+    "execution-plumbing": [
+      "clob-wrapper"
+    ],
     "infrastructure": [
+      "config-governance",
       "deploy-lifecycle"
     ],
     "data-model": [
       "entry-band"
     ],
+    "signals-feeds": [
+      "external-datasets",
+      "signal-guard",
+      "signal-pipeline"
+    ],
+    "fill-realism": [
+      "fill-model-v2",
+      "fill-router"
+    ],
     "fill-models": [
       "fill-models"
-    ],
-    "statistical-methods": [
-      "mtc-gate"
     ],
     "observability": [
       "phantom-exit-zombies",
       "trade-tracer"
     ],
-    "trading-strategies": [
-      "shadow-mode"
+    "signal-pipeline": [
+      "regime-detector"
+    ],
+    "backtest-methodology": [
+      "triple-barrier"
+    ],
+    "wallet-onchain": [
+      "wallet-architecture"
     ]
   }
 }
