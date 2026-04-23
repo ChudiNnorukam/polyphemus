@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-04-23 - Polyphemus XRP FAK Shadow Resurrect
+
+### Context
+- `lagbot@polyphemus` had been inactive since ~2026-04-16 (journal tail Apr 16 10:16 UTC; collector connection-refused from Apr 16 10:07). Trading had already starved earlier: last trade ~Apr 11 06:47 UTC, no candidates since ~Apr 15 14:27 UTC, driven by pervasive `polyphemus.momentum: Gamma API error` loops on btc/eth/sol/xrp 5m slugs (transient; Gamma returning 200 in <100ms as of Apr 23 22:28 UTC).
+- The 2026-04-02 "Polyphemus Shadow FAK Deploy" narrative below was superseded without documentation: the live drop-in was running momentum + cheap-side + Markov gate (`ENABLE_ACCUMULATOR=false`, `ACCUM_MODE_ENABLED=false`, `CHEAP_SIDE_ENABLED=true`), not FAK accumulator shadow. The snapshot collector reported only `.env` values, masking the drop-in reality — hence `accum_entry_mode=maker` appearing in snapshots while accumulator was in fact disabled.
+
+### What Changed
+- Backups: `/opt/lagbot/instances/polyphemus/.env.bak.20260423T222853Z` and `dry_run.conf.bak.20260423T222853Z` on VPS.
+- DB cleanup: 18 stale `btc-updown-5m` rows (Apr 10 UTC entries) closed with `exit_reason='phantom_orphan_cleanup_2026-04-23'`, `exit_time = entry_time + 300`.
+- Drop-in rewritten to FAK accumulator shadow:
+  - `DRY_RUN=true ACCUM_DRY_RUN=true ENABLE_ACCUMULATOR=true ACCUM_MODE_ENABLED=true ACCUM_ENTRY_MODE=fak ACCUM_ASSETS=SOL,XRP ACCUM_WINDOW_TYPES=5m`
+  - Off: `LOTTERY_ENABLED`, `MM_LIMIT_ENABLED`, `CHEAP_SIDE_ENABLED`, `ENABLE_ARB`, `ENABLE_PAIR_ARB`, `ENABLE_SELF_TUNING`.
+- Circuit breaker reset: prior state was `total_pnl=-15.05` (Apr 10) vs. daily_loss_limit=-15.0, so it loaded as tripped. Reset to zeros, restarted service.
+
+### Verification (Apr 23 22:30 UTC)
+- `systemctl is-active lagbot@polyphemus` → `active`
+- `/api/accumulator` → `enabled=true, state=idle, entry_mode=fak, assets=[SOL,XRP], circuit_tripped=false, scan_count=11, total_pnl=0.0`
+- `/api/status.dry_run=true`, `effective_accumulator_dry_run=true`
+- No tracebacks in 90s post-start window. One pre-existing non-critical warning: `Config drift detected` stemming from `config_expected.json not found at /opt/lagbot/lagbot/config_expected.json` — logged as a shadow-debt item, not a regression from this change.
+
+### Shadow-Debt Findings (deferred — operator decision)
+- AUTH-CONFLICT: polyphemus purpose (drop-in vs. PROGRESS.md 2026-04-02) — resolved by this entry.
+- AUTH-CONFLICT: emmanuel strategy — live drop-in runs `ENABLE_SHARP_MOVE=true`, `ADVERSE_PRECHECK_SECS=15`, `CHEAP_SIDE_ENABLED=false`; MEMORY.md "Lagbot Strategy — BTC 5m Latency Arb" describes a different posture. Not touched.
+- SHADOW (reporting): `data/shadow_eval/polyphemus/hourly_snapshots.jsonl` collector reads `.env` only; `service_env` always null. Systemd drop-in overrides are invisible to the collector. Fix is code; flagged, not done.
+- SUPERSEDED: 2026-04-02 "Polyphemus Shadow FAK Deploy" section below; see §Context above for the actual timeline.
+- ORPHAN: `ACCUM_ENTRY_MODE=maker` in polyphemus `.env` — dead key under the old drop-in. Now consistent with drop-in after rewrite (both set fak).
+- Pre-existing non-critical: `config_expected.json` missing at `/opt/lagbot/lagbot/config_expected.json`, producing startup drift warning.
+
+### Next
+- Collect 24h of FAK scan + candidate data before any directional diagnostic. The "up_ask=0.55 / down_ask=0.51 blocking conversion" read from 2026-04-02 is from a run that did not exist; the real block-reason distribution is still unknown.
+
 ## 2026-04-01 - Pair Arb Session (Major)
 
 ### Current State

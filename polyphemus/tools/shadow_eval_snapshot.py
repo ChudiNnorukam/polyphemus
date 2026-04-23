@@ -55,28 +55,68 @@ def get_base_url(instance: str, explicit_base_url: str | None) -> str:
     return f"http://{host}:{port}"
 
 
-def read_service_env(instance: str) -> dict[str, str]:
-    service = f"lagbot@{instance}"
+def _read_proc_environ(pid: str) -> dict[str, str]:
     try:
-        pid = subprocess.run(
-            ["systemctl", "show", "-p", "MainPID", "--value", service],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        ).stdout.strip()
-        if not pid or pid == "0":
-            return {}
         raw = Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", errors="ignore")
     except Exception:
         return {}
-
     env: dict[str, str] = {}
     for chunk in raw.split("\0"):
         if "=" in chunk:
             key, value = chunk.split("=", 1)
             env[key] = value
     return env
+
+
+def _find_python_descendant(root_pid: str) -> str | None:
+    """BFS the descendant tree of root_pid; return the first python process PID."""
+    seen: set[str] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            comm = Path(f"/proc/{pid}/comm").read_text().strip()
+        except Exception:
+            comm = ""
+        if pid != root_pid and comm.startswith("python"):
+            return pid
+        try:
+            children = subprocess.run(
+                ["pgrep", "-P", pid],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).stdout.split()
+        except Exception:
+            children = []
+        stack.extend(children)
+    return None
+
+
+def read_service_env(instance: str) -> dict[str, str]:
+    # The service's MainPID is often a wrapper (e.g. doppler) that does not
+    # carry the env vars injected via the drop-in's `env K=V ...` prefix —
+    # those land in the python child's environment only. Walk descendants
+    # and read the python process's /proc/<pid>/environ when present.
+    service = f"lagbot@{instance}"
+    try:
+        main_pid = subprocess.run(
+            ["systemctl", "show", "-p", "MainPID", "--value", service],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+    except Exception:
+        return {}
+    if not main_pid or main_pid == "0":
+        return {}
+    target_pid = _find_python_descendant(main_pid) or main_pid
+    return _read_proc_environ(target_pid)
 
 
 def fetch_json(url: str) -> dict:
