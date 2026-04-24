@@ -48,6 +48,11 @@ from .adaptive_tuner import AdaptiveTuner
 from .market_ws import MarketWS
 from .slack_notifier import SlackNotifier
 from .chainlink_feed import ChainlinkFeed
+from .phantom_resolver import (
+    resolve_direction,
+    parse_asset_from_slug,
+    parse_window_secs_from_slug,
+)
 from .market_maker import MarketMaker
 from .ensemble_shadow import BTC5MEnsembleShadow
 from .signal_pipeline import (
@@ -744,33 +749,54 @@ class SignalBot:
                         market_end = market_epoch + window
                         if time.time() > market_end + 600:  # ended 10+ min ago
                             mins_ago = (time.time() - market_end) / 60
-                            # Check share balance to determine win/loss
-                            # Shares > 0 after resolution = WIN (shares worth $1.00)
-                            # Shares = 0 = LOSS (worthless)
-                            try:
-                                shares = await self._clob.get_share_balance(pos.token_id)
-                                if shares >= 5.0:
-                                    # WIN - shares resolved to $1.00, queue for redemption
-                                    exit_price = 1.0
+                            if self._dry_run:
+                                # Dry-run positions have no on-chain shares, so
+                                # get_share_balance always returns 0 and every
+                                # purged row was booked as a total loss regardless
+                                # of actual outcome. Use the same Binance-kline
+                                # resolution the phantom_reaper uses (close>open
+                                # = "up"). Fallback neutral close on flat/error.
+                                exit_price = await self._resolve_dry_run_exit_price(pos, market_end)
+                                if exit_price >= 0.99:
                                     self._logger.info(
-                                        f"Purging stale WIN: {pos.slug} "
-                                        f"(market ended {mins_ago:.0f} min ago, "
-                                        f"{shares:.1f} shares to redeem)"
+                                        f"Purging stale DRY WIN: {pos.slug} "
+                                        f"(ended {mins_ago:.0f}min ago, binance resolved)"
                                     )
-                                    self._enqueue_redemption(pos)
+                                elif exit_price <= 0.01:
+                                    self._logger.info(
+                                        f"Purging stale DRY LOSS: {pos.slug} "
+                                        f"(ended {mins_ago:.0f}min ago, binance resolved)"
+                                    )
                                 else:
-                                    exit_price = 0.0
                                     self._logger.info(
-                                        f"Purging stale LOSS: {pos.slug} "
-                                        f"(market ended {mins_ago:.0f} min ago, "
-                                        f"0 shares remaining)"
+                                        f"Purging stale DRY UNRESOLVED: {pos.slug} "
+                                        f"(ended {mins_ago:.0f}min ago, booking at entry_price)"
                                     )
-                            except Exception as bal_err:
-                                exit_price = 0.0
-                                self._logger.warning(
-                                    f"Share balance check failed for {pos.slug}: {bal_err}, "
-                                    f"assuming loss (redeemer will correct if win)"
-                                )
+                            else:
+                                # Live: share balance determines outcome.
+                                try:
+                                    shares = await self._clob.get_share_balance(pos.token_id)
+                                    if shares >= 5.0:
+                                        exit_price = 1.0
+                                        self._logger.info(
+                                            f"Purging stale WIN: {pos.slug} "
+                                            f"(market ended {mins_ago:.0f} min ago, "
+                                            f"{shares:.1f} shares to redeem)"
+                                        )
+                                        self._enqueue_redemption(pos)
+                                    else:
+                                        exit_price = 0.0
+                                        self._logger.info(
+                                            f"Purging stale LOSS: {pos.slug} "
+                                            f"(market ended {mins_ago:.0f} min ago, "
+                                            f"0 shares remaining)"
+                                        )
+                                except Exception as bal_err:
+                                    exit_price = 0.0
+                                    self._logger.warning(
+                                        f"Share balance check failed for {pos.slug}: {bal_err}, "
+                                        f"assuming loss (redeemer will correct if win)"
+                                    )
                             self._store.remove(pos.token_id)
                             self._tracker.db.force_close_trade(
                                 slug=pos.slug,
@@ -1968,6 +1994,42 @@ class SignalBot:
                 # ``_safe_task`` already catches, but preserve the cadence.
                 self._logger.exception(f"[PHANTOM_REAPER] iteration crashed: {e}")
 
+    async def _resolve_dry_run_exit_price(self, pos, market_end: int) -> float:
+        """Binance-kline outcome lookup for a dry-run position past resolution.
+
+        Mirrors _phantom_reaper_once's resolution so startup purge and steady-state
+        reap agree. Returns 1.0 when the position's direction matches the kline,
+        0.0 when it doesn't, pos.entry_price on any unresolved case (flat candle,
+        missing metadata, unparseable slug, network error).
+
+        Used ONLY in dry-run startup purge; live purge still uses share balance.
+        """
+        try:
+            asset = parse_asset_from_slug(pos.slug)
+            window_secs = parse_window_secs_from_slug(pos.slug)
+            trade_dir = (
+                (pos.metadata or {}).get("direction", "").lower()
+                if isinstance(pos.metadata, dict)
+                else ""
+            )
+            if not (asset and window_secs and trade_dir in ("up", "down")):
+                return float(pos.entry_price or 0.0)
+            binance_dir = await resolve_direction(
+                asset,
+                float(market_end - window_secs),
+                window_secs=window_secs,
+            )
+            if binance_dir == trade_dir:
+                return 1.0
+            if binance_dir in ("up", "down"):
+                return 0.0
+            return float(pos.entry_price or 0.0)
+        except Exception as e:
+            self._logger.warning(
+                f"Dry-run resolve failed for {pos.slug}: {e}; using entry_price"
+            )
+            return float(pos.entry_price or 0.0)
+
     async def _phantom_reaper_once(self, now_ts: float | None = None) -> dict:
         """Single reap pass — the testable core of ``_phantom_reaper_loop``.
 
@@ -1978,14 +2040,41 @@ class SignalBot:
         * Scans ``get_open_trades()`` for phantom rows (``is_dry_run=1`` or
           ``entry_tx_hash`` prefixed ``dry_``) whose slug is an
           ``*-updown-*-<epoch>`` market at least 30s past end.
-        * Writes a neutral close: ``exit_price=entry_price``, ``pnl=0``,
-          ``exit_reason="phantom_orphaned"``. Outcome-aware resolution
-          (``1.0 if correct else 0.0``) is intentionally out of scope — the
-          reaper's only job is clearing ``exit_time`` so the position cap
-          cannot deadlock the pipeline. MTC queries filter this reason
-          out of any verdict window.
+        * For each reapable row, queries Binance's 5m kline spanning
+          ``[market_end - window, market_end]`` (via
+          :func:`phantom_resolver.resolve_direction`) to derive the
+          directional outcome. The kline close vs open is a PROXY for
+          Chainlink RTDS on-chain resolution; the two agree on the
+          majority of epochs (~95-98%) but can diverge on close-call or
+          near-flat candles. For a DRY_RUN reaper producing directional
+          pnl estimates, the proxy is acceptable — divergence is absorbed
+          by MTC Wilson lower bound when aggregated. When the resolver
+          returns a direction AND the trade's metadata has a ``direction``
+          to compare against, the reaper writes an outcome-aware close:
+
+              * WIN  (trade dir == binance dir) -> ``exit_price=1.0``,
+                ``exit_reason='phantom_resolved'``
+              * LOSS (trade dir != binance dir) -> ``exit_price=0.0``,
+                ``exit_reason='phantom_resolved'``
+
+          ``force_close_trade`` derives pnl from ``exit_price`` and
+          ``entry_price`` / ``entry_size`` on its own.
+
+        * When the resolver can't produce a direction (flat epoch,
+          network failure, unknown asset, missing metadata.direction,
+          non-5m/15m window), the reaper falls back to the original
+          conservative close: ``exit_price=entry_price``, ``pnl=0``,
+          ``exit_reason='phantom_orphaned'``. This preserves the P3
+          robust-under-error property — the reaper's primary job is
+          unblocking the position counter; directional pnl is a bonus.
+
         * Idempotent via ``force_close_trade``'s ``WHERE exit_time IS NULL``
           clause; safe to re-run.
+
+        * Per-tick resolution cache dedupes Binance calls when multiple
+          phantom rows share the same ``(asset, market_end)`` key (e.g.
+          a pair_arb that slipped through — though pair_arb is otherwise
+          filtered earlier).
 
         Explicitly skipped
         ------------------
@@ -2002,10 +2091,22 @@ class SignalBot:
         Returns
         -------
         dict with keys ``reaped``, ``skipped_unparseable``,
-        ``skipped_not_past_end`` — always non-negative ints.
+        ``skipped_not_past_end``, ``rows_scanned``, ``resolved_win``,
+        ``resolved_loss``, ``resolved_fallback`` — always non-negative
+        ints. The three ``resolved_*`` counts sum to ``reaped`` and
+        surface directly in the tick log so a silent regression (e.g.
+        Binance always timing out) is observationally visible.
         """
         RESOLUTION_GRACE_SECS = 30
-        result = {"reaped": 0, "skipped_unparseable": 0, "skipped_not_past_end": 0, "rows_scanned": 0}
+        result = {
+            "reaped": 0,
+            "skipped_unparseable": 0,
+            "skipped_not_past_end": 0,
+            "rows_scanned": 0,
+            "resolved_win": 0,
+            "resolved_loss": 0,
+            "resolved_fallback": 0,
+        }
         if not self._dry_run:
             return result
         try:
@@ -2017,6 +2118,11 @@ class SignalBot:
 
         if now_ts is None:
             now_ts = time.time()
+
+        # Per-tick Binance resolution cache.
+        # Key: (asset_ticker, market_end_epoch). Value: "up" / "down" / None.
+        # Dedupes outbound Binance calls when two rows share a market.
+        resolution_cache: dict[tuple[str, int], str | None] = {}
         for row in rows:
             # Phantom filter: prefer the is_dry_run column when migrated,
             # fall back to the "dry_" tx_hash prefix that every phantom
@@ -2048,14 +2154,70 @@ class SignalBot:
                 continue
 
             entry_price = row.get("entry_price") or 0.0
+            token_id = row.get("token_id") or ""
+
+            # Default: conservative neutral close (the pre-outcome-aware
+            # behavior). Any failure in the resolution step falls back
+            # here, preserving robust-under-error.
+            exit_price = entry_price
+            exit_reason = "phantom_orphaned"
+            outcome_bucket = "resolved_fallback"
+
+            asset = parse_asset_from_slug(slug)
+            window_secs = parse_window_secs_from_slug(slug)
+            trade_dir = (md.get("direction") or "").lower()
+            if asset and window_secs and trade_dir in ("up", "down"):
+                cache_key = (asset, market_end)
+                if cache_key in resolution_cache:
+                    binance_dir = resolution_cache[cache_key]
+                else:
+                    try:
+                        binance_dir = await resolve_direction(
+                            asset,
+                            float(market_end - window_secs),
+                            window_secs=window_secs,
+                        )
+                    except Exception as e:
+                        # Defense in depth: resolver already swallows known
+                        # network errors, but a programming bug must not
+                        # crash the reaper tick.
+                        self._logger.warning(
+                            f"[PHANTOM_REAPER] resolve_direction raised "
+                            f"slug={slug} asset={asset}: {e}"
+                        )
+                        binance_dir = None
+                    resolution_cache[cache_key] = binance_dir
+
+                if binance_dir in ("up", "down"):
+                    if binance_dir == trade_dir:
+                        exit_price = 1.0
+                        exit_reason = "phantom_resolved"
+                        outcome_bucket = "resolved_win"
+                    else:
+                        exit_price = 0.0
+                        exit_reason = "phantom_resolved"
+                        outcome_bucket = "resolved_loss"
+
             try:
                 closed = self._tracker.db.force_close_trade(
                     slug=slug,
-                    exit_reason="phantom_orphaned",
-                    exit_price=entry_price,  # neutral -> pnl = 0
+                    exit_reason=exit_reason,
+                    exit_price=exit_price,
                 )
                 if closed:
                     result["reaped"] += 1
+                    result[outcome_bucket] += 1
+                    # CRITICAL: mirror the DB close into the in-memory store.
+                    # count_open() reads PositionStore, not the DB, so without
+                    # this the reaper silently lies — positions accumulate in
+                    # memory, max_open_positions saturates, signal_guard
+                    # rejects every signal with max_positions, pipeline goes
+                    # silent. Every OTHER close path in the codebase pairs
+                    # its DB write with a store.remove() or store.update().
+                    # The reaper was the only exception. P1 (observability-
+                    # at-write-time) applied to in-memory state, not just DB.
+                    if token_id:
+                        self._store.remove(token_id)
             except Exception as e:
                 self._logger.warning(
                     f"[PHANTOM_REAPER] close failed slug={slug}: {e}"
@@ -2063,9 +2225,15 @@ class SignalBot:
 
         # Tick log: always emit so a silent reaper is never observationally
         # indistinguishable from a working one. P1 observability-at-write-time.
+        # The resolved_* breakdown surfaces Binance health: a sudden spike
+        # in resolved_fallback (relative to resolved_win+loss) indicates
+        # Binance timeouts or a missing-metadata.direction regression.
         self._logger.info(
             f"[PHANTOM_REAPER] tick rows={result['rows_scanned']} "
             f"reaped={result['reaped']} "
+            f"win={result['resolved_win']} "
+            f"loss={result['resolved_loss']} "
+            f"fallback={result['resolved_fallback']} "
             f"skipped_unparseable={result['skipped_unparseable']} "
             f"skipped_not_past_end={result['skipped_not_past_end']}"
         )
