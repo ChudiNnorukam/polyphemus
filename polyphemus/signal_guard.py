@@ -180,8 +180,13 @@ class SignalGuard:
             pass  # weather uses weather_entry_max_price filter in scan loop
         elif is_sharp:
             # Sharp moves use extended ceiling (0.90-0.95 zone, near-zero taker fee)
+            # and a dedicated floor to reject deep-OTM entries where the market
+            # already resolved against the direction. The floor is independent
+            # of the global min_entry_price so Doppler-injected 0.01 floors
+            # cannot silently let sharp_move enter at 0.015.
             sharp_max = self._config.sharp_move_max_entry_price
-            if price < min_price or price > sharp_max:
+            sharp_min = max(min_price, self._config.sharp_move_min_entry_price)
+            if price < sharp_min or price > sharp_max:
                 reasons.append('price_out_of_range')
         elif is_clob_imbalance:
             # IGOC uses custom price range

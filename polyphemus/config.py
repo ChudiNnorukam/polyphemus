@@ -202,6 +202,7 @@ class Settings(BaseSettings):
     sharp_move_trigger_pct: float = 0.002  # 0.2% in 15s = sharp move
     sharp_move_shadow: bool = True         # shadow mode: log only, no execution
     sharp_move_max_entry_price: float = 0.95  # sharp moves can enter 0.90-0.95 with taker (fee <0.20%)
+    sharp_move_min_entry_price: float = 0.20  # floor — rejects deep-OTM entries where market has already resolved against direction
     sharp_move_bet_multiplier: float = 1.0  # sizing multiplier for sharp_move (0.5 = half-size for first 30 trades)
 
     # Per-asset entry price ranges (0=use global min/max_entry_price)
