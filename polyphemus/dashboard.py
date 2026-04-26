@@ -757,7 +757,7 @@ class Dashboard:
                     SELECT COUNT(*)
                     FROM signals
                     WHERE asset = 'BTC' AND market_window_secs = 300
-                      AND source = 'binance_momentum'
+                      AND source IN ('binance_momentum', 'sharp_move')
                       AND epoch >= ?
                     """,
                     (cutoff,),
@@ -768,7 +768,7 @@ class Dashboard:
                     SELECT COUNT(*)
                     FROM signals
                     WHERE asset = 'BTC' AND market_window_secs = 300
-                      AND source = 'binance_momentum'
+                      AND source IN ('binance_momentum', 'sharp_move')
                       AND epoch >= ?
                       AND guard_passed = 1
                     """,
@@ -780,7 +780,7 @@ class Dashboard:
                     SELECT COUNT(*)
                     FROM signals
                     WHERE asset = 'BTC' AND market_window_secs = 300
-                      AND source = 'binance_momentum'
+                      AND source IN ('binance_momentum', 'sharp_move')
                       AND epoch >= ?
                       AND COALESCE(outcome, '') = 'filtered'
                     """,
@@ -839,7 +839,7 @@ class Dashboard:
                 SELECT MAX(epoch)
                 FROM signals
                 WHERE asset = 'BTC' AND market_window_secs = 300
-                  AND source = 'binance_momentum'
+                  AND source IN ('binance_momentum', 'sharp_move')
                 """,
             )
             last_btc_pass = query_scalar(
@@ -848,7 +848,7 @@ class Dashboard:
                 SELECT MAX(epoch)
                 FROM signals
                 WHERE asset = 'BTC' AND market_window_secs = 300
-                  AND source = 'binance_momentum'
+                  AND source IN ('binance_momentum', 'sharp_move')
                   AND guard_passed = 1
                 """,
             )
@@ -866,7 +866,7 @@ class Dashboard:
                 SELECT guard_reasons, COUNT(*) AS n
                 FROM signals
                 WHERE asset = 'BTC' AND market_window_secs = 300
-                  AND source = 'binance_momentum'
+                  AND source IN ('binance_momentum', 'sharp_move')
                   AND epoch >= ?
                   AND COALESCE(guard_reasons, '') != ''
                 GROUP BY guard_reasons
@@ -886,7 +886,7 @@ class Dashboard:
                 SELECT epoch, slug, source, midpoint, time_remaining_secs
                 FROM signals
                 WHERE asset = 'BTC' AND market_window_secs = 300
-                  AND source = 'binance_momentum'
+                  AND source IN ('binance_momentum', 'sharp_move')
                   AND guard_passed = 1
                 ORDER BY epoch DESC
                 LIMIT 5

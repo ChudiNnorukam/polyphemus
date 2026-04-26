@@ -375,7 +375,7 @@ def classify_execution_failures(instance: str, config_label: str, config_era: st
             SELECT COALESCE(pipeline_detail, '') AS detail
             FROM signals
             WHERE asset = 'BTC' AND market_window_secs = 300
-              AND source = 'binance_momentum'
+              AND source IN ('binance_momentum', 'sharp_move')
               AND COALESCE(config_label, '') = ?
               AND COALESCE(config_era, '') = ?
               AND epoch BETWEEN ? AND ?
@@ -407,7 +407,7 @@ def count_passed_candidates(instance: str, config_label: str, config_era: str, s
             SELECT COUNT(*)
             FROM signals
             WHERE asset = 'BTC' AND market_window_secs = 300
-              AND source = 'binance_momentum'
+              AND source IN ('binance_momentum', 'sharp_move')
               AND COALESCE(config_label, '') = ?
               AND COALESCE(config_era, '') = ?
               AND epoch BETWEEN ? AND ?

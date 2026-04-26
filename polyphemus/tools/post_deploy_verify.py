@@ -81,7 +81,7 @@ def check_instance(instance):
                 SUM(CASE WHEN outcome='execution_failed' THEN 1 ELSE 0 END) as failed,
                 COUNT(*) as total
             FROM signals 
-            WHERE source='binance_momentum' AND guard_passed=1
+            WHERE source IN ('binance_momentum', 'sharp_move') AND guard_passed=1
             AND timestamp > datetime('now', '-30 minutes')
         """).fetchone()
         conn.close()
