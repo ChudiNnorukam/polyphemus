@@ -1147,11 +1147,15 @@ class SignalBot:
         return bool(getattr(self._config, "btc5m_ensemble_admission_enabled", False))
 
     def _should_apply_ensemble_admission(self, signal: dict) -> bool:
+        # Source includes both legacy 'binance_momentum' (pre-2026-03-25) and
+        # current 'sharp_move' (post-rename). Matches the symmetric pattern at
+        # lines 1176 and 1285 in this file. Without this widening, every
+        # sharp_move signal silently bypassed admission for 32+ days.
         return (
             self._ensemble_admission_enabled()
             and signal.get("asset") == "BTC"
             and int(signal.get("market_window_secs") or 0) == 300
-            and signal.get("source") == "binance_momentum"
+            and signal.get("source") in ("binance_momentum", "sharp_move")
             and not signal.get("shadow")
         )
 
