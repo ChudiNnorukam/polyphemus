@@ -13,6 +13,7 @@ See docs/codex/nodes/sharp-move-alpha-decay-backtest.md for the design.
 from __future__ import annotations
 
 import argparse
+import ast
 import math
 import sys
 from collections import defaultdict
@@ -191,15 +192,20 @@ def main() -> int:
                 rejections["adverse_check_failed"] += 1
                 continue
 
-            # Determine outcome from market.outcome_prices (final settled prices)
-            # outcome_prices is a string like "[\"1\", \"0\"]" or "[\"0\", \"1\"]".
+            # Determine outcome from market.outcome_prices.
+            # Format observed: "['1', '0']" (answer1 won) or "['0', '1']" (answer2 won).
+            # Convention: index 0 = answer1 = "Up" side; index 1 = answer2 = "Down" side.
+            # (Verified empirically against the markets table answer1/answer2 columns.)
             op = mkt["outcome_prices"]
             try:
-                # Crude parse: look for "1" first
-                won = op.count('"1"') > 0 and op.index('"1"') < op.index('"0"')
-            except (ValueError, AttributeError):
+                op_list = ast.literal_eval(op) if isinstance(op, str) else op
+                up_won = float(op_list[0]) > 0.5  # index 0 is the "Up" side
+            except (ValueError, SyntaxError, IndexError, TypeError):
                 rejections["unparseable_outcome"] += 1
                 continue
+            # The trade was on whichever side the simulated sharp_move signal predicted
+            # (side variable above, inferred from momentum sign). Did that side win?
+            won = (side == "up" and up_won) or (side == "down" and not up_won)
 
             # Approximate adverse_fill_bps: |momentum| - threshold, in bps
             # Real adverse fill needs queue-position which we don't have; this
