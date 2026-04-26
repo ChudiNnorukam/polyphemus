@@ -30,7 +30,7 @@ related:
 parent_concepts:
 - sharp-move
 child_concepts: []
-last_verified: '2026-04-26T06:26:09Z'
+last_verified: '2026-04-26T06:33:48Z'
 confidence: inferred
 ---
 
@@ -48,17 +48,24 @@ This node describes the BACKTEST DESIGN. It does NOT describe data fetching, cod
 
 The question is binary at outcome level: edge or no edge. The numeric thresholds match the proposed tiny-live experiment's kill criteria so the two analyses produce comparable verdicts.
 
-## Filter shape (data side)
+## Filter shape (data side — grounded in actual dataset, 2026-04-26 inspection)
 
-Applied against `trades.parquet` (32GB, 293M rows) joined to `markets.parquet` (68MB, 268K rows):
+Applied against `trades.parquet` (32GB, 293M rows) joined to `markets.parquet` (121MB, **734,790 markets** — README's 268K count is stale).
 
-- `markets.title` matches regex `(BTC|Bitcoin|ETH|Ethereum|SOL|Solana|XRP) Up or Down — \d{1,2}:\d{2} (AM|PM) ET` OR similar 5m crypto-market naming convention (verify against actual `markets.title` distribution before committing)
-- `markets.resolution_at - markets.created_at` ≈ 300 seconds (5m windows)
-- Date range: 2024-01-01 → 2025-12-31 inclusive
-- Trade type: `taker_filled` rows only (sharp_move is a taker strategy)
-- Trade price: ≤ 0.95 (sharp_move's entry-price ceiling per `SHARP_MOVE_MAX_ENTRY_PRICE=0.95`)
-- Time-to-resolution at trade time: 60-280 seconds (sharp_move only fires when ≥60s remaining)
-- The sharp_move signal would have fired: this requires reconstructing Binance momentum at trade time from a separate Binance kline source. NOT in the SII-WANGZJ dataset; needs supplementary data fetch from Binance's free klines API. **Dependency on external supplementary data.**
+**Markets-side filter** (one-time join key set):
+- `slug` matches regex `^(btc|eth|sol|xrp)-updown-5m-\d+$` — verified to match **95,797 markets** in the dataset, identical to polyphemus's runtime slug naming convention.
+- Equivalent question-text filter: `(Bitcoin|Ethereum|Solana|XRP) Up or Down - .+ ET` matches 197K rows broader than the slug filter (includes 15m windows and other variants).
+- `end_date - created_at` ≈ 300 seconds (5m window structural check; Polymarket emits these on a fixed cadence, structural confirmation only).
+
+**Trades-side filter** (applied against the joined view):
+- Trade price (`outcome_prices` field, parsed): ≤ 0.95 (sharp_move's entry ceiling per `SHARP_MOVE_MAX_ENTRY_PRICE=0.95`)
+- Time-to-resolution at trade time: 60-280s (computed from market `end_date` minus trade timestamp; sharp_move fires when ≥60s remaining and abandons inside last 20s)
+- Trade direction: aligned to Up if `signal.outcome == "Up"`, Down otherwise (use Polymarket's `answer1`/`answer2` mapping from markets table)
+
+**Signal-eligibility filter** (separate Binance fetch required):
+The sharp_move signal would have fired ⇒ requires reconstructing Binance momentum at trade time from supplementary data. NOT in the SII-WANGZJ dataset.
+- Supplementary fetch: Binance free klines API (1m resolution, BTC/ETH/SOL/XRP, 2024-01-01 → 2025-12-31). Estimated ~1-2GB raw, ~300MB parquet-compressed.
+- Eligibility = `|momentum_60s_pct| ≥ 0.30%` AND price-direction alignment AND ≥60s-to-resolution AND adverse-pre-check passes simulated.
 
 ## Signal reconstruction (synthesizing the filter)
 
