@@ -1126,6 +1126,18 @@ class PositionExecutor:
                     f"mult={dh_mult:.0%}, after_dh={base_spend:.2f}"
                 )
 
+        # Layer 1g2: Static direction multiplier (operator config; default 1.0 = no asymmetry)
+        # Applied to UP signals only; Down keeps full size. Operator-set via UP_DIRECTION_SIZE_MULT.
+        if signal:
+            _outcome = str(signal.get("outcome", "") or signal.get("direction", "")).lower()
+            if _outcome == "up":
+                up_static_mult = self._config.up_direction_size_mult
+                if up_static_mult != 1.0:
+                    base_spend *= up_static_mult
+                    self._logger.debug(
+                        f"Layer 1g2 (static UP mult): mult={up_static_mult:.2f}, after={base_spend:.2f}"
+                    )
+
         # Layer 1h: Adaptive direction sizing (rolling 50-trade WR by direction)
         if signal and self._performance_db:
             outcome = str(signal.get("outcome", "") or signal.get("direction", "")).lower()
