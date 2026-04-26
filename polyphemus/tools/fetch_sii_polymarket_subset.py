@@ -80,17 +80,18 @@ def fetch_trades_subset(
         if ts_col_idx is None:
             raise RuntimeError("timestamp column not found")
 
-        # Pick row groups where stats indicate overlap with target window
-        target_row_groups: list[int] = []
-        for rg_idx in range(md.num_row_groups):
-            stats = md.row_group(rg_idx).column(ts_col_idx).statistics
-            if stats is None:
-                target_row_groups.append(rg_idx)  # be safe
-                continue
-            rg_min, rg_max = stats.min, stats.max
-            if rg_max < min_timestamp or rg_min > max_timestamp:
-                continue  # entire row group outside window
-            target_row_groups.append(rg_idx)
+        # Trades.parquet is time-sorted but the parquet stats on this dataset's
+        # timestamp column appear unreliable (verified empirically: stat filter
+        # chose RG 46-79 = early 2023 instead of recent RGs). Fallback: read the
+        # last N row groups since recent data lives at the file end.
+        # 50 row groups × ~1M rows ≈ 50M rows ≈ 4 months at recent volume,
+        # which covers the entire crypto-5m era (2025-12-17 → 2026-04).
+        FALLBACK_RECENT_RG = 50
+        target_row_groups = list(range(
+            max(0, md.num_row_groups - FALLBACK_RECENT_RG),
+            md.num_row_groups,
+        ))
+        print(f"[trades] strategy: last {FALLBACK_RECENT_RG} row groups (recent data)")
 
         total_rg_rows = sum(md.row_group(i).num_rows for i in target_row_groups)
         print(f"[trades] reading {len(target_row_groups)} of {md.num_row_groups} row groups "
@@ -148,11 +149,11 @@ def main() -> int:
     )
     # Crypto 5m markets created from 2025-12-17 onward; trades trail by minutes
     p.add_argument(
-        "--min-timestamp", type=int, default=1734220800,  # 2025-12-15 00:00 UTC (buffer)
+        "--min-timestamp", type=int, default=1765756800,  # 2025-12-15 00:00 UTC
         help="skip row groups with all timestamps below this (default: 2025-12-15)",
     )
     p.add_argument(
-        "--max-timestamp", type=int, default=1746057600,  # 2026-05-01 00:00 UTC (buffer)
+        "--max-timestamp", type=int, default=1777593600,  # 2026-05-01 00:00 UTC
         help="skip row groups with all timestamps above this (default: 2026-05-01)",
     )
     args = p.parse_args()
