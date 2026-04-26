@@ -1083,12 +1083,12 @@ def main() -> int:
     ensemble_profile = make_profile(
         "ensemble_selected_live_v1",
         "Live-v1 slice: binance_momentum rows already tagged as shadow_ensemble_selected",
-        lambda candidate: candidate.source == "binance_momentum" and candidate.shadow_ensemble_selected == 1,
+        lambda candidate: candidate.source in ("binance_momentum", "sharp_move") and candidate.shadow_ensemble_selected == 1,
     )
     guarded_profile = make_profile(
         "current_guarded",
         "Current guarded benchmark slice",
-        lambda candidate: candidate.source == "binance_momentum" and candidate.shadow_current_guarded == 1,
+        lambda candidate: candidate.source in ("binance_momentum", "sharp_move") and candidate.shadow_current_guarded == 1,
     )
     ensemble_result = shadow_scan.simulate_profile(ensemble_profile, candidates, resolutions)
     guarded_result = shadow_scan.simulate_profile(guarded_profile, candidates, resolutions)

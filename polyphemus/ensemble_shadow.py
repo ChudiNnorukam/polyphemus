@@ -60,7 +60,7 @@ class BTC5MEnsembleShadow:
 
     def current_guarded_hit(self, signal: dict) -> bool:
         return (
-            signal.get("source") == "binance_momentum"
+            signal.get("source") in ("binance_momentum", "sharp_move")
             and float(signal.get("price") or 0.0) <= 0.80
             and int(signal.get("time_remaining_secs") or 0) >= 210
         )
@@ -85,7 +85,7 @@ class BTC5MEnsembleShadow:
 
     def ensemble_candidate(self, signal: dict) -> bool:
         return (
-            signal.get("source") in {"binance_momentum", "window_delta", "resolution_snipe"}
+            signal.get("source") in {"binance_momentum", "sharp_move", "window_delta", "resolution_snipe"}
             and float(signal.get("price") or 0.0) <= 0.82
             and int(signal.get("time_remaining_secs") or 0) >= 60
         )
