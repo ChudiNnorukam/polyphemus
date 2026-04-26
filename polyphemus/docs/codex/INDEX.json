@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-04-26T05:21:52Z",
+  "generated_at": "2026-04-26T06:25:37Z",
   "nodes": {
     "accumulator-state": {
       "file": "nodes/accumulator-state.md",
@@ -21,7 +21,7 @@
         "trade-tracer"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-26T04:00:05Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "adverse-selection": {
       "file": "nodes/adverse-selection.md",
@@ -42,7 +42,7 @@
         "trade-tracer"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-26T04:00:05Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "alpha-decay": {
       "file": "nodes/alpha-decay.md",
@@ -66,7 +66,7 @@
         "backtest-harness"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "attribution-views": {
       "file": "nodes/attribution-views.md",
@@ -92,7 +92,7 @@
         "signal-pipeline"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "backtest-harness": {
       "file": "nodes/backtest-harness.md",
@@ -122,7 +122,7 @@
         "alpha-decay"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "binance-momentum": {
       "file": "nodes/binance-momentum.md",
@@ -147,7 +147,7 @@
         "shadow-mode"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "btc-5m-snipe-strategy": {
       "file": "nodes/btc-5m-snipe-strategy.md",
@@ -179,7 +179,7 @@
         "pwin-estimator-binance"
       ],
       "confidence": "target",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "cheap-side-signal": {
       "file": "nodes/cheap-side-signal.md",
@@ -204,7 +204,7 @@
         "mtc-gate"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "circuit-breaker": {
       "file": "nodes/circuit-breaker.md",
@@ -223,7 +223,7 @@
         "accumulator-state"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "clob-wrapper": {
       "file": "nodes/clob-wrapper.md",
@@ -250,7 +250,7 @@
         "exit-manager"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "config-governance": {
       "file": "nodes/config-governance.md",
@@ -280,7 +280,7 @@
         "accumulator-state"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "deploy-lifecycle": {
       "file": "nodes/deploy-lifecycle.md",
@@ -298,7 +298,7 @@
         "mtc-gate"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "entry-band": {
       "file": "nodes/entry-band.md",
@@ -319,7 +319,7 @@
         "pwin-estimator-binance"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "exit-manager": {
       "file": "nodes/exit-manager.md",
@@ -348,7 +348,7 @@
         "adverse-selection"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "external-datasets": {
       "file": "nodes/external-datasets.md",
@@ -374,7 +374,7 @@
         "adverse-selection"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "fill-model-v2": {
       "file": "nodes/fill-model-v2.md",
@@ -405,7 +405,7 @@
         "trade-tracer"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "fill-models": {
       "file": "nodes/fill-models.md",
@@ -429,7 +429,7 @@
         "trade-tracer"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "fill-router": {
       "file": "nodes/fill-router.md",
@@ -454,7 +454,7 @@
         "config-governance"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "kelly-haircut": {
       "file": "nodes/kelly-haircut.md",
@@ -475,7 +475,7 @@
         "mtc-gate"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "markov-gate": {
       "file": "nodes/markov-gate.md",
@@ -497,7 +497,7 @@
         "kelly-haircut"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "mtc-gate": {
       "file": "nodes/mtc-gate.md",
@@ -518,7 +518,7 @@
         "deploy-lifecycle"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "mtc-pre-deploy-gate-tool": {
       "file": "nodes/mtc-pre-deploy-gate-tool.md",
@@ -552,7 +552,7 @@
         "trade-tracer"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "outcome-gate": {
       "file": "nodes/outcome-gate.md",
@@ -571,7 +571,7 @@
         "mtc-gate"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "pair-arb": {
       "file": "nodes/pair-arb.md",
@@ -624,7 +624,7 @@
         "adverse-selection"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "phantom-exit-zombies": {
       "file": "nodes/phantom-exit-zombies.md",
@@ -669,7 +669,7 @@
         "pair-arb"
       ],
       "confidence": "verified",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "pwin-estimator-binance": {
       "file": "nodes/pwin-estimator-binance.md",
@@ -694,7 +694,7 @@
         "alpha-decay"
       ],
       "confidence": "target",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "regime-detector": {
       "file": "nodes/regime-detector.md",
@@ -724,7 +724,7 @@
         "alpha-decay"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "resolution-snipe": {
       "file": "nodes/resolution-snipe.md",
@@ -749,7 +749,7 @@
         "mtc-gate"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "shadow-mode": {
       "file": "nodes/shadow-mode.md",
@@ -776,7 +776,31 @@
         "deploy-lifecycle"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-26T04:00:05Z"
+      "last_verified": "2026-04-26T05:32:01Z"
+    },
+    "sharp-move-alpha-decay-backtest": {
+      "file": "nodes/sharp-move-alpha-decay-backtest.md",
+      "domain": "trading-strategies",
+      "name": "Sharp Move Alpha Decay Backtest (research design)",
+      "aliases": [
+        "alpha-decay-backtest",
+        "sii-polymarket-backtest",
+        "sharp-move-historical-backtest",
+        "did-sharp-move-ever-have-edge",
+        "sii-wangzj-backtest",
+        "polymarket-academic-backtest"
+      ],
+      "related": [
+        "sharp-move",
+        "alpha-decay",
+        "adverse-selection",
+        "mtc-gate",
+        "entry-band",
+        "external-datasets",
+        "shadow-mode"
+      ],
+      "confidence": "inferred",
+      "last_verified": null
     },
     "sharp-move-tiny-live-experiment": {
       "file": "nodes/sharp-move-tiny-live-experiment.md",
@@ -799,7 +823,7 @@
         "alpha-decay"
       ],
       "confidence": "inferred",
-      "last_verified": null
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "sharp-move": {
       "file": "nodes/sharp-move.md",
@@ -821,7 +845,7 @@
         "shadow-mode"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-26T04:00:05Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "signal-guard": {
       "file": "nodes/signal-guard.md",
@@ -845,7 +869,7 @@
         "circuit-breaker"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "signal-pipeline": {
       "file": "nodes/signal-pipeline.md",
@@ -868,7 +892,7 @@
         "entry-band"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "trade-tracer": {
       "file": "nodes/trade-tracer.md",
@@ -889,7 +913,7 @@
         "deploy-lifecycle"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "triple-barrier": {
       "file": "nodes/triple-barrier.md",
@@ -917,7 +941,7 @@
         "entry-band"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "wallet-architecture": {
       "file": "nodes/wallet-architecture.md",
@@ -949,7 +973,7 @@
         "deploy-lifecycle"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     },
     "weather-arb": {
       "file": "nodes/weather-arb.md",
@@ -978,7 +1002,7 @@
         "deploy-lifecycle"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-24T17:28:23Z"
+      "last_verified": "2026-04-26T05:32:01Z"
     }
   },
   "domains": {
@@ -1005,6 +1029,7 @@
       "pair-arb",
       "resolution-snipe",
       "shadow-mode",
+      "sharp-move-alpha-decay-backtest",
       "sharp-move-tiny-live-experiment",
       "sharp-move"
     ],
