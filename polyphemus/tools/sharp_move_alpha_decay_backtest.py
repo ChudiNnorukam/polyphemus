@@ -53,7 +53,12 @@ def wilson_lower_bound(wins: int, n: int, z: float = 1.96) -> float:
 
 
 def load_klines(klines_dir: Path) -> dict[str, dict]:
-    """Load each asset's klines into a dict[asset] = {open_time_ms: close_price}."""
+    """Load each asset's klines into a dict[asset] = {open_time_ms: close_price}.
+
+    Unit-detect: data.binance.vision CSV emits open_time in microseconds
+    (16 digits), api.binance.com REST emits milliseconds (13 digits). Normalize
+    both to milliseconds.
+    """
     out: dict[str, dict] = {}
     for symbol in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"):
         path = klines_dir / f"{symbol}.parquet"
@@ -63,8 +68,13 @@ def load_klines(klines_dir: Path) -> dict[str, dict]:
         tbl = pq.read_table(path, columns=["open_time_ms", "close"])
         ot = tbl.column("open_time_ms").to_pylist()
         cl = tbl.column("close").to_pylist()
+        # Normalize to milliseconds: if values look like microseconds (>10^15)
+        # divide by 1000.
+        if ot and ot[0] >= 10**15:
+            ot = [t // 1000 for t in ot]
         out[symbol] = dict(zip(ot, cl))
-        print(f"  loaded {symbol}: {len(out[symbol]):,} klines")
+        sample = next(iter(out[symbol].keys()))
+        print(f"  loaded {symbol}: {len(out[symbol]):,} klines (sample key={sample})")
     return out
 
 
