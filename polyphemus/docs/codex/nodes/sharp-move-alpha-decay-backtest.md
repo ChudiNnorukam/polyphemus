@@ -30,7 +30,7 @@ related:
 parent_concepts:
 - sharp-move
 child_concepts: []
-last_verified: '2026-04-26T06:33:48Z'
+last_verified: '2026-04-26T06:37:41Z'
 confidence: inferred
 ---
 
@@ -101,10 +101,66 @@ After filter + signal reconstruction yields N eligible historical trades:
 ## Where (target locations for downstream artifacts; not yet authored)
 
 When this design is ratified and execution begins:
-- Fetch script: `polyphemus/tools/fetch_sii_polymarket_data.py`
+- Fetch script: `polyphemus/tools/fetch_sii_polymarket_subset.py`
 - Backtester: `polyphemus/tools/sharp_move_alpha_decay_backtest.py`
+- Binance kline fetcher: `polyphemus/tools/fetch_binance_klines_2024_2025.py`
 - Output report: `dario_output/sharp-move-alpha-decay-<YYYY-MM-DD>.md`
 - Post-exec node: append result-row to `external-datasets` history + log self-ledger annotate.
+
+## Phase 2 — PLAN (per LIFECYCLE.md)
+
+Authored 2026-04-26 against verified HF dataset schemas (footer reads via `HfFileSystem`, no full downloads). All field names below are confirmed from real schema.
+
+### File list
+
+NEW:
+- `polyphemus/tools/fetch_sii_polymarket_subset.py` — pyarrow + HfFileSystem streaming. Reads `trades.parquet` row-group-by-row-group with predicate-pushdown filter `market_id in target_set` (95,797 ids). Writes filtered subset to `polyphemus/data/sii_polymarket_subset/trades_crypto_5m.parquet`. Estimated output: 1-3GB (95K of 734K markets ≈ 13%; ~70-100M of 568M trades likely).
+- `polyphemus/tools/fetch_binance_klines_2024_2025.py` — Binance free klines API client. Pulls 1m klines for BTCUSDT / ETHUSDT / SOLUSDT / XRPUSDT, 2024-01-01 → 2025-12-31. Estimated 4 × ~525K minutes × 7 fields = ~300MB parquet.
+- `polyphemus/tools/sharp_move_alpha_decay_backtest.py` — joins crypto 5m trades to klines, simulates sharp_move signal eligibility per the recipe in this node's "Signal reconstruction" section, computes Wilson LB(WR) + mean adverse_fill_bps + P9 disjoint-window check, emits Markdown report.
+- `polyphemus/data/sii_polymarket_subset/` (gitignored) — local cache of filtered parquet
+- `polyphemus/data/binance_klines/` (gitignored) — local cache of kline parquet
+- `dario_output/sharp-move-alpha-decay-<YYYY-MM-DD>.md` — final report
+
+MODIFIED:
+- `polyphemus/.gitignore` — add `data/sii_polymarket_subset/` and `data/binance_klines/`
+- `polyphemus/docs/codex/nodes/sharp-move-alpha-decay-backtest.md` (this node) — append post-exec verdict row
+- `polyphemus/docs/external_datasets.md` — append history entry naming the integration date + verdict
+
+### Config changes
+
+**NONE.** No `.env` field touched. No systemd drop-in changed. No live trading parameter modified. The backtest is purely offline analysis.
+
+### Blast radius
+
+`grep -rn` on the new function names + modified files:
+- New tools live under `polyphemus/tools/` — same dir as `post_deploy_verify.py`, `btc5m_ensemble_go_live_gate.py`, `quant_candidate_refresh.py`, etc. Convention established.
+- No imports of these new tools by any production code path (zero blast radius until backtester is invoked manually).
+- `.gitignore` change is additive; only affects new data dirs.
+- The post-exec node-body update is append-only.
+- LIVE_TRADING_PATH_GLOBS untouched.
+
+### Side effects
+
+- **Network egress**: ~2-5GB from HuggingFace (predicate-pushdown filter download of trades.parquet row groups) + ~300MB from Binance klines API. Both free.
+- **Disk**: ~3-5GB local under `polyphemus/data/`. Fits in 3.3GB free IFF disk cleanup happens; otherwise blocks.
+- **Runtime**: ~20-40 min for fetch (network-bound); ~10-30 min for backtest (compute-bound, single-machine pyarrow + numpy).
+- **No live system touched.** emmanuel + polyphemus continue uninterrupted in DRY_RUN.
+
+### Rollback
+
+- `git revert` the commits that introduce the 3 new tools — fully reversible
+- `rm -rf polyphemus/data/sii_polymarket_subset/ polyphemus/data/binance_klines/` — recovers all disk
+- Worst case: the verdict suggests a tiny-live experiment we then run live — but THAT is gated by an additional Phase-2-PLAN-of-its-own (the existing `sharp-move-tiny-live-experiment` node) and operator ratification
+
+### Phase 2 Gate
+
+Per LIFECYCLE.md "Plan Approved" gate, evidence required:
+- ✅ File list complete (no "and possibly others")
+- ✅ Config changes listed (NONE, with explicit "no .env touched")
+- ✅ Blast radius mapped via convention check (no production imports of new tools)
+- ⏳ User has approved the plan — pending ratification of this node
+
+When Phase 2 is ratified, execution begins (Phase 3 IMPLEMENT) starting with the fetch scripts. Phase 4 TESTING is the verdict computation + Markdown report generation. Phase 5 RATIFICATION is the operator's kill / promote / tiny-live decision based on the verdict.
 
 ## When-to-touch
 
