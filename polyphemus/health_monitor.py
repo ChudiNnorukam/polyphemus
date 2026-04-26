@@ -381,7 +381,9 @@ class HealthMonitor:
             trade_conn = sqlite3.connect(str(perf_db_path))
             trade_conn.row_factory = sqlite3.Row
             try:
-                # Check ANY signal source (binance_momentum or flat_regime_rtds)
+                # Check signal sources active at any time. Update when strategies rename.
+                # 2026-04-26: added sharp_move (renamed from binance_momentum on 2026-03-25),
+                # plus cheap_side / resolution_snipe / lottery to stop a 467h false-alarm.
                 last_decision = sig_conn.execute(
                     """
                     SELECT MAX(epoch) AS ts
@@ -394,7 +396,7 @@ class HealthMonitor:
                     SELECT MAX(epoch) AS ts
                     FROM signals
                     WHERE market_window_secs IN (300, 900)
-                      AND source IN ('binance_momentum', 'flat_regime_rtds')
+                      AND source IN ('binance_momentum', 'flat_regime_rtds', 'sharp_move', 'cheap_side', 'resolution_snipe', 'lottery')
                     """
                 ).fetchone()["ts"]
                 passed_1h = sig_conn.execute(
@@ -402,7 +404,7 @@ class HealthMonitor:
                     SELECT COUNT(*) AS n
                     FROM signals
                     WHERE market_window_secs IN (300, 900)
-                      AND source IN ('binance_momentum', 'flat_regime_rtds')
+                      AND source IN ('binance_momentum', 'flat_regime_rtds', 'sharp_move', 'cheap_side', 'resolution_snipe', 'lottery')
                       AND epoch >= ? AND guard_passed = 1
                     """,
                     (now - 3600,),
@@ -412,7 +414,7 @@ class HealthMonitor:
                     SELECT COUNT(*) AS n
                     FROM signals
                     WHERE market_window_secs IN (300, 900)
-                      AND source IN ('binance_momentum', 'flat_regime_rtds')
+                      AND source IN ('binance_momentum', 'flat_regime_rtds', 'sharp_move', 'cheap_side', 'resolution_snipe', 'lottery')
                       AND epoch >= ?
                     """,
                     (now - 3600,),
@@ -422,7 +424,7 @@ class HealthMonitor:
                     SELECT guard_reasons, COUNT(*) AS n
                     FROM signals
                     WHERE market_window_secs IN (300, 900)
-                      AND source IN ('binance_momentum', 'flat_regime_rtds')
+                      AND source IN ('binance_momentum', 'flat_regime_rtds', 'sharp_move', 'cheap_side', 'resolution_snipe', 'lottery')
                       AND epoch >= ? AND COALESCE(guard_reasons, '') != ''
                     GROUP BY guard_reasons
                     ORDER BY n DESC
