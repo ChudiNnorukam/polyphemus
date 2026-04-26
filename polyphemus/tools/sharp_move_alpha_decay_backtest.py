@@ -163,9 +163,14 @@ def main() -> int:
             # Trade timestamp: SII timestamp is uint64 unix seconds based on schema
             ts_ms = ts_s * 1000 if ts_s < 10_000_000_000 else ts_s
 
-            if td not in ("BUY",):  # sharp_move is taker-buy
-                rejections["not_taker_buy"] += 1
-                continue
+            # NOTE: SII's BUY/SELL semantics may be inverted from share-direction
+            # (it appears to encode the USDC-side, not the share-side). Skip
+            # this filter and rely on price + momentum + market resolution to
+            # determine alignment. Direction-correctness becomes a downstream
+            # decomposition. This is a v1 simplification; a v2 would map
+            # asset_id (token bought/sold) against markets.token1/token2 to
+            # determine which OUTCOME side the trader actually took.
+            _ = td  # taker_direction kept for future per-side analysis
             if price > SHARP_MOVE_MAX_ENTRY_PRICE:
                 rejections["price_above_ceiling"] += 1
                 continue
