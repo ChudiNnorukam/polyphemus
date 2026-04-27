@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-04-26T06:33:48Z",
+  "generated_at": "2026-04-27T21:05:46Z",
   "nodes": {
     "accumulator-state": {
       "file": "nodes/accumulator-state.md",
@@ -252,6 +252,28 @@
       "confidence": "inferred",
       "last_verified": "2026-04-26T05:32:01Z"
     },
+    "codebase-reliability-coverage": {
+      "file": "nodes/codebase-reliability-coverage.md",
+      "domain": "methodology",
+      "name": "Codebase Reliability Coverage",
+      "aliases": [
+        "invariant audit",
+        "coverage audit",
+        "reliability sweep",
+        "codebase clean check",
+        "premature victory pattern",
+        "audit completeness"
+      ],
+      "related": [
+        "falsifiable-prediction-discipline",
+        "test-to-live-haircut",
+        "mtc-gate",
+        "deploy-lifecycle",
+        "shadow-mode"
+      ],
+      "confidence": "inferred",
+      "last_verified": "2026-04-27T21:05:46Z"
+    },
     "config-governance": {
       "file": "nodes/config-governance.md",
       "domain": "infrastructure",
@@ -375,6 +397,30 @@
       ],
       "confidence": "inferred",
       "last_verified": "2026-04-26T05:32:01Z"
+    },
+    "falsifiable-prediction-discipline": {
+      "file": "nodes/falsifiable-prediction-discipline.md",
+      "domain": "methodology",
+      "name": "Falsifiable Prediction Discipline",
+      "aliases": [
+        "pre-committed predictions",
+        "pre-registered hypothesis",
+        "kill/promote criteria",
+        "pre-mortem thresholds",
+        "popper discipline",
+        "hypothesis ratification"
+      ],
+      "related": [
+        "backtest-harness",
+        "mtc-gate",
+        "deploy-lifecycle",
+        "shadow-mode",
+        "outcome-gate",
+        "sharp-move-tiny-live-experiment",
+        "test-to-live-haircut"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-27T21:00:34Z"
     },
     "fill-model-v2": {
       "file": "nodes/fill-model-v2.md",
@@ -800,7 +846,7 @@
         "shadow-mode"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-26T06:26:09Z"
+      "last_verified": "2026-04-26T06:37:41Z"
     },
     "sharp-move-tiny-live-experiment": {
       "file": "nodes/sharp-move-tiny-live-experiment.md",
@@ -893,6 +939,30 @@
       ],
       "confidence": "inferred",
       "last_verified": "2026-04-26T05:32:01Z"
+    },
+    "test-to-live-haircut": {
+      "file": "nodes/test-to-live-haircut.md",
+      "domain": "methodology",
+      "name": "Test-to-Live Haircut",
+      "aliases": [
+        "haircut",
+        "backtest haircut",
+        "sim-to-live degradation",
+        "dry-run haircut",
+        "realism penalty"
+      ],
+      "related": [
+        "alpha-decay",
+        "adverse-selection",
+        "backtest-harness",
+        "mtc-gate",
+        "kelly-haircut",
+        "fill-models",
+        "sharp-move-alpha-decay-backtest",
+        "sharp-move-tiny-live-experiment"
+      ],
+      "confidence": "verified",
+      "last_verified": "2026-04-27T21:00:34Z"
     },
     "trade-tracer": {
       "file": "nodes/trade-tracer.md",
@@ -1045,6 +1115,11 @@
     ],
     "execution-plumbing": [
       "clob-wrapper"
+    ],
+    "methodology": [
+      "codebase-reliability-coverage",
+      "falsifiable-prediction-discipline",
+      "test-to-live-haircut"
     ],
     "infrastructure": [
       "config-governance",
