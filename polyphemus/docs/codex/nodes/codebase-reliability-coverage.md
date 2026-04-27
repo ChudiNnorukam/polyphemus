@@ -24,7 +24,7 @@ related:
 - shadow-mode
 parent_concepts: []
 child_concepts: []
-last_verified: '2026-04-27T21:05:46Z'
+last_verified: '2026-04-27T21:28:51Z'
 confidence: inferred
 ---
 
@@ -75,16 +75,25 @@ incrementally tightens the unknown-unknown space. This node holds
 the discipline so the lesson does not have to be relearned every
 session.
 
-## The 6 invariant categories (initial set, drafted from session findings)
+## The 5 invariant categories (initial set, drafted from session findings)
 
-| # | Category | Definition | Detection grounding |
+The methodology promises **bug-only confidence** — every category surfaces
+unambiguous reliability defects, never operator strategy choices. The
+original 6th category (`config-validator-clean`) was dropped 2026-04-27
+because validator warnings mix bug-class (drift between validator range
+and runtime value) with strategy-class (operator's intentional parameter
+choice that triggers a stale validator range). The methodology cannot
+guarantee bug-only confidence while that category is included; the
+right resolution is to split the concern (bug-class becomes a future
+`validator-range-strategy-coverage` category if needed).
+
+| # | Category | Definition (BUG-class only) | Detection grounding |
 |---|---|---|---|
-| 1 | **cadence-aware-thresholds** | Every time-thresholded watchdog/timer/restart in business code is calibrated for the active strategy's fill cadence, OR is documented as cadence-independent | `health_monitor.py:355` 1h ZERO TRADE alert misfiring on sharp_move's 5h cadence |
+| 1 | **cadence-aware-thresholds** | Every hardcoded time-threshold in business code that gates on a cadence-sensitive context (gap/since/trade/signal/cooldown) is calibrated for the active strategy's fill cadence, OR is documented as cadence-independent in the allowlist with a stated reason | `health_monitor.py:355` 1h ZERO TRADE alert misfiring on sharp_move's 5h cadence |
 | 2 | **source-name-propagation** | Every allowlist / SQL-IN-clause / dashboard column referring to a strategy source name covers ALL active sources, including any post-rename names | source-rename 2026-03-25 broke 6 files; took two audit waves to catch all of them |
-| 3 | **lock↔runtime-sync** | Every entry in `requirements-lock.txt` matches the version installed in the running venv on every host. No silent drift between manifest and process | `python-dotenv` lock=1.0.0 vs VPS=1.2.1 drift discovered 2026-04-26 |
-| 4 | **config-validator-clean** | Bot startup config validator emits zero out-of-range warnings, OR each warning has an acknowledged-and-justified ledger entry | `MOMENTUM_TRIGGER_PCT=1.0`, `MOMENTUM_WINDOW_SECS=10`, `MAX_OPEN_POSITIONS=20` warnings 2026-04-27 |
-| 5 | **dead-flag-detection** | Every feature flag set to False has zero downstream code paths claiming the flag is True. Every feature flag set to True is exercised by at least one signal/path | `ENABLE_BTC5M_ENSEMBLE_SHADOW=false` while session-authored "ensemble fix" patches assumed it was True (inert patches) |
-| 6 | **local↔VPS-sync** | Every business-code .py file (excluding venv, tests, archive, worktrees) has matching sha256 between local repo and VPS path | health_monitor.py drifted from local for the entire session until predeploy.sh reconciled it |
+| 3 | **lock↔runtime-sync** | Every entry in `requirements-lock.txt` matches the version installed in the running venv on every host. Names normalized per PEP 503 | `python-dotenv` lock=1.0.0 vs VPS=1.2.1 drift discovered 2026-04-26; pydantic 2.11.7 vs 2.12.5 drift 2026-04-27 |
+| 4 | **dead-flag-detection** | Every `ENABLE_*` / `DISABLE_*` flag set in `.env` has at least one `config.<flag_lower>` consumer in business code. Flags set in env without any consumer are dead config | `ENABLE_BTC5M_ENSEMBLE_SHADOW=false` while session-authored "ensemble fix" patches assumed it was True (inert patches) |
+| 5 | **local↔VPS-sync** | Every business-code .py file at the polyphemus root (excluding venv, tests, archive, worktrees) has matching sha256 between local repo and VPS path | health_monitor.py drifted from local for the entire session until predeploy.sh reconciled it |
 
 Each category has a corresponding check in `~/.claude/skills/invariant-audit/`
 (spine of the methodology). Checks are runnable via `/invariant-audit` and
