@@ -275,6 +275,32 @@ class HealthMonitor:
             except Exception as e:
                 self._logger.error(f"health_log_loop error: {e}")
 
+    def _signals_passed_last_hour(self) -> int:
+        """Return the count of signals that passed guard in the last 60 minutes.
+
+        Replaces the lifetime ``guard_metrics['signals_passed']`` arm for INVARIANT-5
+        so sparse-cadence strategies (sharp_move ~5h between fills) do not arm
+        the zero-trade watchdog permanently after the 5th passed signal in the
+        bot's life. Returns 0 on any DB error so the watchdog fails safe (no
+        alert) rather than crashing the health loop.
+        """
+        signal_db = getattr(self._signal_logger, "_db_path", None)
+        if not signal_db:
+            return 0
+        try:
+            conn = sqlite3.connect(str(signal_db))
+            try:
+                cutoff = time.time() - 3600
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM signals WHERE guard_passed=1 AND epoch > ?",
+                    (cutoff,),
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                conn.close()
+        except Exception:
+            return 0
+
     def _check_runtime_invariants(self, uptime_hours, balance, guard_metrics, open_positions, now=None):
         """Check runtime invariants. CRITICAL violations halt trading via callback (F3 fix)."""
         if not guard_metrics:
@@ -331,10 +357,13 @@ class HealthMonitor:
                 pass
 
         # INVARIANT-5: Zero-trade-window detection (CRITICAL → Slack alert)
-        # If signals are passing guard but no trades execute for 1+ hour, something is
-        # silently broken (e.g., execute_buy crashing, balance check failing).
+        # Fires when signals pass guard recently but no trades execute for 6+ hours.
         # Born from: asyncio bug blocked all trades for hours while bot showed "active".
-        if now and uptime_hours > 1.0 and guard_metrics.get('signals_passed', 0) > 5:
+        # 2026-04-27: cadence-recalibrated for sharp_move (1 fill / ~5h vs.
+        # binance_momentum's 1 fill / ~1h). Also switched arming from a lifetime
+        # signals_passed counter to a 1h rolling window so sparse strategies
+        # don't permanently arm the watchdog after the 5th passed signal.
+        if now and uptime_hours > 1.0 and self._signals_passed_last_hour() > 5:
             accum_stats = self._get_accumulator_stats()
             if accum_stats.get("circuit_tripped", False):
                 self._maybe_log_accumulator_circuit(now, "ZERO TRADE ALERT suppressed")
@@ -352,7 +381,7 @@ class HealthMonitor:
                         conn.close()
                     if last_trade_ts > 0:
                         trade_gap = now - float(last_trade_ts)
-                        if trade_gap > 3600:  # 1 hour
+                        if trade_gap > 21600:  # 6 hours (sharp_move cadence)
                             gap_h = trade_gap / 3600
                             msg = (
                                 f"ZERO TRADE ALERT: {gap_h:.1f}h since last trade, "
@@ -461,7 +490,7 @@ class HealthMonitor:
                 )
             return
 
-        if not last_decision or now - float(last_decision) > 900:
+        if not last_decision or now - float(last_decision) > 1800:
             mins = "never" if not last_decision else f"{(now - float(last_decision)) / 60:.1f}m"
             self._logger.warning(
                 "PIPELINE WATCHDOG: no signal decision in %s; market discovery or signal generation may be stalled",
