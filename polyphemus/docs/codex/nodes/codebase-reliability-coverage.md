@@ -139,19 +139,20 @@ Route here when the user says:
   baseline so post-refactor diff is meaningful)
 
 Refuse to ratify a "the codebase is clean" framing. Always rephrase
-as "X/6 invariant categories covered, Y files explicitly out-of-scope,
+as "X/5 invariant categories covered, Y files explicitly out-of-scope,
 unknown-unknowns remain by definition." This is the discipline.
 
 ## Anti-patterns
 
-- **Trusting checklist as cure.** The 6 categories are seeded from
+- **Trusting checklist as cure.** The 5 categories are seeded from
   past bug classes. They cannot catch the next novel bug class.
   Adding categories AFTER each new bug class is the maturation
-  path; pretending the current 6 are sufficient is the failure mode
+  path; pretending the current 5 are sufficient is the failure mode
   this entire node exists to prevent.
-- **Claiming convergence.** "We're now at 6/6 PASS, codebase is clean"
-  is the phrase to refuse. The right phrase is "6/6 PASS on the
-  named categories; categories themselves are partial."
+- **Claiming convergence.** "We're now at 5/5 PASS, codebase is clean"
+  is the phrase to refuse. The right phrase is "5/5 PASS on the
+  named bug-class categories; categories themselves are partial,
+  strategy concerns are out of scope by design."
 - **Skipping the adversarial sweep.** The whole point of layered
   coverage is that no single lens is enough. Skipping the sweep
   collapses D back into A and forfeits the protection.
