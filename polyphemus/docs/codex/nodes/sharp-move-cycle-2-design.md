@@ -30,7 +30,7 @@ related:
 - mtc-gate
 parent_concepts: []
 child_concepts: []
-last_verified: '2026-04-28T07:52:25Z'
+last_verified: '2026-04-28T20:58:00Z'
 confidence: inferred
 ratified: null
 ---
@@ -43,7 +43,7 @@ running. The design captures:
 
 1. **Decision tree based on cycle-1 verdict** — what cycle-2 looks like
    (or whether it happens at all) under each of KILL / EXTEND / PROMOTE.
-2. **Six candidate hypotheses for cycle-2** to test, each with a
+2. **Seven candidate hypotheses for cycle-2** to test, each with a
    cycle-1-data-grounded pre-commit threshold.
 3. **Instrumentation requirements** that can ONLY be added between
    cycles per `falsifiable-prediction-discipline` (don't change
@@ -96,7 +96,7 @@ Cumulative loss ≥ $30, OR Markov gate fires twice in 7 days.
 budget tracking and treat this strategy as Phase-1 NO-GO until
 fundamental redesign.
 
-## Six candidate cycle-2 hypotheses
+## Seven candidate cycle-2 hypotheses
 
 Each is a SEPARATE experiment, not a layered set. Pick one per cycle.
 
@@ -191,6 +191,39 @@ decision?
 
 **Risk:** Likely cheap (mostly investigation, not new code).
 
+### H7 — Bot startup-failure handling (resilience)
+**Trigger:** cycle-1 had ≥1 incident where the bot entered a restart
+storm (more than 5 restarts within 5 minutes due to preflight failure).
+
+**Grounding:** 2026-04-28 16:08 UTC daily-restart loaded fresh modules
+and the CLOB get_balance() call returned 0. systemd's
+`Restart=always` policy retried every 13s, hammering Polymarket's
+auth endpoint with `create_or_derive_api_creds()` calls on every
+attempt. ~150 retries in ~30 min plausibly triggered Polymarket's
+rate-limit, which compounded the original failure into a sustained
+crash loop. The bot was masked manually to break the storm. On-chain
+balance ($94.89) was confirmed intact; the wallet was never drained.
+
+**Cycle-2 instrumentation/policy change:** Modify
+`/etc/systemd/system/lagbot@.service` (template) to use:
+- `Restart=on-failure` (instead of `always`) — does not retry on
+  clean exits, only after non-zero exit
+- `StartLimitBurst=3` and `StartLimitIntervalSec=300` — at most 3
+  restarts in 5 minutes; after that, systemd marks the unit as failed
+  and stops retrying
+- `RestartSec=30s` (instead of 10s) — reduces hammer rate
+- Optional: `ExecStartPre=` that does its own retry-with-backoff for
+  CLOB auth, separate from systemd's restart loop
+
+**Cycle-2 question:** Does removing the retry-storm prevent
+cascade-style auth lockouts? And does max-retries-then-fail surface
+the original failure to the operator faster than masking?
+
+**Risk:** Touches systemd at the unit-template level — affects all
+lagbot@ instances (emmanuel, polyphemus, chudi). Must be tested in
+shadow on polyphemus before applying to emmanuel. Reversible via
+`mv lagbot@.service.bak lagbot@.service` + `systemctl daemon-reload`.
+
 ## Pre-commitment table (cycle-1 → cycle-2 mapping)
 
 | Cycle-1 finding | Triggers cycle-2 hypothesis |
@@ -201,6 +234,7 @@ decision?
 | adverse_fill_bps in [10, 25] | H4 mid-drift sampler |
 | ≥ 5 time_exit trades | H5 MAE/MFE sampling |
 | fill_latency_ms always 0.0 | H6 fill-latency verification |
+| ≥1 restart storm (>5 restarts in 5 min) during cycle-1 | H7 startup-failure resilience |
 
 If MULTIPLE triggers fire at cycle-1 close, pick the one whose
 cycle-2 hypothesis has the highest **leverage × cost ratio**. The
