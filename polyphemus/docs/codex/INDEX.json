@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-04-27T21:05:46Z",
+  "generated_at": "2026-04-28T07:52:10Z",
   "nodes": {
     "accumulator-state": {
       "file": "nodes/accumulator-state.md",
@@ -272,7 +272,7 @@
         "shadow-mode"
       ],
       "confidence": "inferred",
-      "last_verified": "2026-04-27T21:05:46Z"
+      "last_verified": "2026-04-27T21:28:51Z"
     },
     "config-governance": {
       "file": "nodes/config-governance.md",
@@ -848,6 +848,31 @@
       "confidence": "inferred",
       "last_verified": "2026-04-26T06:37:41Z"
     },
+    "sharp-move-cycle-2-design": {
+      "file": "nodes/sharp-move-cycle-2-design.md",
+      "domain": "methodology",
+      "name": "Sharp Move Cycle-2 Design (post-tiny-live experiment)",
+      "aliases": [
+        "cycle-2",
+        "sharp_move cycle 2",
+        "next experiment",
+        "tiny-live followup",
+        "cycle-2 instrumentation",
+        "post-n=30 design"
+      ],
+      "related": [
+        "sharp-move-tiny-live-experiment",
+        "sharp-move-alpha-decay-backtest",
+        "test-to-live-haircut",
+        "falsifiable-prediction-discipline",
+        "codebase-reliability-coverage",
+        "adverse-selection",
+        "regime-detector",
+        "mtc-gate"
+      ],
+      "confidence": "inferred",
+      "last_verified": null
+    },
     "sharp-move-tiny-live-experiment": {
       "file": "nodes/sharp-move-tiny-live-experiment.md",
       "domain": "trading-strategies",
@@ -1119,6 +1144,7 @@
     "methodology": [
       "codebase-reliability-coverage",
       "falsifiable-prediction-discipline",
+      "sharp-move-cycle-2-design",
       "test-to-live-haircut"
     ],
     "infrastructure": [
