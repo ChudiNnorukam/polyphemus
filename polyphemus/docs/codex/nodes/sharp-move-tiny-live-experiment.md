@@ -29,7 +29,7 @@ related:
 parent_concepts:
 - sharp-move
 child_concepts: []
-last_verified: '2026-04-26T05:25:30Z'
+last_verified: '2026-04-26T05:32:01Z'
 confidence: inferred
 ---
 
@@ -54,10 +54,11 @@ The experiment does NOT bypass the existing safety harness; it applies it to rea
 1. After 30 real-fill trades across ≥2 disjoint regime windows, Wilson lower bound on win rate ≥ 0.50
 2. Mean `adverse_fill_bps` across those 30 trades < 30 bps
 3. No infra-failure trades (per P4) in the count
+4. **Execution rate** (`executed / (executed + execution_failed)` for BTC sharp_move signals reaching the order layer, measured via `tools/execution_rate_report.py`) reported alongside WR at n=30 close. Below 0.50 ⇒ verdict downgrades from PROMOTE-eligible to EXTEND-only because selection bias on filled trades dominates. Added 2026-04-27 after day-1 triage measured 0.35; this prediction was retroactively pre-committed before n=8 to close the selection-bias hole flagged by the test-to-live-haircut node.
 
-If any of these fail → **kill** sharp_move on emmanuel (set `ENABLE_SHARP_MOVE=false`).
-If all three hold AND mean WR ≥ 0.55 AND mean adverse_fill_bps < 15 → **promote** to `MAX_TRADE_AMOUNT=10`.
-If all three hold but the stronger promotion criteria don't → **continue at $4/trade for 30 more trades** before deciding.
+If predictions 1-3 fail → **kill** sharp_move on emmanuel (set `ENABLE_SHARP_MOVE=false`).
+If 1-3 hold AND mean WR ≥ 0.55 AND mean adverse_fill_bps < 15 AND execution_rate ≥ 0.50 → **promote** to `MAX_TRADE_AMOUNT=10`.
+If 1-3 hold but execution_rate < 0.50 OR the stronger promotion criteria don't → **continue at $4/trade for 30 more trades** before deciding.
 
 ## Budget (hard-capped)
 
