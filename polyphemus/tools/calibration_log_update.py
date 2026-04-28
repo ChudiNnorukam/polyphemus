@@ -71,6 +71,24 @@ def wilson_lb(wins: int, n: int, z: float = 1.96) -> float:
     return (centre - margin) / denom
 
 
+FG_BUCKETS = [
+    ("extreme_fear", 0, 25),
+    ("fear", 26, 45),
+    ("neutral", 46, 55),
+    ("greed", 56, 75),
+    ("extreme_greed", 76, 100),
+]
+
+
+def _fg_bucket(fg: float | None) -> str:
+    if fg is None:
+        return "unknown"
+    for name, lo, hi in FG_BUCKETS:
+        if lo <= fg <= hi:
+            return name
+    return "out_of_range"
+
+
 def query_actuals() -> dict:
     """Compute current actuals against the live VPS."""
     # Trades since tiny-live activation
@@ -131,6 +149,40 @@ def query_actuals() -> dict:
     btc_order_attempts = btc_executed + btc_failed
     execution_rate = btc_executed / btc_order_attempts if btc_order_attempts else None
 
+    # Per-fill regime + spread breakdown (FREE wins — already-instrumented fields)
+    breakdown_q = (
+        "SELECT fg_at_entry, book_spread_at_entry, pnl FROM trades "
+        f"WHERE entry_time > strftime('%s', '{TINY_LIVE_START}') "
+        "  AND signal_source IN ('sharp_move', 'binance_momentum') "
+        "  AND is_dry_run = 0 AND exit_time IS NOT NULL;"
+    )
+    fg_buckets: dict[str, dict] = {}
+    spread_buckets: dict[str, dict] = {}
+    for line in ssh_sqlite(PERF_DB, breakdown_q).strip().splitlines():
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        fg = _num(parts[0], float, None)
+        sp = _num(parts[1], float, None)
+        pl = _num(parts[2], float, 0.0)
+        win = pl > 0
+        # FG regime bucket
+        fb = _fg_bucket(fg)
+        fg_buckets.setdefault(fb, {"n": 0, "wins": 0, "pnl": 0.0})
+        fg_buckets[fb]["n"] += 1
+        fg_buckets[fb]["wins"] += 1 if win else 0
+        fg_buckets[fb]["pnl"] += pl
+        # Spread bucket: tight ≤ 0.01, wide > 0.01
+        sb = "unknown" if sp is None else ("tight" if sp <= 0.01 else "wide")
+        spread_buckets.setdefault(sb, {"n": 0, "wins": 0, "pnl": 0.0})
+        spread_buckets[sb]["n"] += 1
+        spread_buckets[sb]["wins"] += 1 if win else 0
+        spread_buckets[sb]["pnl"] += pl
+    for buckets in (fg_buckets, spread_buckets):
+        for k, v in buckets.items():
+            v["wr"] = round(v["wins"] / v["n"], 4) if v["n"] else None
+            v["pnl"] = round(v["pnl"], 4)
+
     raw_wr = wins / n if n else None
     wlb = wilson_lb(wins, n) if n else None
     return {
@@ -149,6 +201,8 @@ def query_actuals() -> dict:
             "order_attempts": btc_order_attempts,
         },
         "execution_rate": round(execution_rate, 4) if execution_rate is not None else None,
+        "by_fg_regime": fg_buckets,
+        "by_spread": spread_buckets,
     }
 
 
@@ -275,6 +329,18 @@ def main() -> int:
             in_band = d.get("in_band")
             pressure = ",".join(d.get("verdict_pressure", []))
             print(f"  {metric:<28} actual={actual}  in_band={in_band}  pressure={pressure}")
+
+        # Free-win breakdowns
+        fg = actuals.get("by_fg_regime", {}) or {}
+        sp = actuals.get("by_spread", {}) or {}
+        if fg:
+            print("\n  by FG regime:")
+            for bucket, v in sorted(fg.items()):
+                print(f"    {bucket:<14} n={v['n']:>2}  WR={v.get('wr')}  pnl={v['pnl']:+.2f}")
+        if sp:
+            print("\n  by spread:")
+            for bucket, v in sorted(sp.items()):
+                print(f"    {bucket:<14} n={v['n']:>2}  WR={v.get('wr')}  pnl={v['pnl']:+.2f}")
 
     if not args.no_append:
         append_row(row)
